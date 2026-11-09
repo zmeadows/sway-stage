@@ -19,6 +19,8 @@ read-only Sway IPC example is also available.
 Building requires Rust 1.89 or newer (edition 2024):
 
 ```sh
+git clone https://github.com/zmeadows/sway-stage.git
+cd sway-stage
 cargo build --locked
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings

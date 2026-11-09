@@ -81,8 +81,7 @@ neither tool is required by unrelated commands and capture never issues mutation
 ## 4. First Linux release
 
 Review actual behavior against the specification, update README with working usage, and
-document demonstrated limitations. The project uses the MIT license; choose a repository
-URL before publishing.
+document demonstrated limitations. The MIT license and repository URL are set.
 Add a small tagged-release workflow after the behavior is validated; reuse CI checks.
 
 Complete when precompiled Linux archives and checksums can be reproduced from a tag,
@@ -155,5 +154,5 @@ framework, or a process supervision system at this stage.
 - App IDs/classes cannot prove launch causality, and IPC cannot make observation and
   mutation atomic. Test conservative aborts; do not disguise these limits as recoverable
   placement errors. No live-session checks were performed during repository setup.
-- Hosting URL, supported Sway version, and Linux ABI baseline remain
-  unset. Cargo publishing stays disabled until release metadata and behavior are ready.
+- Supported Sway version and Linux ABI baseline remain unset. Cargo publishing stays
+  disabled until release behavior is ready.

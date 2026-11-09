@@ -6,9 +6,10 @@ rust-version = "1.89"
 description = "A lightweight declarative workspace launcher for Sway"
 readme = "README.md"
 license = "MIT"
+repository = "https://github.com/zmeadows/sway-stage"
 keywords = ["sway", "wayland", "workspace", "layout", "launcher"]
 categories = ["command-line-utilities"]
-# Revisit when the project has a repository URL and a usable release.
+# Revisit when the project has a usable release.
 publish = false
 
 [lints.clippy]
