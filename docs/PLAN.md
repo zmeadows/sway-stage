@@ -3,8 +3,32 @@
 Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
 modules only as implemented responsibilities justify them. The
 [specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. All milestones below are pending. The initial repository contains
-documentation, format/lint conventions, Linux CI, and a dependency-free placeholder.
+engineering decisions. All numbered milestones below are pending. The main executable
+remains a dependency-free placeholder.
+
+## Preliminary step: read-only IPC inspection
+
+Implemented before milestone 1: `cargo run --example inspect_sway` uses synchronous
+`swayipc` 4.0.0 to query workspaces, identify the focused workspace by container ID in the
+full tree, and display its layout, occupancy, and nested tiled/floating hierarchy without
+window titles. Both child lists must be empty for the workspace to count as empty.
+`SWAYSOCK` is required: construct a `Connection` from a `UnixStream` to avoid
+`Connection::new()` preferring `I3SOCK` or spawning socket-discovery processes.
+
+This development example issues only `GET_WORKSPACES` and `GET_TREE`. It does not
+implement a public CLI command or any layout-engine behavior. The two queries are not
+atomic; a missing target or focus observed outside it fails, but switches away and back
+are not detected. Event history and bounded observation remain milestone 2 work.
+Build/lint checks and temporary fake-socket checks passed, including nested/floating
+trees, optional metadata, occupancy, and failure paths. Live Sway behavior is unverified;
+manual inspection is still required.
+
+Tree/API findings: `Node::id` identifies every Sway container, while `Node::window` is an
+optional X11 window ID. App IDs and Xwayland classes are optional, and a workspace's
+`focused` flag need not be true when a descendant has focus. Traverse `nodes` and
+`floating_nodes` explicitly, preserving order and split wrappers. Sway's `percent` is
+parent-area share, not the normalized sibling dimension required for future layout
+weights; it may be absent. The example labels this distinction as `parent_area`.
 
 ## 1. Layout validation and discovery
 
@@ -65,16 +89,27 @@ static linking, other platforms, or untested compositor versions.
 
 ## Dependency review
 
-No runtime or development dependencies are added yet. Candidates reviewed against their
-upstream documentation on 2026-11-09:
+Dependencies and remaining candidates reviewed against their upstream documentation on
+2026-11-09:
 
 | Need | Candidate and decision |
 | --- | --- |
 | CLI | [Clap 4](https://github.com/clap-rs/clap) with derive; upstream currently declares Rust 1.85. Add with the first CLI. |
 | Typed YAML | [Serde](https://serde.rs/) and [serde-saphyr](https://github.com/bourumir-wyngs/serde-saphyr). The latter documents Rust 1.89 with CI coverage, resource budgets, and serialization for capture. Evaluate strict duplicate-key/alias handling and minimal features in milestone 1 before selecting a release. |
-| Native synchronous IPC | [swayipc 4](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs). Its published dependencies are Serde, serde_json, and swayipc-types; it has a multi-year release history. Candidate only until bounded waits, event history, and the locked graph on 1.89 are demonstrated. |
+| Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs), added as a development dependency for inspection. Its direct dependencies are Serde, serde_json, and swayipc-types. The locked graph compiles on Rust 1.89; bounded waits and event history still need proof before construction. |
 | Launching and optional tools | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, async runtime, or Fuzzel crate. Bound helper-process waits. |
 | Diagnostics and errors | Begin with standard-library I/O and contextual errors; add a logging/error crate only if concrete implementation needs justify it. |
+
+The inspection example resolves 15 dependency packages including `swayipc` and
+`swayipc-types` 2.0.3. The latter also pulls in `thiserror` 2 and Serde derive macros;
+the graph includes their proc-macro dependencies and JSON formatting/parsing helpers.
+`swayipc` has no selectable features; its types enable Serde derive, serde_json's
+`unbounded_depth`, and default error support. No async runtime is included. Both IPC
+crates are MIT licensed and declare no MSRV; the locked graph was checked with the
+installed Rust 1.89.0 toolchain. Transitive licenses are permissive MIT/Apache-2.0 (with
+Unlicense/MIT for memchr and an additional Unicode-3.0 license for unicode-ident).
+Manifest/feature review and the [RustSec advisory index](https://rustsec.org/advisories/)
+review found no applicable advisories; this is not a security guarantee.
 
 Do not use archived [serde_yaml](https://github.com/dtolnay/serde-yaml) for a new project.
 Recent releases and a compatible declared MSRV are useful evidence, not a maintenance or

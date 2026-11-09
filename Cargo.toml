@@ -16,3 +16,6 @@ todo = "warn"
 unimplemented = "warn"
 
 [dependencies]
+
+[dev-dependencies]
+swayipc = "4.0.0"
