@@ -1,0 +1,32 @@
+# Illustration of the PLANNED format; YAML loading is not implemented yet.
+# See docs/SPECIFICATION.md. Adapt executable names and IDs to your installation.
+# Mirrors sway_four_windows.py: Firefox, middle Foot, then two right-hand Foot windows.
+# Unlike the script's PID suffixes, these explicit IDs are stable. Only new windows match.
+version: 1
+focus: browser # Optional; the first leaf is also the default.
+layout:
+  split: horizontal
+  children:
+    - id: browser
+      weight: 44
+      command: [firefox-esr, --new-window]
+      match:
+        app_id: firefox-esr
+    - id: middle
+      weight: 32
+      command: [foot, --app-id=sway-stage-middle]
+      match:
+        app_id: sway-stage-middle
+    - split: vertical
+      weight: 24
+      children:
+        - id: upper-right
+          weight: 77
+          command: [foot, --app-id=sway-stage-top]
+          match:
+            app_id: sway-stage-top
+        - id: lower-right
+          weight: 23
+          command: [foot, --app-id=sway-stage-bottom]
+          match:
+            app_id: sway-stage-bottom

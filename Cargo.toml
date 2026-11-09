@@ -2,5 +2,17 @@
 name = "sway-stage"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "A lightweight declarative workspace launcher for Sway"
+readme = "README.md"
+keywords = ["sway", "wayland", "workspace", "layout", "launcher"]
+categories = ["command-line-utilities"]
+# Revisit when the project has a license, repository URL, and a usable release.
+publish = false
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [dependencies]
