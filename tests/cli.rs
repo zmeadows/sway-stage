@@ -28,6 +28,7 @@ impl Fixture {
         command
             .current_dir(&self.path)
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_STATE_HOME")
             .env("HOME", &self.path)
             .env_remove("SWAYSOCK")
             .env_remove("I3SOCK")
@@ -59,6 +60,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec![],
         vec!["--help"],
         vec!["check", "--help"],
+        vec!["load", "--help"],
         vec!["--version"],
     ] {
         let output = fixture
@@ -73,7 +75,7 @@ fn help_version_and_usage_do_not_need_configuration() {
     }
     for args in [
         vec!["check"],
-        vec!["load", "x"],
+        vec!["load"],
         vec!["pick"],
         vec!["capture"],
         vec!["--bogus"],
@@ -260,4 +262,121 @@ fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
     fixture.file("big.yaml", &"x".repeat(1024 * 1024 + 10));
     let output = fixture.run(&["--layouts-dir", ".", "check", "big"], 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("1 MiB"));
+}
+
+#[test]
+fn load_rejects_general_layouts_before_ipc_and_writes_private_last_run_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.file("nested.yaml", "version: 1\nlayout: {split: horizontal, children: [{id: a, command: [not-installed], match: {app_id: a}}, {id: b, command: [not-installed], match: {app_id: b}}]}\n");
+    fixture.file("good.yaml", WINDOW);
+    let log = fixture.path.join(".local/state/sway-stage/last-run.log");
+    for expected in [
+        "nested layout execution is not yet implemented",
+        "SWAYSOCK is unset",
+    ] {
+        let name = if expected.starts_with("nested") {
+            "nested"
+        } else {
+            "good"
+        };
+        let output = fixture.run(&["--layouts-dir", ".", "load", name], 1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(stderr.contains("log:"), "{stderr}");
+        assert!(output.stdout.is_empty());
+        let contents = fs::read_to_string(&log).unwrap();
+        assert!(contents.contains(expected), "{contents}");
+        assert!(!contents.contains("not-installed"));
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!fixture.path.join("launches").exists());
+    }
+    assert!(
+        !fs::read_to_string(&log)
+            .unwrap()
+            .contains("nested layout execution")
+    );
+    // A previous log cannot redirect this run into a different file.
+    fixture.file("private-target", "unchanged");
+    fs::remove_file(&log).unwrap();
+    std::os::unix::fs::symlink(fixture.path.join("private-target"), &log).unwrap();
+    fixture.run(&["--layouts-dir", ".", "load", "missing"], 1);
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("private-target")).unwrap(),
+        "unchanged"
+    );
+    assert!(!fs::symlink_metadata(&log).unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.file("good.yaml", WINDOW);
+    fixture.file(
+        "notify-send",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_RECORD\"\n",
+    );
+    fs::set_permissions(
+        fixture.path.join("notify-send"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .env("XDG_STATE_HOME", fixture.path.join("state"))
+        .env("PATH", &fixture.path)
+        .env("NOTIFY_RECORD", fixture.path.join("notification"))
+        .args(["--layouts-dir", ".", "load", "good"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+    assert!(
+        notification.contains("--app-name=sway-stage\n--urgency=critical\n"),
+        "{notification}"
+    );
+    assert!(notification.contains("SWAYSOCK is unset"));
+    assert!(!notification.contains("does-not-need-to-exist"));
+    assert!(fixture.path.join("state/sway-stage/last-run.log").exists());
+
+    let output = fixture
+        .command()
+        .env("XDG_STATE_HOME", "relative")
+        .args(["--layouts-dir", ".", "load", "good"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("logging unavailable"), "{stderr}");
+    assert!(stderr.contains("SWAYSOCK is unset"), "{stderr}");
+    assert!(stderr.contains("notification unavailable"), "{stderr}");
+}
+
+#[test]
+fn notification_helper_has_a_bounded_wait() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.file("good.yaml", WINDOW);
+    fixture.file("notify-send", "#!/bin/sh\nexec /bin/sleep 10\n");
+    fs::set_permissions(
+        fixture.path.join("notify-send"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    let output = fixture
+        .command()
+        .env("PATH", &fixture.path)
+        .args(["--layouts-dir", ".", "load", "good"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("two-second deadline"), "{stderr}");
+    assert!(stderr.contains("SWAYSOCK is unset"), "{stderr}");
 }

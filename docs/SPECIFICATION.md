@@ -1,9 +1,12 @@
 # sway-stage specification
 
 This is the authoritative behavioral contract for the initial implementation. Layout
-discovery, `list`, and `check` are implemented; Sway operations and the remaining commands
-are planned. A development-only read-only IPC example is described in the
-[README](../README.md). The YAML format may be revised before its first release, with this
+discovery, `list`, `check`, and single-root-window `load` are implemented. Nested layout
+execution, sizing, final focus commands, capture, and the picker remain planned. The
+loading algorithm below describes the complete intended engine; Milestone 2B launches
+and verifies one window without issuing layout or focus commands. Read-only IPC examples
+and manual launch instructions are described in the [README](../README.md).
+The YAML format may be revised before its first release, with this
 document and examples updated together.
 
 ## Purpose and scope
@@ -124,6 +127,15 @@ output only: `check` and `load` reject them with instructions to fill them in. A
 otherwise follows the same format. There is no executable fallback or command inference.
 
 ## Loading and safety
+
+Current execution accepts only a root window, such as
+[`examples/single-foot.yaml`](../examples/single-foot.yaml). A split root is fully
+validated, then rejected before IPC or application launch. General layouts still validate
+with `check`. Single-window acceptance requires the sole direct tiled workspace child,
+no floating children, and a known non-fullscreen state. The implementation conservatively
+aborts on window move events because their IPC payloads omit workspace ancestry; it also
+refuses new-window close events and structural activity during prelaunch reconciliation.
+These guards may abort for activity elsewhere rather than assume safe history.
 
 Construction has no transaction or rollback. Safety takes precedence over completing a
 layout. The target is the focused workspace observed after validation, identified by its

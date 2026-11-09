@@ -1,4 +1,4 @@
-//! Development-only observation boundary for the future loader. No desktop mutations.
+//! Bounded, ordered Sway observation. No desktop mutations.
 
 use std::collections::HashSet;
 use std::net::Shutdown;
@@ -300,6 +300,10 @@ impl Drop for Observer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "observation_fixtures.rs"]
+pub(crate) mod fixtures;
 
 #[cfg(test)]
 #[path = "observation_tests.rs"]

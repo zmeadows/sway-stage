@@ -3,7 +3,8 @@
 Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
 modules only as implemented responsibilities justify them. The
 [specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. Milestones 1 and 2A are implemented; 2B–4 remain pending.
+engineering decisions. Milestones 1, 2A, and 2B are implemented; 2C–4 remain pending.
+Live Sway behavior remains manually unverified.
 
 ## Preliminary step: read-only IPC inspection
 
@@ -48,7 +49,8 @@ build, and locked Rust 1.89 compilation pass. Hosted CI has not been run in this
 ## 2A. Reliable event observation
 
 Implemented as the development-only `cargo run --example observe_sway`, with its concrete
-observation component in `examples/support/observation.rs`. The existing `inspect_sway`
+observation component originally in `examples/support/observation.rs` (moved unchanged
+into `src/observation.rs` for 2B). The existing `inspect_sway`
 example and Milestone 1 CLI behavior are unchanged. The new example observes for ten
 seconds, periodically querying fresh state, and exits on lost observation or focus. It
 does not require an empty workspace or accept window ownership; those are loader guards
@@ -125,7 +127,8 @@ queued event order/fences, idle and expired deadlines, later events, fragmented 
 and payloads across idle deadlines, malformed/unknown/truncated frames, EOF, subscription
 failure/stalls, queue overflow, query failure/stalls, missing/rejected fences, inconsistent
 snapshots, delayed identity metadata without events, and idle/partial-read shutdown.
-The example's test harness is enabled so ordinary `cargo test --locked` runs these tests.
+These tests now run in the binary harness so ordinary `cargo test --locked` runs them
+once; the observation example imports the same source module.
 `serde_json` is now an explicit development dependency for fixtures; it was already
 locked through `swayipc`, with no new packages or production dependencies.
 Local formatting, Clippy with warnings denied, all-target compilation, all 32 tests,
@@ -135,19 +138,115 @@ they still used only disposable socket pairs. Hosted CI and live Sway remain unv
 
 ## 2B. Safe single-window launching and diagnostics
 
-Pending. Move the proven observation boundary into the binary when it has a production
-caller. Implement guarded `load` for one window, keeping process launches separate from
-Sway command strings. Add stage logging and bounded best-effort notifications with this
-first load path. Establish tiled/floating emptiness and global preexisting identities,
-then launch once and observe with periodic snapshots and event-history guards.
+Implemented: `load NAME` supports only a validated root window. Split roots are rejected
+before IPC or launching. `src/launch.rs` owns the concrete synchronous launch/acceptance
+sequence, `src/diagnostics.rs` owns operational logging/notifications, and the existing
+observer now lives in `src/observation.rs`. The development observation example imports
+that exact module by path, preserving the single binary crate and avoiding duplicate
+implementations. Shared socket-pair/JSON fixture helpers were extracted to
+`src/observation_fixtures.rs`; the original 2A tests moved alongside the observer.
+`swayipc` 4.0.0 is now a production dependency. No new packages or lockfile resolution
+changes were needed; the previously reviewed dependency graph is unchanged.
 
-Complete when recorded trees/events and simulated IPC replies verify occupied-workspace
-refusal, global new-window matching, delayed app IDs, repeated selectors, ambiguous and
-wrong-workspace windows, floating/unexpected windows, workspace switches, application
-timeouts, IPC failures, accepted-window loss, and partial failure without cleanup or
-relaunch. No mutation may target preexisting windows. No automated test connects to the
-user's Sway socket. Revisit the decoding limitations above if the required trust boundary
-extends beyond a normal local compositor.
+The production sequence is:
+
+1. Resolve discovery, read/fully validate YAML, and reject unsupported execution shapes.
+2. Subscribe before any snapshot; freeze the focused workspace by container ID.
+3. Require both child lists empty and retain all global container IDs. Reconcile a second
+   fenced empty-workspace snapshot, retaining the union of prelaunch IDs and event IDs.
+   Structural window activity during these fences is conservatively fatal.
+4. Spawn exactly once through `Command`, preserving argv, child PATH/cwd and inherited
+   environment with child-only overrides. Resolve explicit relative executable paths
+   against effective cwd. Use null standard streams and a separate child process group
+   so terminal interrupts directed at the launcher do not also signal the application.
+5. Within a checked monotonic deadline, poll fresh fenced trees with 100 ms idle
+   intervals while consuming ordered events. Individual IPC waits have a two-second bound.
+   Process exit is diagnostic only: delegation is allowed. Exited children are reaped
+   when observed; live children are never waited on, killed, or relaunched.
+6. Inspect new IDs globally; exact app ID/class equality must identify only one ID across
+   observed history. Delayed/missing identity can wait, but conflicting known identities,
+   wrong workspace/scratchpad, floating/fullscreen, preexisting target entries, and
+   unexpected target windows fail. New-window diagnostic history is capped at 256 IDs.
+7. Provisionally identify the sole direct tiled child; then require a fresh verification
+   of the same ID, hierarchy, identity and known non-fullscreen state through a fence
+   without intervening window activity. Events newer than their tree cannot establish
+   successful final verification. Focus loss, accepted-window loss, and uncertain IPC
+   history stop the run without cleanup. No Sway command strings are sent.
+
+Window event payloads omit workspace ancestry. Move-away-and-back history cannot be
+reconstructed from a later tree. For now *any* window move event aborts, including foreign
+moves elsewhere; new-window close events also abort rather than guess where the window
+was. Prelaunch structural events abort even when elsewhere. These conservative false
+positives are intentional and documented; unrelated stable windows elsewhere are ignored.
+Changing layout/container structure on the target is never repaired. Continuous window
+activity can prevent final verification and exhaust the configured deadline.
+
+Source review on 2026-11-09: Sway's
+[`cmd_exec_process`](https://github.com/swaywm/sway/blob/master/sway/commands/exec_always.c)
+creates an internal launcher context, exports its token as `XDG_ACTIVATION_TOKEN` and
+(normally) `DESKTOP_STARTUP_ID`, records a launch PID, and invokes `sh -c`.
+[`launcher_ctx_create_internal` and PID lookup](https://github.com/swaywm/sway/blob/master/sway/desktop/launcher.c)
+associate that context with the seat's focused workspace and can find it through process
+ancestry. The
+[`select_workspace`/`view_map` path](https://github.com/swaywm/sway/blob/master/sway/tree/view.c)
+checks assignment criteria and launcher context before falling back to seat focus;
+fullscreen output requests can also influence placement. This is a source-level
+conclusion from upstream master, not a supported-version or live-behavior claim.
+
+Direct `Command` does not create that token/context. Inference from the source: a simple
+new client without assignments/context should land on current focus at mapping time,
+but freezing our target does not bind the compositor's placement choice. Existing
+inherited activation variables, ancestor launch contexts, single-instance/delegating
+applications, assignment rules, and application activation behavior can affect it.
+Environment inheritance is preserved; no token is fabricated, stripped, or rewritten.
+Wrong placement is observed globally and fails without moving anything. A delegated
+request that only reuses an existing window cannot succeed. Distinctive app IDs improve
+matching but never prove causal ownership against an indistinguishable concurrent launch.
+No shell-based Sway exec or workspace-placement workaround was added. Verify Foot and
+keybinding/terminal launch contexts manually using the README's disposable-session steps.
+
+Each load invocation replaces the XDG state last-run log with a newly created 0600 file
+(unlink plus exclusive create avoids following an existing log symlink or retaining old
+permissions/hard links). Newly created directories use 0700. Logs have wall-clock epoch
+and elapsed timestamps, stage/leaf/target, occupancy, expected/observed identities and IDs,
+placement and process status. They omit titles, full argv and environment values; external
+text is escaped to retain record boundaries. File/log failures fall back to stderr.
+Fatal errors include stage, layout, cause, retry guidance and log path when available;
+`notify-send` is attempted with literal arguments, null streams, and a two-second wait.
+Only a stuck notification helper is terminated. Missing tools, bad state paths and
+notification failures never replace the original error. Help/list/check remain independent.
+
+Manual single-Foot feedback exposed a fixture gap: Sway serializes `fullscreen_mode: 1`
+on every workspace, even when its tiled windows are not fullscreen. The collector had
+incorrectly inherited that value as window state. Fullscreen inheritance now applies
+only to `con`/`floating_con` nodes, while the window itself must still report mode 0.
+Shared fixtures now include realistic workspace fullscreen metadata; regressions cover
+the reported tiled Foot sequence and actual fullscreen-container inheritance. The
+[Sway workspace serializer](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c)
+confirms the unconditional workspace value. The user reports a successful end-to-end
+single-Foot launch after the fix. This verifies that manual case; broader compositor
+behavior and the supported Sway version remain unverified.
+
+Automated coverage now includes 14 observer test groups, 15 launch test groups, 12 config
+test groups and 9 CLI/filesystem groups. The launch fixture supplies disposable sockets
+and harmless child scripts, running real process spawning plus the full observer/loader
+sequence. It covers empty/occupied containers, delayed identity without events, exact
+Xwayland classes, preexisting matches elsewhere, wrong workspace/scratchpad, ambiguous
+matches, unrelated/preexisting target windows, floating ancestry/fullscreen/unknown state,
+focus-away-and-back, disconnects, stale trees versus close/move/identity/second-match events,
+accepted-window loss, timeouts, spawn failure, child PATH/cwd/argv/env semantics, delegation,
+and failure without application termination or retry. CLI fixtures verify unsupported
+layout refusal before IPC, private log replacement and symlink handling, XDG/fallback
+failures, literal notifications and helper timeouts. The existing observer overflow,
+fragmentation and fence fixtures continue to cover lost/uncertain history.
+
+Local formatting, Clippy with warnings denied, locked all-target compilation, all 50 tests,
+release build and locked Rust 1.89 all-target compilation pass. The sandbox denies socket
+timeout configuration, so socket tests run with approved escalation while still using
+only disposable socket pairs. No live compositor connections or desktop operations were
+performed. Hosted CI, live placement/activation, multi-seat behavior, and a supported Sway
+version remain unverified. Existing upstream decoding/socket-establishment limits from 2A
+still apply. Milestone 2C remains pending.
 
 ## 2C. Nested layout construction, sizing, and final focus
 
@@ -195,7 +294,7 @@ Dependencies and remaining candidates reviewed against their upstream documentat
 | CLI | [Clap 4.6.7](https://docs.rs/clap/4.6.7/clap/) with derive, std, help, usage, and error-context; default features disabled. Declares Rust 1.85. |
 | Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with only deserialize enabled. The parser declares Rust 1.89. No serialization, comments, include, interpolation, robotics, or validation-framework features are enabled. |
 | Field diagnostics | [serde_path_to_error 0.1.20](https://docs.rs/serde_path_to_error/0.1.20/serde_path_to_error/) supplies paths for nested deserialization errors; declares Rust 1.61 and adds only already-used Serde core/itoa dependencies. |
-| Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs), remains a development dependency. Its direct dependencies are Serde, serde_json, and swayipc-types. The locked graph compiles on Rust 1.89. Milestone 2A proves channel deadlines, cancellable blocking reads, and ordered event fences with fixtures; decoding limitations are recorded above. |
+| Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs), is now a production dependency (2B). Its direct dependencies are Serde, serde_json, and swayipc-types. The locked graph compiles on Rust 1.89. Milestone 2A proves channel deadlines, cancellable blocking reads, and ordered event fences with fixtures; decoding limitations are recorded above. |
 | Launching and optional tools | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, async runtime, or Fuzzel crate. Bound helper-process waits. |
 | Diagnostics and errors | Begin with standard-library I/O and contextual errors; add a logging/error crate only if concrete implementation needs justify it. |
 
@@ -243,8 +342,8 @@ framework, or a process supervision system at this stage.
 
 ## Remaining decisions and proof points
 
-- Milestone 2A proves bounded event observation with fixtures; 2B/2C must still prove
-  race-aware launch/mutation sequencing and reconcile event history with fresh snapshots.
+- Milestone 2A proves bounded event observation with fixtures; 2B adds fenced single-window
+  acceptance. 2C must extend race-aware guards to layout mutation and sizing.
   Strict wire-validation limits and unbounded socket establishment remain documented above.
 - App IDs/classes cannot prove launch causality, and IPC cannot make observation and
   mutation atomic. Test conservative aborts; do not disguise these limits as recoverable

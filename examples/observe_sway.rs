@@ -1,4 +1,4 @@
-#[path = "support/observation.rs"]
+#[path = "../src/observation.rs"]
 mod observation;
 
 use std::env;
