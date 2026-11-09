@@ -24,4 +24,9 @@ serde-saphyr = { version = "2.1.1", default-features = false, features = ["deser
 serde_path_to_error = "0.1"
 
 [dev-dependencies]
+serde_json = "1.0"
 swayipc = "4.0.0"
+
+[[example]]
+name = "observe_sway"
+test = true
