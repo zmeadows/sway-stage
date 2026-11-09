@@ -21,6 +21,11 @@ use swayipc::{
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OBSERVED_LIMIT: usize = 256;
+// Include floating-point rounding at the exact five-percentage-point boundary.
+const SIZE_TOLERANCE: f64 = 0.05 + f64::EPSILON;
+const SIZE_PASSES: usize = 3;
+// Less than a tenth of a percentage point of improvement is not worth another pass.
+const SIZE_PROGRESS: f64 = 0.001;
 
 pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String> {
     let socket = env::var_os("SWAYSOCK")
@@ -28,7 +33,9 @@ pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String
         .ok_or("connect: SWAYSOCK is unset or empty; run inside Sway")?;
     let mut connect =
         || UnixStream::connect(&socket).map_err(|error| format!("connect to SWAYSOCK: {error}"));
-    load_with(config, &mut connect, diagnostics)
+    let warnings = load_with(config, &mut connect, diagnostics)?;
+    diagnostics.sizing_warnings(&warnings);
+    Ok(())
 }
 
 // Concrete socket injection keeps all fixture traffic disconnected from socket discovery.
@@ -36,7 +43,7 @@ fn load_with(
     config: &Config,
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
@@ -60,11 +67,23 @@ fn load_with(
         expected,
         timeout_ms: config.window_timeout_ms,
     };
-    session.build(&config.layout.value, None)?;
+    let root = session.build(&config.layout.value, None)?;
     session
         .diagnostics
-        .record("construction complete; weights and final focus remain pending (2C.2)");
-    Ok(())
+        .record("construction complete; applying weights from outer splits inward");
+    let mut warnings = Vec::new();
+    session.size(&config.layout.value, &root, &mut warnings)?;
+    let (logical, path) = focus_path(&config.layout.value, config.focus.as_deref(), &root)
+        .ok_or("validated final focus window missing from layout")?;
+    let id = session.expected.at_mut(&path).id();
+    session
+        .diagnostics
+        .stage(format!("final focus leaf={logical:?} id={id}"));
+    session.focus(&path)?;
+    session.diagnostics.record(&format!(
+        "final focus verified leaf={logical:?} id={id} workspace={target}"
+    ));
+    Ok(warnings)
 }
 
 // The workspace is the outer Split. Structural IDs are bound from the first verified
@@ -241,6 +260,130 @@ impl<'a> Construction<'a> {
             .is_some_and(|n| n.focused)
         {
             return Err(format!("explicit focus id={id} was not observed"));
+        }
+        Ok(())
+    }
+
+    fn size(
+        &mut self,
+        node: &crate::config::Node,
+        path: &[usize],
+        warnings: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let NodeKind::Split { split, children } = &node.kind else {
+            return Ok(());
+        };
+        let id = self.expected.at_mut(path).id();
+        let axis = match split {
+            Orientation::Horizontal => "width",
+            Orientation::Vertical => "height",
+        };
+        let weights: Vec<_> = children.iter().map(|child| child.value.weight).collect();
+        let targets = proportions(&weights);
+        self.diagnostics
+            .stage(format!("sizing group={id} path={path:?} axis={axis}"));
+        self.diagnostics.record(&format!(
+            "weights={weights:?}; targets={}; tolerance=5 percentage points",
+            shares(&targets)
+        ));
+        let mut snapshot = self.settled()?;
+        let mut limitation = None;
+        for pass in 0..SIZE_PASSES {
+            let geometry = sibling_geometry(&snapshot.tree, id, split);
+            let (dimensions, observed) = match geometry {
+                Ok(geometry) => geometry,
+                Err(reason) => {
+                    limitation = Some(reason);
+                    break;
+                }
+            };
+            let before_error = sizing_error(&targets, &observed);
+            self.diagnostics.record(&format!(
+                "pass={} before dimensions={dimensions:?}; observed={}",
+                pass + 1,
+                shares(&observed)
+            ));
+            if before_error <= SIZE_TOLERANCE {
+                break;
+            }
+
+            // resize set changes every other sibling as well. Recalculate each next
+            // target from the resulting tree, never from a stale percent property.
+            for index in 0..children.len() {
+                let (dimensions, observed) = match sibling_geometry(&snapshot.tree, id, split) {
+                    Ok(geometry) => geometry,
+                    Err(reason) => {
+                        limitation = Some(reason);
+                        break;
+                    }
+                };
+                if sizing_error(&targets, &observed) <= SIZE_TOLERANCE {
+                    break;
+                }
+                if (targets[index] - observed[index]).abs() <= SIZE_TOLERANCE {
+                    continue;
+                }
+                let pixels = (targets[index] * dimensions.iter().sum::<f64>()).round();
+                // Zero means "leave unchanged" to resize set. Do not invent a
+                // minimum size or override Sway/application constraints.
+                if pixels < 1.0 || pixels == dimensions[index] {
+                    continue;
+                }
+                let mut child_path = path.to_vec();
+                child_path.push(index);
+                let child_id = self.expected.at_mut(&child_path).id();
+                snapshot = self.command(
+                    format!("[con_id={child_id}] resize set {axis} {pixels:.0} px"),
+                    self.expected.clone(),
+                )?;
+                match sibling_geometry(&snapshot.tree, id, split) {
+                    Ok((_, observed)) => self.diagnostics.record(&format!(
+                        "pass={} after child={child_id}; observed={}",
+                        pass + 1,
+                        shares(&observed)
+                    )),
+                    Err(reason) => {
+                        limitation = Some(reason);
+                        break;
+                    }
+                }
+            }
+            if limitation.is_some() {
+                break;
+            }
+            let (_, observed) = sibling_geometry(&snapshot.tree, id, split)?;
+            let after_error = sizing_error(&targets, &observed);
+            if after_error <= SIZE_TOLERANCE {
+                break;
+            }
+            // Includes unchanged geometry at minimum sizes and cycles that return
+            // to the same error. Never repeat a pass without meaningful progress.
+            if before_error - after_error < SIZE_PROGRESS {
+                self.diagnostics
+                    .record("stopping sizing: no meaningful progress");
+                break;
+            }
+        }
+        let residual = if let Some(reason) = limitation {
+            Some(format!("observed=unavailable ({reason})"))
+        } else {
+            let (_, observed) = sibling_geometry(&snapshot.tree, id, split)?;
+            (sizing_error(&targets, &observed) > SIZE_TOLERANCE)
+                .then(|| format!("observed={}", shares(&observed)))
+        };
+        if let Some(residual) = residual {
+            let warning = format!(
+                "sizing group={id} path={path:?} axis={axis}: targets={}; {residual}; bounded adjustment stopped (tolerance 5 percentage points)",
+                shares(&targets)
+            );
+            self.diagnostics.record(&format!("warning: {warning}"));
+            warnings.push(warning);
+        }
+
+        for (index, child) in children.iter().enumerate() {
+            let mut child_path = path.to_vec();
+            child_path.push(index);
+            self.size(&child.value, &child_path, warnings)?;
         }
         Ok(())
     }
@@ -470,6 +613,84 @@ impl<'a> Construction<'a> {
             while let Some(event) = self.observer.next_until(poll)? {
                 windows.event(&event, self.diagnostics)?;
             }
+        }
+    }
+}
+
+fn proportions(weights: &[f64]) -> Vec<f64> {
+    let total: f64 = weights.iter().sum();
+    weights.iter().map(|weight| weight / total).collect()
+}
+
+fn sizing_error(targets: &[f64], observed: &[f64]) -> f64 {
+    targets
+        .iter()
+        .zip(observed)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max)
+}
+
+fn shares(values: &[f64]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|v| format!("{:.2}%", v * 100.0))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+// Call only after verifying the complete owned hierarchy. Use container rects,
+// which include decorations, rather than content geometry or parent-area percent.
+fn sibling_geometry(
+    tree: &Node,
+    id: i64,
+    split: &Orientation,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let group = tree
+        .find_as_ref(|node| node.id == id)
+        .ok_or("sizing group missing")?;
+    let dimensions: Vec<_> = group
+        .nodes
+        .iter()
+        .map(|child| {
+            f64::from(match split {
+                Orientation::Horizontal => child.rect.width,
+                Orientation::Vertical => child.rect.height,
+            })
+        })
+        .collect();
+    if dimensions.len() < 2 || dimensions.iter().any(|dimension| *dimension <= 0.0) {
+        return Err(format!(
+            "nonpositive or missing sibling dimensions: {dimensions:?}"
+        ));
+    }
+    if dimensions.iter().sum::<f64>() > f64::from(i32::MAX) {
+        return Err("sibling dimensions exceed Sway's integer resize range".into());
+    }
+    let observed = proportions(&dimensions);
+    Ok((dimensions, observed))
+}
+
+fn focus_path<'a>(
+    node: &'a crate::config::Node,
+    requested: Option<&str>,
+    path: &[usize],
+) -> Option<(&'a str, Vec<usize>)> {
+    match &node.kind {
+        NodeKind::Window { id, .. } => requested
+            .is_none_or(|wanted| wanted == id)
+            .then(|| (id.as_str(), path.to_vec())),
+        NodeKind::Split { children, .. } => {
+            for (index, child) in children.iter().enumerate() {
+                let mut child_path = path.to_vec();
+                child_path.push(index);
+                if let Some(found) = focus_path(&child.value, requested, &child_path) {
+                    return Some(found);
+                }
+            }
+            None
         }
     }
 }

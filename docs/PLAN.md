@@ -3,9 +3,11 @@
 Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
 modules only as implemented responsibilities justify them. The
 [specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. Milestones 1, 2A, 2B, and 2C.1 are implemented. Sizing/final focus (2C.2) and
-milestones 3–4 remain pending. The user has manually verified the single-Foot, two-Foot,
-and four-window Firefox/Foot layouts on Sway; broader compositor behavior remains unverified.
+engineering decisions. Milestones 1, 2A, 2B, 2C.1, and 2C.2 are implemented; milestones
+3–4 remain pending. The user has manually verified construction of the single-Foot,
+two-Foot, and four-window Firefox/Foot layouts on Sway. The user's four-window inspector
+output confirms Firefox focus and parent-area values consistent with the sizing tolerance;
+precise axis measurements and broader compositor behavior remain unverified.
 
 ## Preliminary step: read-only IPC inspection
 
@@ -315,23 +317,79 @@ The sandbox denied socket timeout setup, so IPC tests used approved escalation a
 disposable socket pairs. No packages or toolchains were installed. Insertion focus is
 rechecked before each subsequent spawn; interference stops before launching another app.
 
-Weights and final focus remain validated but unapplied. Manual two-Foot and four-window
-checks are documented in the README. The user reports that both the two-Foot and
-four-window Firefox/Foot manual checks passed. This confirms those construction cases;
-arbitrary layouts, live interference/abort behavior, multi-seat behavior, and a supported
+Weights and final focus were validated but unapplied in 2C.1; 2C.2 below implements them.
+Manual two-Foot and four-window checks are documented in the README. The user reports
+that both the two-Foot and four-window Firefox/Foot manual checks passed. This confirms
+those construction cases; arbitrary layouts, live interference/abort behavior, multi-seat behavior, and a supported
 Sway version remain unverified. The agent performed no live Sway operations. The code
-is ready for 2C.2 work.
+was the starting point for 2C.2.
 
 ## 2C.2. Proportional sizing and final focus
 
-Pending. Apply relative weights from outer splits inward, verify tolerance with bounded
-adjustment, then explicitly focus the configured or first leaf by accepted ID. Preserve
-the same observation session, ownership checks, hierarchy validation and failure behavior.
-No resizing or final-focus selection is part of 2C.1.
+Implemented in `src/launch.rs` after full hierarchy construction. Each split computes
+child weight / sibling weight sum; the root's own weight is unused. Outer groups are
+sized before nested groups, preserving meaningful equal-axis groups and sibling order.
+Each adjustment targets a verified child container ID, including structural groups;
+the workspace itself is never a resize target.
 
-An isolated manual Sway check must reproduce the reference's hierarchy, proportions and
-final focus and test abort behavior before declaring the combined milestone complete.
-Do not build a generic backend/plugin framework to accommodate tests.
+Source review on 2026-11-09 of Sway
+[`resize.c`](https://github.com/swaywm/sway/blob/master/sway/commands/resize.c)
+(and the 1.10 tag) found that tiled `resize set ... ppt` converts against the nearest
+ancestor with the requested axis, or the workspace. Width/height resizing redistributes
+the delta equally among other siblings and can succeed without changing geometry at
+minimum sizes. Therefore setting every child's percentage once does not establish a
+multi-child ratio. The implementation uses explicit `px` targets calculated from fresh
+sibling rectangle dimensions, normalized by their sum, and remeasures after each command.
+[`arrange.c`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c) accounts for
+gaps and integer rounding; [`ipc-json.c`](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c)
+reports container rectangles and parent-area `percent`. No screen size, content size,
+or `percent` value is used to infer axis shares. These source findings do not establish
+compatibility with an installed Sway version.
+
+Each split gets at most three passes, visiting each child at most once per pass. Children
+within five absolute percentage points are skipped; sizing stops once all are acceptable.
+A pass must reduce maximum share error by at least 0.1 percentage point to continue,
+preventing repeated stagnant or cyclic passes. Minimum sizes are left to Sway. Zero or
+negative dimensions and dimensions beyond Sway's integer command range are reported as
+unavailable geometry. Residual deviations and measurement limitations produce warnings
+with group/path, targets and observed shares (or the measurement reason). Warnings are
+logged, printed to stderr and consolidated into one normal-urgency `notify-send` after
+successful final focus. Notification failure remains secondary and bounded to two seconds.
+
+Sizing/focus reuse the same observer, exact-ID commands, complete hierarchy and accepted
+identity checks before and after every mutation. Geometry changes alone do not change
+the expected hierarchy. No event exemption, ownership relaxation, additional IPC client,
+or construction rewrite was added. All command errors, focus-away history, structural
+changes and uncertain observation still fail immediately without cleanup.
+
+Final focus walks the YAML in depth-first order, selecting the configured ID or first
+leaf, and resolves its path through the verified hierarchy. The existing focus operation
+rechecks all ownership/placement and observation guards, checks every command reply, and
+requires a fresh fenced snapshot with that exact accepted window focused. Logs include
+the logical ID, Sway ID and successful focus verification.
+
+Offline socket fixtures cover unequal two/three-child splits, redistribution over multiple
+passes, already-close shares (including the exact tolerance boundary), root weight and
+parent-area independence, minimum-size no-ops, stalled progress, the three-pass cap,
+unavailable geometry, nested groups on both sides, equal-axis nesting, the four-window
+reference, explicit/default focus and incorrect focus. Failure fixtures inject focus
+away-and-back, missing/relocated windows, foreign descendants, reordered hierarchy,
+new/move events, failed replies and disconnected observation during sizing/focus. Successful
+transcripts must consume all expected steps. Notifications are not sent by these fixtures.
+
+No dependencies or lockfile changes. Local formatting, Clippy with warnings denied,
+locked all-target check, all 68 tests (59 unit/IPC and 9 CLI), locked release build and
+locked Rust 1.89.0 all-target check pass. IPC fixtures require approved escalation because
+the sandbox denies socket timeout setup; they use only disposable socket pairs. No live
+Sway operations, package installations or toolchain installations were performed.
+
+Implementation and offline verification are complete. The user's four-window inspector
+output shows the intended hierarchy and Firefox focused, with parent-area values consistent
+with the sizing tolerance. Precise normalized axis measurements and live abort behavior
+remain pending; commands and read-only measurements are in the README. The existing IPC races,
+conservative event aborts, launch-causality, decoder/socket-establishment, multi-seat and
+supported-version limitations remain. No persistent enforcement or automatic retry is
+provided.
 
 ## 3. Capture and optional picker
 
@@ -417,7 +475,8 @@ exists to preserve the success flag discarded by the upstream API.
 ## Remaining decisions and proof points
 
 - Milestone 2A proves bounded event observation with fixtures; 2B adds fenced single-window
-  acceptance. 2C.1 extends those guards to construction; 2C.2 must preserve them during sizing.
+  acceptance. 2C.1 extends those guards to construction; 2C.2 preserves them during sizing
+  and final focus, with precise sizing measurements and live abort checks pending.
   Strict wire-validation limits and unbounded socket establishment remain documented above.
 - App IDs/classes cannot prove launch causality, and IPC cannot make observation and
   mutation atomic. Test conservative aborts; do not disguise these limits as recoverable

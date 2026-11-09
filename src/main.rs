@@ -12,7 +12,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(version, about = "Validate and construct nested Sway layouts")]
 #[command(
-    after_help = "Load constructs tiled hierarchies with default sizing. Weights, final focus, capture, and the picker are not implemented yet."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing tolerates 5 percentage points after at most three passes per split. Capture and the picker are not implemented yet."
 )]
 struct Cli {
     /// Read layouts from PATH instead of the XDG configuration directory
@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Construct a layout on the focused empty Sway workspace
+    /// Construct a weighted tiled layout and select final focus on the focused empty workspace
     Load {
         /// Layout name (the YAML filename without its extension)
         name: String,

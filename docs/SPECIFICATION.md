@@ -1,10 +1,8 @@
 # sway-stage specification
 
 This is the authoritative behavioral contract for the initial implementation. Layout
-discovery, `list`, `check`, and single-window/nested `load` construction are implemented.
-Sizing, final focus selection, capture, and the picker remain planned. Milestone 2C.1
-constructs hierarchy with ordinary Sway default sizing; weights and `focus` are validated
-but not applied until 2C.2. The loading algorithm below includes those planned phases.
+discovery, `list`, `check`, and single-window/nested `load` with proportional sizing and
+final focus selection are implemented. Capture and the picker remain planned.
 Read-only IPC examples and manual verification instructions are in the [README](../README.md).
 The YAML format may be revised before its first release, with this
 document and examples updated together.
@@ -177,10 +175,10 @@ fixed; never create, select, rename, or assign a workspace on the user's behalf.
    verifying observed structure as construction proceeds. Any accepted window closing,
    leaving the target, becoming floating/fullscreen, or unexpected hierarchy changes, aborts.
    Do not relaunch or repair around interference.
-6. Verify final leaf order and split hierarchy. **Pending 2C.2:** apply weights from outer
+6. Verify final leaf order and split hierarchy. Apply weights from outer
    splits inward. Bound adjustment to at most three passes per split; read the actual tree
    after sizing. Each IPC command must have replies and every reply must succeed.
-7. **Pending 2C.2:** recheck all safety conditions and focus `focus`, or the first depth-first
+7. Recheck all safety conditions and focus `focus`, or the first depth-first
    window by default, using its accepted container ID. Then exit; there is no ongoing enforcement.
 
 Direct mutations must target only accepted windows and containers whose window descendants
@@ -203,9 +201,6 @@ Sway commands and event/tree reads are not atomic together. Minimize race window
 fresh guards and stop on observed interference; do not promise transaction-like isolation.
 
 ## Sizing and focus
-
-This section is planned for Milestone 2C.2. Current execution uses default sizes and
-leaves construction focus in place; it does not implement the default or explicit final focus.
 
 Compute desired proportions independently for each sibling set using its weights. Compare
 observed sibling dimensions on that axis, normalized by their sum, with desired shares.

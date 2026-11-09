@@ -36,13 +36,44 @@ impl Fixture {
     }
 
     fn run(&self, config: &Config, steps: Vec<Step>) -> Result<(), String> {
+        self.exchange(steps, |connect, diagnostics| {
+            load_with(config, connect, diagnostics).map(|_| ())
+        })
+    }
+
+    fn run_finished(&self, config: &Config, mut steps: Vec<Step>) -> Result<(), String> {
+        let tree = steps.last().unwrap().tree.clone();
+        fn sizing(steps: &mut Vec<Step>, tree: &Value, node: &crate::config::Node) {
+            if let NodeKind::Split { children, .. } = &node.kind {
+                steps.push(step(tree.clone()));
+                for child in children {
+                    sizing(steps, tree, &child.value);
+                }
+            }
+        }
+        sizing(&mut steps, &tree, &config.layout.value);
+        final_focus_steps(&mut steps, &tree, 20);
+        self.run(config, steps)
+    }
+
+    fn exchange(
+        &self,
+        steps: Vec<Step>,
+        action: impl FnOnce(
+            &mut dyn FnMut() -> Result<UnixStream, String>,
+            &mut Diagnostics,
+        ) -> Result<(), String>,
+    ) -> Result<(), String> {
         let (event_client, mut events) = pair();
         let (requests, sockets) = mpsc::channel();
+        let expected_steps = steps.len();
         let server = thread::spawn(move || {
+            let mut consumed = 0;
             let subscription: Value = serde_json::from_slice(&request(&mut events, 2)).unwrap();
             assert_eq!(subscription, json!(["workspace", "window", "tick"]));
             send(&mut events, 2, json!({"success": true}));
             for (index, mut socket) in sockets.into_iter().enumerate() {
+                consumed += 1;
                 let step = &steps[index.min(steps.len() - 1)];
                 if let Some((command, replies)) = &step.command {
                     assert_eq!(
@@ -58,7 +89,7 @@ impl Fixture {
                 request(&mut socket, 1);
                 if step.disconnect {
                     drop(events);
-                    return;
+                    return consumed;
                 }
                 send(&mut socket, 1, workspaces());
                 request(&mut socket, 4);
@@ -70,6 +101,7 @@ impl Fixture {
                 send(&mut events, TICK, json!({"first": false, "payload": token}));
                 send(&mut socket, 10, json!({"success": true}));
             }
+            consumed
         });
         let mut event_client = Some(event_client);
         let mut connect = || {
@@ -84,9 +116,15 @@ impl Fixture {
         };
         // Avoid global environment changes or operational files outside the fixture.
         let mut diagnostics = Diagnostics::for_test(self.path.join("last-run.log"));
-        let result = load_with(config, &mut connect, &mut diagnostics);
+        let result = action(&mut connect, &mut diagnostics);
         drop(requests);
-        server.join().unwrap();
+        let consumed = server.join().unwrap();
+        if result.is_ok() {
+            assert!(
+                consumed >= expected_steps,
+                "unconsumed successful transcript steps"
+            );
+        }
         result
     }
 
@@ -168,7 +206,9 @@ fn fails(fixture: &Fixture, steps: Vec<Step>, expected: &str) {
 fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation() {
     let fixture = Fixture::new();
     let original_path = env::var_os("PATH");
-    fixture.run(&fixture.config(), successful_steps()).unwrap();
+    fixture
+        .run_finished(&fixture.config(), successful_steps())
+        .unwrap();
     assert_eq!(fixture.launches(), 1);
     let limit = deadline();
     let settings = loop {
@@ -224,7 +264,7 @@ fn delayed_identity_without_event_and_existing_matching_window_elsewhere() {
             old,
         )),
     ];
-    fixture.run(&fixture.config(), steps).unwrap();
+    fixture.run_finished(&fixture.config(), steps).unwrap();
     assert_eq!(fixture.launches(), 1);
 }
 
@@ -338,7 +378,7 @@ fn event_newer_than_tree_requires_another_snapshot_and_final_window_must_remain(
     ));
     let mut steps = successful_steps();
     steps.insert(2, stale);
-    fixture.run(&fixture.config(), steps).unwrap();
+    fixture.run_finished(&fixture.config(), steps).unwrap();
     let fixture = Fixture::new();
     let mut steps = successful_steps();
     *steps.last_mut().unwrap() = step(tree());
@@ -391,7 +431,7 @@ fn spawn_failure_does_not_retry_and_child_path_lookup_is_used() {
     };
     command[0] = "app".into();
     env.insert("PATH".into(), fixture.path.to_str().unwrap().into());
-    fixture.run(&config, successful_steps()).unwrap();
+    fixture.run_finished(&config, successful_steps()).unwrap();
     assert_eq!(fixture.launches(), 1);
 }
 
@@ -433,7 +473,7 @@ fn exact_xwayland_class_matching_and_global_floating_ancestry() {
     window["window_properties"] = json!({"class": "ExactClass"});
     let target = with_target(vec![window.clone()]);
     fixture
-        .run(
+        .run_finished(
             &config,
             vec![
                 step(tree()),
@@ -498,7 +538,7 @@ fn workspace_fullscreen_metadata_does_not_mark_tiled_child_fullscreen() {
         json!({"change": "new", "container": window.clone()}),
     ));
     fixture
-        .run(
+        .run_finished(
             &fixture.config(),
             vec![
                 step(tree()),
@@ -534,13 +574,13 @@ fn group(id: i64, layout: &str, children: Vec<Value>) -> Value {
     value["nodes"] = json!(children);
     value
 }
-fn arranged(layout: &str, children: Vec<Value>, focused: i64) -> Value {
-    fn focus_only(value: &mut Value, id: i64) {
-        value["focused"] = json!(value["id"] == id);
-        for child in value["nodes"].as_array_mut().unwrap() {
-            focus_only(child, id);
-        }
+fn focus_only(value: &mut Value, id: i64) {
+    value["focused"] = json!(value["id"] == id);
+    for child in value["nodes"].as_array_mut().unwrap() {
+        focus_only(child, id);
     }
+}
+fn arranged(layout: &str, children: Vec<Value>, focused: i64) -> Value {
     let mut value = with_target(children);
     value["nodes"][0]["nodes"][0]["layout"] = json!(layout);
     focus_only(&mut value, focused);
@@ -557,6 +597,11 @@ fn operation(steps: &mut Vec<Step>, command: &str, before: &Value, after: &Value
         command_step(command),
         step(after.clone()),
     ]);
+}
+fn final_focus_steps(steps: &mut Vec<Step>, before: &Value, id: i64) {
+    let mut after = before.clone();
+    focus_only(&mut after, id);
+    operation(steps, &format!("[con_id={id}] focus"), before, &after);
 }
 fn launch_steps(steps: &mut Vec<Step>, before: &Value, after: &Value) {
     steps.extend([
@@ -584,7 +629,7 @@ fn window(id: i64) -> Value {
     view(id, Some("expected"))
 }
 fn finish(fixture: &Fixture, config: &Config, steps: Vec<Step>, count: usize) {
-    fixture.run(config, steps).unwrap();
+    fixture.run_finished(config, steps).unwrap();
     let limit = deadline();
     loop {
         let text = fs::read_to_string(fixture.path.join("launches")).unwrap_or_default();
@@ -996,7 +1041,7 @@ fn four_window_reference_transcript_uses_three_root_children() {
         ],
         22,
     );
-    let e = arranged(
+    let mut e = arranged(
         "splith",
         vec![
             views[0].clone(),
@@ -1005,6 +1050,16 @@ fn four_window_reference_transcript_uses_three_root_children() {
         ],
         23,
     );
+    set_dimension(&mut e, 10, "width", 1220); // two 10px inner gaps
+    set_dimension(&mut e, 10, "height", 1000);
+    for id in [20, 21, 100] {
+        set_dimension(&mut e, id, "width", 400);
+        set_dimension(&mut e, id, "height", 1000);
+    }
+    for id in [22, 23] {
+        set_dimension(&mut e, id, "width", 400);
+        set_dimension(&mut e, id, "height", 500);
+    }
     let mut steps = vec![step(tree())];
     launch_steps(&mut steps, &tree(), &a);
     operation(&mut steps, "[con_id=20] splith", &a, &a);
@@ -1015,11 +1070,37 @@ fn four_window_reference_transcript_uses_three_root_children() {
     operation(&mut steps, "[con_id=22] splitv", &c, &d);
     operation(&mut steps, "[con_id=22] focus", &d, &d);
     launch_steps(&mut steps, &d, &e);
+    steps.push(step(e.clone())); // root sizing inspection
+    let mut sized_root = e.clone();
+    set_dimension(&mut sized_root, 20, "width", 528);
+    set_dimension(&mut sized_root, 21, "width", 336);
+    set_dimension(&mut sized_root, 100, "width", 336);
+    set_dimension(&mut sized_root, 22, "width", 336);
+    set_dimension(&mut sized_root, 23, "width", 336);
+    operation(
+        &mut steps,
+        "[con_id=20] resize set width 528 px",
+        &e,
+        &sized_root,
+    );
+    steps.push(step(sized_root.clone())); // nested sizing inspection
+    let mut sized = sized_root.clone();
+    set_dimension(&mut sized, 22, "height", 770);
+    set_dimension(&mut sized, 23, "height", 230);
+    operation(
+        &mut steps,
+        "[con_id=22] resize set height 770 px",
+        &sized_root,
+        &sized,
+    );
+    final_focus_steps(&mut steps, &sized, 20);
     fixture.run(&config, steps).unwrap();
     let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
-    assert!(log.contains("weights and final focus remain pending"));
-    // The configured browser focus and unequal weights issue no extra commands:
-    // the transcript ends immediately after hierarchy verification.
+    assert!(log.contains("weights=[44.0, 32.0, 24.0]"));
+    assert!(log.contains("targets=[44.00%, 32.00%, 24.00%]"));
+    assert!(log.contains("observed=[44.00%, 28.00%, 28.00%]"));
+    assert!(log.contains("targets=[77.00%, 23.00%]"));
+    assert!(log.contains("final focus verified leaf=\\\"browser\\\" id=20"));
     let limit = deadline();
     while fixture.launches() != 4 {
         assert!(Instant::now() < limit);
@@ -1102,5 +1183,512 @@ fn insertion_focus_interference_is_detected_before_spawning() {
     while fixture.launches() != 2 {
         assert!(Instant::now() < limit);
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn set_dimension(tree: &mut Value, id: i64, axis: &str, pixels: i32) {
+    if tree["id"] == id {
+        tree["rect"][axis] = json!(pixels);
+    }
+    for child in tree["nodes"].as_array_mut().unwrap() {
+        set_dimension(child, id, axis, pixels);
+    }
+}
+
+// Start at a completed, owned hierarchy to exercise sizing/focus independently of
+// insertion transcripts. All observation and command traffic still uses real sockets.
+fn completed_session(
+    fixture: &Fixture,
+    config: &Config,
+    steps: Vec<Step>,
+    action: impl FnOnce(&mut Construction<'_>) -> Result<(), String>,
+) -> Result<(), String> {
+    fixture.exchange(steps, |connect, diagnostics| {
+        let mut observer = Observer::subscribe(connect()?, deadline())?;
+        let initial = observer.snapshot(connect()?, deadline())?;
+        let workspace = initial
+            .tree
+            .find_as_ref(|n| n.id == initial.target)
+            .unwrap();
+        fn owned<'a>(
+            config: &'a crate::config::Node,
+            actual: &Node,
+            accepted: &mut BTreeMap<i64, &'a Matcher>,
+        ) -> Hierarchy {
+            match &config.kind {
+                NodeKind::Window { matcher, .. } => {
+                    accepted.insert(actual.id, matcher);
+                    Hierarchy::Window(actual.id)
+                }
+                NodeKind::Split { children, .. } => Hierarchy::Split(
+                    Some(actual.id),
+                    actual.layout,
+                    children
+                        .iter()
+                        .zip(&actual.nodes)
+                        .map(|(child, actual)| owned(&child.value, actual, accepted))
+                        .collect(),
+                ),
+            }
+        }
+        let mut accepted = BTreeMap::new();
+        let expected = owned(&config.layout.value, workspace, &mut accepted);
+        let mut session = Construction {
+            observer,
+            connect,
+            diagnostics,
+            target: initial.target,
+            existing: HashSet::new(),
+            accepted,
+            expected,
+            timeout_ms: config.window_timeout_ms,
+        };
+        session.verify(&initial)?;
+        action(&mut session)
+    })
+}
+
+fn weighted(fixture: &Fixture, id: usize, weight: f64) -> String {
+    leaf(fixture, id).replacen("{id:", &format!("{{weight: {weight}, id:"), 1)
+}
+
+fn sizes(layout: &str, dimensions: &[i32]) -> Value {
+    let mut tree = arranged(
+        layout,
+        (0..dimensions.len())
+            .map(|i| window(20 + i as i64))
+            .collect(),
+        20,
+    );
+    for (index, size) in dimensions.iter().enumerate() {
+        set_dimension(
+            &mut tree,
+            20 + index as i64,
+            if layout == "splith" {
+                "width"
+            } else {
+                "height"
+            },
+            *size,
+        );
+    }
+    tree
+}
+
+#[test]
+fn two_sibling_weights_use_dimensions_and_ignore_root_weight_and_percent() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{weight: 999, split: horizontal, children: [{}, {}]}}",
+            weighted(&fixture, 0, 3.0),
+            weighted(&fixture, 1, 1.0)
+        ),
+    );
+    let mut before = sizes("splith", &[300, 700]);
+    // The parent is only a viewport; gaps/borders and parent-area values do not
+    // enter the denominator. Sway's content dimensions are not container sizes.
+    before["nodes"][0]["nodes"][0]["rect"]["width"] = json!(1100);
+    before["nodes"][0]["nodes"][0]["nodes"][0]["percent"] = json!(0.9);
+    before["nodes"][0]["nodes"][0]["nodes"][1]["percent"] = json!(0.1);
+    let mut after = before.clone();
+    set_dimension(&mut after, 20, "width", 750);
+    set_dimension(&mut after, 21, "width", 250);
+    let mut steps = vec![step(before.clone()), step(before.clone())];
+    operation(
+        &mut steps,
+        "[con_id=20] resize set width 750 px",
+        &before,
+        &after,
+    );
+    completed_session(&fixture, &config, steps, |session| {
+        let mut warnings = Vec::new();
+        session.size(&config.layout.value, &[], &mut warnings)?;
+        assert!(warnings.is_empty());
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{split: horizontal, children: [{}, {}, {}]}}",
+            weighted(&fixture, 0, 20.0),
+            weighted(&fixture, 1, 30.0),
+            weighted(&fixture, 2, 50.0)
+        ),
+    );
+    let a = sizes("splith", &[600, 200, 200]);
+    let b = sizes("splith", &[200, 400, 400]);
+    let c = sizes("splith", &[250, 300, 450]);
+    // Exactly 5 percentage points is acceptable for both affected children.
+    let mut steps = vec![step(a.clone()), step(a.clone())];
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &a, &b);
+    operation(&mut steps, "[con_id=21] resize set width 300 px", &b, &c);
+    completed_session(&fixture, &config, steps, |session| {
+        let mut warnings = Vec::new();
+        session.size(&config.layout.value, &[], &mut warnings)?;
+        assert!(warnings.is_empty());
+        Ok(())
+    })
+    .unwrap();
+
+    // Recorded responses may make only partial progress (constraints/rounding).
+    // Never assume an accepted resize achieved its requested pixel dimension.
+    let a = sizes("splith", &[600, 200, 200]);
+    let b = sizes("splith", &[480, 260, 260]);
+    let c = sizes("splith", &[400, 260, 340]);
+    let d = sizes("splith", &[320, 300, 380]);
+    let e = sizes("splith", &[260, 280, 460]);
+    let f = sizes("splith", &[220, 300, 480]);
+    let mut steps = vec![step(a.clone()), step(a.clone())];
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &a, &b);
+    operation(&mut steps, "[con_id=22] resize set width 500 px", &b, &c);
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &c, &d);
+    operation(&mut steps, "[con_id=22] resize set width 500 px", &d, &e);
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &e, &f);
+    completed_session(&fixture, &config, steps, |session| {
+        let mut warnings = Vec::new();
+        session.size(&config.layout.value, &[], &mut warnings)?;
+        assert!(warnings.is_empty());
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn minimum_constraints_stagnation_and_three_pass_limit_warn_without_failing() {
+    for stagnant in [true, false] {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{}, {}]}}",
+                weighted(&fixture, 0, 90.0),
+                weighted(&fixture, 1, 10.0)
+            ),
+        );
+        let mut current = sizes("splith", &[500, 500]);
+        let mut steps = vec![step(current.clone()), step(current.clone())];
+        for pass in 0..if stagnant { 1 } else { 3 } {
+            for (id, target) in [(20, 900), (21, 100)] {
+                let next = if stagnant {
+                    current.clone()
+                } else {
+                    let amount = 510 + pass * 20 + if id == 21 { 10 } else { 0 };
+                    sizes("splith", &[amount, 1000 - amount])
+                };
+                operation(
+                    &mut steps,
+                    &format!("[con_id={id}] resize set width {target} px"),
+                    &current,
+                    &next,
+                );
+                current = next;
+            }
+        }
+        completed_session(&fixture, &config, steps, |session| {
+            let mut warnings = Vec::new();
+            session.size(&config.layout.value, &[], &mut warnings)?;
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("group=10"));
+            assert!(warnings[0].contains("targets=[90.00%, 10.00%]"));
+            assert!(warnings[0].contains(if stagnant {
+                "observed=[50.00%, 50.00%]"
+            } else {
+                "observed=[56.00%, 44.00%]"
+            }));
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
+    for (dimensions, warning) in [
+        ([750, 250], false),
+        ([700, 300], false),
+        ([0, 1000], true),
+        ([-1, 1000], true),
+    ] {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{}, {}]}}",
+                weighted(&fixture, 0, 3.0),
+                weighted(&fixture, 1, 1.0)
+            ),
+        );
+        let tree = sizes("splith", &dimensions);
+        completed_session(
+            &fixture,
+            &config,
+            vec![step(tree.clone()), step(tree)],
+            |session| {
+                let mut warnings = Vec::new();
+                session.size(&config.layout.value, &[], &mut warnings)?;
+                assert_eq!(!warnings.is_empty(), warning);
+                if warning {
+                    assert!(warnings[0].contains("observed=unavailable"));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn nested_groups_are_sized_outer_first_including_equal_axes() {
+    for equal_axis in [false, true] {
+        let fixture = Fixture::new();
+        let axis = if equal_axis { "horizontal" } else { "vertical" };
+        let layout = if equal_axis { "splith" } else { "splitv" };
+        let dimension = if equal_axis { "width" } else { "height" };
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{{weight: 3, split: {axis}, children: [{}, {}]}}, {{split: vertical, children: [{}, {}]}}]}}",
+                weighted(&fixture, 0, 3.0),
+                weighted(&fixture, 1, 1.0),
+                weighted(&fixture, 2, 1.0),
+                weighted(&fixture, 3, 3.0)
+            ),
+        );
+        let mut a = arranged(
+            "splith",
+            vec![
+                group(100, layout, vec![window(20), window(21)]),
+                group(101, "splitv", vec![window(22), window(23)]),
+            ],
+            23,
+        );
+        set_dimension(&mut a, 10, "width", 1000);
+        set_dimension(&mut a, 10, "height", 800);
+        for id in [100, 101] {
+            set_dimension(&mut a, id, "width", 500);
+            set_dimension(&mut a, id, "height", 800);
+        }
+        for id in [20, 21, 22, 23] {
+            set_dimension(
+                &mut a,
+                id,
+                "width",
+                if equal_axis && id < 22 { 250 } else { 500 },
+            );
+            set_dimension(
+                &mut a,
+                id,
+                "height",
+                if equal_axis && id < 22 { 800 } else { 400 },
+            );
+        }
+        let mut b = a.clone();
+        set_dimension(&mut b, 100, "width", 750);
+        set_dimension(&mut b, 101, "width", 250);
+        for id in [20, 21] {
+            set_dimension(&mut b, id, "width", if equal_axis { 375 } else { 750 });
+        }
+        for id in [22, 23] {
+            set_dimension(&mut b, id, "width", 250);
+        }
+        let mut c = b.clone();
+        set_dimension(&mut c, 20, dimension, if equal_axis { 563 } else { 600 });
+        set_dimension(&mut c, 21, dimension, if equal_axis { 187 } else { 200 });
+        let mut d = c.clone();
+        set_dimension(&mut d, 22, "height", 200);
+        set_dimension(&mut d, 23, "height", 600);
+        let mut steps = vec![step(a.clone()), step(a.clone())];
+        operation(&mut steps, "[con_id=100] resize set width 750 px", &a, &b);
+        steps.push(step(b.clone()));
+        operation(
+            &mut steps,
+            &format!(
+                "[con_id=20] resize set {dimension} {} px",
+                if equal_axis { 563 } else { 600 }
+            ),
+            &b,
+            &c,
+        );
+        steps.push(step(c.clone()));
+        operation(&mut steps, "[con_id=22] resize set height 200 px", &c, &d);
+        completed_session(&fixture, &config, steps, |session| {
+            let mut warnings = Vec::new();
+            session.size(&config.layout.value, &[], &mut warnings)?;
+            assert!(warnings.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn sizing_interference_and_ipc_errors_are_fatal_even_when_sizes_are_nonfatal() {
+    for scenario in 0..9 {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{}, {}]}}",
+                weighted(&fixture, 0, 3.0),
+                weighted(&fixture, 1, 1.0)
+            ),
+        );
+        let a = sizes("splith", &[500, 500]);
+        let b = sizes("splith", &[750, 250]);
+        let mut steps = vec![
+            step(a.clone()),
+            step(a.clone()),
+            step(a.clone()),
+            command_step("[con_id=20] resize set width 750 px"),
+            step(b.clone()),
+        ];
+        let last = steps.len() - 1;
+        let expected = match scenario {
+            0 => {
+                steps[last - 1].command.as_mut().unwrap().1 =
+                    json!([{"success": false, "error": "resize rejection"}]);
+                "resize rejection"
+            }
+            1 => {
+                steps[last].events = vec![(WORKSPACE, focus(11, 10)), (WORKSPACE, focus(10, 11))];
+                "focus changed"
+            }
+            2 => {
+                steps[last].tree = arranged("splith", vec![window(20)], 20);
+                "disappeared"
+            }
+            3 => {
+                steps[last].tree = arranged(
+                    "splith",
+                    vec![
+                        window(20),
+                        group(100, "splitv", vec![window(21), window(99)]),
+                    ],
+                    20,
+                );
+                "unexpected hierarchy"
+            }
+            4 => {
+                steps[last].tree = arranged("splith", vec![window(21), window(20)], 20);
+                "unexpected hierarchy"
+            }
+            5 => {
+                steps[last]
+                    .events
+                    .push((WINDOW, json!({"change": "move", "container": window(20)})));
+                "uncertain"
+            }
+            6 => {
+                steps[last]
+                    .events
+                    .push((WINDOW, json!({"change": "new", "container": window(99)})));
+                "ownership is uncertain"
+            }
+            7 => {
+                steps[2].tree = arranged("splith", vec![window(20), window(21), window(99)], 20);
+                "unexpected hierarchy"
+            }
+            _ => {
+                steps[last].disconnect = true;
+                "get workspaces"
+            }
+        };
+        let error = completed_session(&fixture, &config, steps, |session| {
+            session.size(&config.layout.value, &[], &mut Vec::new())
+        })
+        .unwrap_err();
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
+    }
+}
+
+#[test]
+fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
+    for explicit in [false, true] {
+        let fixture = Fixture::new();
+        let mut config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{{split: vertical, children: [{}, {}]}}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1),
+                leaf(&fixture, 2)
+            ),
+        );
+        if explicit {
+            config.focus = Some("w1".into());
+        }
+        let a = arranged(
+            "splith",
+            vec![
+                group(100, "splitv", vec![window(20), window(21)]),
+                window(22),
+            ],
+            22,
+        );
+        let id = if explicit { 21 } else { 20 };
+        let mut steps = vec![step(a.clone())];
+        final_focus_steps(&mut steps, &a, id);
+        completed_session(&fixture, &config, steps, |session| {
+            let (logical, path) =
+                focus_path(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
+            assert_eq!(logical, if explicit { "w1" } else { "w0" });
+            assert_eq!(path, [0, if explicit { 1 } else { 0 }]);
+            session.focus(&path)
+        })
+        .unwrap();
+    }
+}
+
+#[test]
+fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
+    for scenario in 0..5 {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1)
+            ),
+        );
+        let a = arranged("splith", vec![window(20), window(21)], 21);
+        let mut before = step(a.clone());
+        let mut after = a.clone();
+        focus_only(&mut after, 20);
+        let mut after = step(after);
+        let expected = match scenario {
+            0 => {
+                before.tree = arranged("splith", vec![window(21)], 21);
+                "disappeared"
+            }
+            1 => {
+                before.tree = elsewhere(arranged("splith", vec![window(21)], 21), window(20));
+                "lost placement"
+            }
+            2 => {
+                before.tree = arranged("splith", vec![window(20), window(21), window(99)], 21);
+                "unexpected hierarchy"
+            }
+            3 => {
+                after.tree = a.clone();
+                "was not observed"
+            }
+            _ => {
+                after.events = vec![(WORKSPACE, focus(11, 10)), (WORKSPACE, focus(10, 11))];
+                "focus changed"
+            }
+        };
+        let steps = vec![step(a), before, command_step("[con_id=20] focus"), after];
+        let error =
+            completed_session(&fixture, &config, steps, |session| session.focus(&[0])).unwrap_err();
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
 }

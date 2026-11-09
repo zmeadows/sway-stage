@@ -6,13 +6,15 @@ It reads YAML layouts and launches applications into ordered, nested horizontal 
 vertical tiles on the currently focused, empty workspace. It leaves existing windows
 alone and stops if workspace focus changes during construction.
 
-**Status:** `load NAME` constructs single-window and nested layouts using Sway's default
-sizing. YAML weights and final `focus` remain valid but are not applied yet (Milestone
-2C.2). `list` discovers layouts and `check` validates version 1 YAML without Sway or
-application launches. Capture, the picker, and precompiled releases remain planned.
+**Status:** `load NAME` constructs single-window and nested layouts, applies relative sibling
+weights, and focuses the configured window (or the first depth-first window by default).
+`list` discovers layouts and `check` validates version 1 YAML without Sway or application
+launches. Capture, the picker, and precompiled releases remain planned.
 Automated verification uses isolated IPC fixtures only. The user has manually verified
 the single-Foot, two-Foot, and four-window Firefox/Foot layouts on Sway. These checks
-confirm those layouts; broader compositor behavior remains unverified.
+confirm construction of those layouts. The user's four-window inspector output also
+confirms Firefox focus and parent-area values consistent with the sizing tolerance;
+precise axis measurements and broader compositor behavior remain unverified.
 
 - [Specification](docs/SPECIFICATION.md): behavioral contract and YAML format.
 - [Roadmap](docs/PLAN.md): milestones and dependency review.
@@ -67,17 +69,51 @@ on another workspace. Stay on the target until the launcher exits.
 sleep 5; /home/zac/Code/sway-stage/target/release/sway-stage --layouts-dir /home/zac/Code/sway-stage/examples load two-foot
 ```
 
-Expect two Foot windows, left then right. Repeat on a **different empty workspace**:
+Expect two Foot windows with equal widths, left then right, with the left window focused.
+Repeat on a **different empty workspace**:
 
 ```sh
 sleep 5; /home/zac/Code/sway-stage/target/release/sway-stage --layouts-dir /home/zac/Code/sway-stage/examples load four-windows
 ```
 
-Expect Firefox, a middle Foot, and a right vertical group with upper/lower Foot windows.
-Default sizing will differ from the configured weights, and browser final focus is not
-applied. Adjust the absolute repository paths if needed. Success exits 0 without stdout;
-inspect the hierarchy manually with `cargo run --example inspect_sway` if useful.
-Fixture success does not establish compatibility with your Sway version.
+Expect Firefox at 44% width, middle Foot at 32%, and the right column at 24%.
+Inside that column, upper Foot gets 77% height and lower Foot gets 23%. Firefox should
+be focused when loading finishes. Shares use sibling dimensions normalized by their sum,
+excluding space between siblings. Adjust the absolute repository paths if needed.
+Success exits 0 without stdout. Fixture success does not establish compatibility with
+your Sway version.
+
+Sizing proceeds from outer splits inward, targeting each window or nested group by its
+verified container ID. It uses at most three passes per split and stops early within
+**5 absolute percentage points per child**, or when progress stalls. Gaps, borders,
+rounding and minimum sizes can prevent exact results. Remaining deviations or unavailable
+geometry produce stderr/log warnings and one best-effort desktop warning notification;
+they do not fail a successfully constructed layout. IPC, ownership and structural errors
+remain fatal.
+
+The read-only inspector shows hierarchy and the `focused` marker. To inspect the loaded
+workspace from a terminal elsewhere, start the command and switch back during the delay:
+
+```sh
+sleep 5; cargo run --locked --example inspect_sway
+```
+
+For actual axis shares, the following read-only query requires `jq`. Run it the same way,
+switching back to the loaded workspace during the delay. It prints every sibling group,
+normalized percentages, and child focus flags; the focused Firefox is a direct child of
+the root group. Ignore the inspector's `parent_area` for axis-share comparisons.
+
+```sh
+sleep 5; swaymsg -t get_tree | jq '
+  recurse(.nodes[]) | select(.type == "workspace")
+  | select(any(recurse(.nodes[]); .focused))
+  | recurse(.nodes[]) | select((.nodes | length) > 1)
+  | (if .layout == "splith" then "width" else "height" end) as $axis
+  | (.nodes | map(.rect[$axis]) | add) as $total
+  | {group: .id, layout, children: [.nodes[] |
+      {id, app_id, focused, share_pct:
+        (if $total > 0 then 100 * .rect[$axis] / $total else null end)}]}'
+```
 
 Occupied workspaces, focus switches (even away and back), unexpected windows or hierarchy,
 wrong placement, and uncertain observation stop the run. Applications remain in place
@@ -99,8 +135,10 @@ Manual verification on your Sway version is still required.
 Each `load` overwrites a private (0600) `last-run.log` in
 `$XDG_STATE_HOME/sway-stage`, falling back to `$HOME/.local/state/sway-stage`.
 The log records timestamps, stages, workspace/window IDs, identities, placement, elapsed
-time, structural commands/replies, and expected/observed hierarchies. It omits titles,
-full argv, and environment values. Fatal errors go to stderr with the log path and attempt `notify-send` with a two-second wait. Logging and
+time, commands/replies, expected/observed hierarchies, sizing weights and target/observed
+proportions, and final focus verification. It omits titles, full argv, and environment
+values. Fatal errors go to stderr with the log path and attempt a critical `notify-send`;
+sizing warnings use normal urgency. Both helpers have a two-second wait. Logging and
 notification failures remain secondary. `list`, `check`, help, and version remain
 independent of IPC, logging, and notification tools.
 

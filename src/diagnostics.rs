@@ -83,11 +83,22 @@ impl Diagnostics {
         if let Some(path) = &self.path {
             message.push_str(&format!("; log: {}", path.display()));
         }
-        if let Err(error) = notify(&message) {
+        if let Err(error) = notify("critical", "sway-stage load failed", &message) {
             self.record(&format!("secondary notification failure: {error}"));
             stderr(&format!("sway-stage: notification unavailable: {error}"));
         }
         message
+    }
+
+    pub fn sizing_warnings(&mut self, warnings: &[String]) {
+        if warnings.is_empty() {
+            return;
+        }
+        let message = warnings.join("\n");
+        stderr(&format!("sway-stage: warning: {message}"));
+        if let Err(error) = notify("normal", "sway-stage sizing warning", &message) {
+            self.record(&format!("secondary warning notification failure: {error}"));
+        }
     }
 }
 
@@ -139,14 +150,14 @@ fn open_log(path: PathBuf) -> Result<(File, PathBuf), String> {
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn notify(message: &str) -> Result<(), String> {
+fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
     let mut child = Command::new("notify-send")
         .args([
             "--app-name=sway-stage",
-            "--urgency=critical",
+            &format!("--urgency={urgency}"),
             "--expire-time=20000",
             "--",
-            "sway-stage load failed",
+            summary,
             message,
         ])
         .stdin(Stdio::null())

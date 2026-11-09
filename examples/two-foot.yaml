@@ -1,4 +1,4 @@
-# See docs/SPECIFICATION.md. Construction uses default sizes; weights/final focus are pending.
+# See docs/SPECIFICATION.md. Equal widths; final focus defaults to the left window.
 version: 1
 layout:
   split: horizontal
