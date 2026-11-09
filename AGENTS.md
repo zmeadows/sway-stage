@@ -11,8 +11,8 @@ currently focused, empty Sway workspace. Prioritize, in order:
 4. A small executable and little ongoing maintenance cost.
 
 Read the affected code and [specification](docs/SPECIFICATION.md) before editing.
-The repository currently contains a placeholder executable; do not mistake planned
-commands for implemented behavior. Follow [the roadmap](docs/PLAN.md) in small steps.
+Do not mistake planned commands for implemented behavior. Follow
+[the roadmap](docs/PLAN.md) in small steps.
 Do not add session restoration, existing-window reuse, a daemon, automatic enforcement,
 other compositors, or a graphical editor unless explicitly requested.
 

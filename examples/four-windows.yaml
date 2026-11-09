@@ -1,4 +1,4 @@
-# Illustration of the PLANNED format; YAML loading is not implemented yet.
+# Version 1 layout; validate with --layouts-dir examples check four-windows.
 # See docs/SPECIFICATION.md. Adapt executable names and IDs to your installation.
 # Mirrors sway_four_windows.py: Firefox, middle Foot, then two right-hand Foot windows.
 # Unlike the script's PID suffixes, these explicit IDs are stable. Only new windows match.

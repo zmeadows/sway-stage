@@ -1,9 +1,10 @@
 # sway-stage specification
 
-This is the authoritative behavioral contract for the initial implementation. Everything
-below is planned; the main executable remains a placeholder. A development-only read-only
-IPC example is described in the [README](../README.md). The YAML format may be revised
-before its first release, with this document and examples updated together.
+This is the authoritative behavioral contract for the initial implementation. Layout
+discovery, `list`, and `check` are implemented; Sway operations and the remaining commands
+are planned. A development-only read-only IPC example is described in the
+[README](../README.md). The YAML format may be revised before its first release, with this
+document and examples updated together.
 
 ## Purpose and scope
 

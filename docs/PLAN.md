@@ -3,8 +3,7 @@
 Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
 modules only as implemented responsibilities justify them. The
 [specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. All numbered milestones below are pending. The main executable
-remains a dependency-free placeholder.
+engineering decisions. Milestone 1 is complete; milestones 2–4 remain pending.
 
 ## Preliminary step: read-only IPC inspection
 
@@ -32,15 +31,19 @@ weights; it may be absent. The example labels this distinction as `parent_area`.
 
 ## 1. Layout validation and discovery
 
-Implement the typed YAML model, strict validation, named-file discovery, and CLI with
-working `check` and `list`. Help must make unfinished commands explicit. Add Clap, Serde,
-and the selected YAML parser only when used. Do not connect to Sway in this milestone.
+Implemented: a typed split/window model, strict YAML validation, immediate-file discovery,
+and Clap `check`/`list` commands. Help identifies the remaining commands as unimplemented.
+Neither command contacts Sway, launches processes, writes logs, or sends notifications.
+Discovery uses XDG/HOME or an explicit directory, rejects invalid/duplicate names, and
+returns lexical order without parsing layouts for `list`.
 
-Complete when the four-window example validates, invalid/draft layouts produce useful
-field errors, discovery is deterministic, and tests cover weights, nesting, duplicate and
-unknown fields, resource limits, cwd/environment semantics, and null capture placeholders.
-Verify CLI and filesystem behavior with temporary directories and no compositor. The
-locked graph must compile on Rust 1.89 and pass CI.
+The four-window example validates. Twelve configuration test groups and six CLI/filesystem
+test groups cover strict mapping/scalar boundaries, malformed and unsupported YAML,
+weights, nested order, IDs/selectors, cwd/environment semantics, timeouts, null capture
+placeholders, exact resource-limit boundaries, XDG resolution, and exit codes. Filesystem
+tests use temporary directories and child-specific environment settings without compositor
+sockets or external tools. Local formatting, Clippy, all-target compilation, tests, release
+build, and locked Rust 1.89 compilation pass. Hosted CI has not been run in this change.
 
 ## 2. Safe sequential construction
 
@@ -94,8 +97,9 @@ Dependencies and remaining candidates reviewed against their upstream documentat
 
 | Need | Candidate and decision |
 | --- | --- |
-| CLI | [Clap 4](https://github.com/clap-rs/clap) with derive; upstream currently declares Rust 1.85. Add with the first CLI. |
-| Typed YAML | [Serde](https://serde.rs/) and [serde-saphyr](https://github.com/bourumir-wyngs/serde-saphyr). The latter documents Rust 1.89 with CI coverage, resource budgets, and serialization for capture. Evaluate strict duplicate-key/alias handling and minimal features in milestone 1 before selecting a release. |
+| CLI | [Clap 4.6.7](https://docs.rs/clap/4.6.7/clap/) with derive, std, help, usage, and error-context; default features disabled. Declares Rust 1.85. |
+| Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with only deserialize enabled. The parser declares Rust 1.89. No serialization, comments, include, interpolation, robotics, or validation-framework features are enabled. |
+| Field diagnostics | [serde_path_to_error 0.1.20](https://docs.rs/serde_path_to_error/0.1.20/serde_path_to_error/) supplies paths for nested deserialization errors; declares Rust 1.61 and adds only already-used Serde core/itoa dependencies. |
 | Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs), added as a development dependency for inspection. Its direct dependencies are Serde, serde_json, and swayipc-types. The locked graph compiles on Rust 1.89; bounded waits and event history still need proof before construction. |
 | Launching and optional tools | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, async runtime, or Fuzzel crate. Bound helper-process waits. |
 | Diagnostics and errors | Begin with standard-library I/O and contextual errors; add a logging/error crate only if concrete implementation needs justify it. |
@@ -110,6 +114,29 @@ installed Rust 1.89.0 toolchain. Transitive licenses are permissive MIT/Apache-2
 Unlicense/MIT for memchr and an additional Unicode-3.0 license for unicode-ident).
 Manifest/feature review and the [RustSec advisory index](https://rustsec.org/advisories/)
 review found no applicable advisories; this is not a security guarantee.
+
+Milestone 1 adds 23 locked dependency packages. The YAML deserializer uses granit-parser
+2.1.0, numeric helpers, encoding_rs_io/encoding_rs, smallvec, and annotate-snippets;
+Clap adds its builder/lexer/derive and their small helpers. Review of package manifests
+found permissive licenses: MIT/Apache-2.0, with BSD-3-Clause additionally required by
+encoding_rs. Existing license exceptions above still apply. Declared compiler baselines
+do not exceed 1.89, and the complete locked graph compiles on installed Rust 1.89.0.
+The current RustSec index review found no applicable advisory for the added versions;
+this was a source review, not an automated vulnerability audit.
+
+Strict YAML behavior is verified with fixtures: duplicate-key and merge-key policies
+reject, aliases have a zero-event budget, unsupported tags are rejected on values and
+field names, and the single-document API rejects trailing documents/content. String
+fields require quotes around numeric/boolean scalars; small numeric deserializers also
+reject quoted numbers rather than coercing them. Explicit nulls never trigger defaults.
+Reads stop at 1 MiB plus one detection byte and require UTF-8. Parser collection depth
+is capped at 68 (allowing children sequences and leaf field collections at layout depth
+32), with bounded events, scalar bytes, nodes, anchor retention, and flow nesting before
+semantic validation enforces 32 layout levels and 256 layout nodes. Parser errors carry
+field paths and source locations; semantic tree errors identify the field and containing
+node's location. Source snippets are disabled to avoid printing full commands or env maps.
+No known format-contract guarantee is left unenforced. Serialization features can be
+evaluated when capture is implemented.
 
 Do not use archived [serde_yaml](https://github.com/dtolnay/serde-yaml) for a new project.
 Recent releases and a compatible declared MSRV are useful evidence, not a maintenance or
@@ -127,7 +154,5 @@ framework, or a process supervision system at this stage.
 - App IDs/classes cannot prove launch causality, and IPC cannot make observation and
   mutation atomic. Test conservative aborts; do not disguise these limits as recoverable
   placement errors. No live-session checks were performed during repository setup.
-- Confirm YAML parser behavior against strict-format fixtures, including input/resource
-  limits, before committing to it. Declared compiler compatibility is not a lockfile test.
 - Release license, hosting URL, supported Sway version, and Linux ABI baseline remain
   unset. Cargo publishing stays disabled until release metadata and behavior are ready.

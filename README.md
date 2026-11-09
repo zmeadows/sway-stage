@@ -2,17 +2,18 @@
 
 A lightweight declarative workspace launcher for the Sway window manager on Linux.
 
-The planned executable will read YAML layouts and launch applications into nested,
+The planned layout engine will read YAML layouts and launch applications into nested,
 proportionally sized tiles on the currently focused, empty workspace. It will leave
 existing windows alone and stop if workspace focus changes during construction.
 
-**Status:** specification, engineering baseline, and a development-only read-only Sway IPC
-example. No CLI commands, YAML parsing, layout construction, or precompiled releases are
-implemented. The main binary remains a placeholder that exits unsuccessfully.
+**Status:** `list` discovers named layouts and `check` validates version 1 YAML layouts.
+Both work without Sway and do not launch applications. Layout construction (`load`),
+capture, the picker, and precompiled releases remain planned. A development-only
+read-only Sway IPC example is also available.
 
-- [Specification](docs/SPECIFICATION.md): planned behavior and YAML format.
+- [Specification](docs/SPECIFICATION.md): behavioral contract and YAML format.
 - [Roadmap](docs/PLAN.md): milestones and dependency review.
-- [Four-window example](examples/four-windows.yaml): illustration of the planned format.
+- [Four-window example](examples/four-windows.yaml): a valid layout to check and adapt.
 - [Engineering conventions](AGENTS.md): contributor guidance and safety invariants.
 
 Building requires Rust 1.89 or newer (edition 2024):
@@ -23,6 +24,21 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
+
+Try discovery and validation against the included example:
+
+```sh
+cargo run --locked -- --layouts-dir examples list
+cargo run --locked -- --layouts-dir examples check four-windows
+cargo run --locked -- --help
+```
+
+The first command prints `four-windows`; the second prints `four-windows: valid`.
+Without `--layouts-dir`, layouts come from `$XDG_CONFIG_HOME/sway-stage/layouts`,
+falling back to `$HOME/.config/sway-stage/layouts`. Discovery never creates directories,
+and `list` does not parse file contents. See the specification for discovery and validation
+rules. `check` verifies working directories but does not check whether executables are
+installed or whether they will create matching windows. It writes no logs or notifications.
 
 To inspect the currently focused workspace, run this manually from a Sway session with
 `SWAYSOCK` set:
