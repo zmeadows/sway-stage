@@ -10,12 +10,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
+#[command(version, about = "Validate and construct nested Sway layouts")]
 #[command(
-    version,
-    about = "Validate Sway layouts and safely launch a single window"
-)]
-#[command(
-    after_help = "Load supports a single root window only. Nested layouts, capture, and the picker are not implemented yet."
+    after_help = "Load constructs tiled hierarchies with default sizing. Weights, final focus, capture, and the picker are not implemented yet."
 )]
 struct Cli {
     /// Read layouts from PATH instead of the XDG configuration directory
@@ -27,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Launch one root window on the focused empty Sway workspace; no layout manipulation
+    /// Construct a layout on the focused empty Sway workspace
     Load {
         /// Layout name (the YAML filename without its extension)
         name: String,

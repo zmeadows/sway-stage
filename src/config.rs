@@ -32,10 +32,6 @@ pub struct Node {
 #[derive(Debug)]
 pub enum NodeKind {
     Split {
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "layout construction will consume the orientation")
-        )]
         split: Orientation,
         children: Vec<Spanned<Node>>,
     },

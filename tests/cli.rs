@@ -265,21 +265,14 @@ fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
 }
 
 #[test]
-fn load_rejects_general_layouts_before_ipc_and_writes_private_last_run_log() {
+fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
     fixture.file("nested.yaml", "version: 1\nlayout: {split: horizontal, children: [{id: a, command: [not-installed], match: {app_id: a}}, {id: b, command: [not-installed], match: {app_id: b}}]}\n");
     fixture.file("good.yaml", WINDOW);
     let log = fixture.path.join(".local/state/sway-stage/last-run.log");
-    for expected in [
-        "nested layout execution is not yet implemented",
-        "SWAYSOCK is unset",
-    ] {
-        let name = if expected.starts_with("nested") {
-            "nested"
-        } else {
-            "good"
-        };
+    for name in ["nested", "good"] {
+        let expected = "SWAYSOCK is unset";
         let output = fixture.run(&["--layouts-dir", ".", "load", name], 1);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{stderr}");

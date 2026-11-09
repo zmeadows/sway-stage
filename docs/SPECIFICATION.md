@@ -1,11 +1,11 @@
 # sway-stage specification
 
 This is the authoritative behavioral contract for the initial implementation. Layout
-discovery, `list`, `check`, and single-root-window `load` are implemented. Nested layout
-execution, sizing, final focus commands, capture, and the picker remain planned. The
-loading algorithm below describes the complete intended engine; Milestone 2B launches
-and verifies one window without issuing layout or focus commands. Read-only IPC examples
-and manual launch instructions are described in the [README](../README.md).
+discovery, `list`, `check`, and single-window/nested `load` construction are implemented.
+Sizing, final focus selection, capture, and the picker remain planned. Milestone 2C.1
+constructs hierarchy with ordinary Sway default sizing; weights and `focus` are validated
+but not applied until 2C.2. The loading algorithm below includes those planned phases.
+Read-only IPC examples and manual verification instructions are in the [README](../README.md).
 The YAML format may be revised before its first release, with this
 document and examples updated together.
 
@@ -128,14 +128,25 @@ otherwise follows the same format. There is no executable fallback or command in
 
 ## Loading and safety
 
-Current execution accepts only a root window, such as
-[`examples/single-foot.yaml`](../examples/single-foot.yaml). A split root is fully
-validated, then rejected before IPC or application launch. General layouts still validate
-with `check`. Single-window acceptance requires the sole direct tiled workspace child,
-no floating children, and a known non-fullscreen state. The implementation conservatively
-aborts on window move events because their IPC payloads omit workspace ancestry; it also
-refuses new-window close events and structural activity during prelaunch reconciliation.
-These guards may abort for activity elsewhere rather than assume safe history.
+Current execution supports a root window and ordered, arbitrarily nested splits within
+the validation limits. See [two Foot windows](../examples/two-foot.yaml) and the
+[four-window reference](../examples/four-windows.yaml). One observation session retains
+the original workspace and every accepted window throughout the run.
+
+Construction completes the first child of a split, then establishes its enclosing split
+and launches subsequent children as explicitly focused siblings. If that first completed
+group fills the workspace, it is wrapped using the populated workspace's split operation;
+the workspace parent is selected explicitly through an owned direct child and verified
+before splitting. This does not change workspaces. Equal-axis meaningful groups remain
+separate. No empty placeholder hierarchy or window move commands are used.
+
+Every command is guarded by a fresh fenced tree and ownership checks. Its replies must
+succeed, and subsequent trees must match the expected leaf order, grouping, orientation,
+and retained identities. New wrapper identities are obtained from Sway. Only the exact
+structural transition requested by the command is allowed. The reviewed split path
+reparents without emitting window move events; every move event remains fatal because
+its payload omits workspace ancestry. New-window close events and uncertain structural
+activity between launches or during command verification also abort conservatively.
 
 Construction has no transaction or rollback. Safety takes precedence over completing a
 layout. The target is the focused workspace observed after validation, identified by its
@@ -150,8 +161,8 @@ fixed; never create, select, rename, or assign a workspace on the user's behalf.
    A focus event away from the target aborts even if the user switches back before the
    next snapshot. Recheck focus, target existence, and ownership before every launch or
    mutating IPC command. Lost event observation or IPC connectivity is fatal.
-3. Set the required split orientation and launch leaves in depth-first order. Snapshot
-   global window IDs immediately before each launch. Launch exactly once and wait for
+3. Launch leaves in depth-first order, establishing split orientations as groups are built.
+   Snapshot global window IDs immediately before each launch. Launch exactly once and wait for
    exactly one new, unclaimed window with the leaf's explicit selector; never match an
    ID in any pre-launch snapshot or already accepted for another leaf. Observe events and
    fresh trees with a monotonic deadline. Match properties may arrive after window creation;
@@ -166,11 +177,11 @@ fixed; never create, select, rename, or assign a workspace on the user's behalf.
    verifying observed structure as construction proceeds. Any accepted window closing,
    leaving the target, becoming floating/fullscreen, or unexpected hierarchy changes, aborts.
    Do not relaunch or repair around interference.
-6. Verify final leaf order and split hierarchy, then apply weights from outer splits
-   inward. Bound adjustment to at most three passes per split; read the actual tree
+6. Verify final leaf order and split hierarchy. **Pending 2C.2:** apply weights from outer
+   splits inward. Bound adjustment to at most three passes per split; read the actual tree
    after sizing. Each IPC command must have replies and every reply must succeed.
-7. Recheck all safety conditions and focus `focus`, or the first depth-first window by
-   default, using its accepted container ID. Then exit; there is no ongoing enforcement.
+7. **Pending 2C.2:** recheck all safety conditions and focus `focus`, or the first depth-first
+   window by default, using its accepted container ID. Then exit; there is no ongoing enforcement.
 
 Direct mutations must target only accepted windows and containers whose window descendants
 are all accepted by this run. Before any ancestor resize or split change, verify it cannot
@@ -192,6 +203,9 @@ Sway commands and event/tree reads are not atomic together. Minimize race window
 fresh guards and stop on observed interference; do not promise transaction-like isolation.
 
 ## Sizing and focus
+
+This section is planned for Milestone 2C.2. Current execution uses default sizes and
+leaves construction focus in place; it does not implement the default or explicit final focus.
 
 Compute desired proportions independently for each sibling set using its weights. Compare
 observed sibling dimensions on that axis, normalized by their sum, with desired shares.

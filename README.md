@@ -2,22 +2,23 @@
 
 A lightweight declarative workspace launcher for the Sway window manager on Linux.
 
-The planned layout engine will read YAML layouts and launch applications into nested,
-proportionally sized tiles on the currently focused, empty workspace. It will leave
-existing windows alone and stop if workspace focus changes during construction.
+It reads YAML layouts and launches applications into ordered, nested horizontal and
+vertical tiles on the currently focused, empty workspace. It leaves existing windows
+alone and stops if workspace focus changes during construction.
 
-**Status:** `load NAME` safely launches one root window on the focused empty Sway
-workspace, verifies its identity and placement, and exits without layout manipulation.
-`list` discovers named layouts and `check` validates version 1 YAML without Sway or
-application launches. Nested/multi-window execution, sizing, final focus commands,
-capture, the picker, and precompiled releases remain planned. The user has manually
-verified a single Foot launch; broader compositor behavior remains unverified.
-Automated tests use isolated IPC fixtures only.
+**Status:** `load NAME` constructs single-window and nested layouts using Sway's default
+sizing. YAML weights and final `focus` remain valid but are not applied yet (Milestone
+2C.2). `list` discovers layouts and `check` validates version 1 YAML without Sway or
+application launches. Capture, the picker, and precompiled releases remain planned.
+Automated verification uses isolated IPC fixtures only. The user has manually verified
+the single-Foot, two-Foot, and four-window Firefox/Foot layouts on Sway. These checks
+confirm those layouts; broader compositor behavior remains unverified.
 
 - [Specification](docs/SPECIFICATION.md): behavioral contract and YAML format.
 - [Roadmap](docs/PLAN.md): milestones and dependency review.
 - [Four-window example](examples/four-windows.yaml): a valid layout to check and adapt.
-- [Single Foot example](examples/single-foot.yaml): the supported single-window load shape.
+- [Two Foot example](examples/two-foot.yaml): a minimal horizontal split.
+- [Single Foot example](examples/single-foot.yaml): a root window.
 - [Engineering conventions](AGENTS.md): contributor guidance and safety invariants.
 
 Building requires Rust 1.89 or newer (edition 2024):
@@ -39,39 +40,52 @@ cargo run --locked -- --layouts-dir examples check four-windows
 cargo run --locked -- --help
 ```
 
-The first command prints `four-windows` and `single-foot`; the second prints
-`four-windows: valid`. Loading `four-windows` fails before contacting Sway or launching
-anything because nested layout execution is not implemented.
+The first command prints `four-windows`, `single-foot`, and `two-foot`; the second prints
+`four-windows: valid`.
 Without `--layouts-dir`, layouts come from `$XDG_CONFIG_HOME/sway-stage/layouts`,
 falling back to `$HOME/.config/sway-stage/layouts`. Discovery never creates directories,
 and `list` does not parse file contents. See the specification for discovery and validation
 rules. `check` verifies working directories but does not check whether executables are
 installed or whether they will create matching windows. It writes no logs or notifications.
 
-For your first **manual** launch, build and validate first:
+For **manual verification only**, build and validate first:
 
 ```sh
 cargo build --release --locked
-./target/release/sway-stage --layouts-dir examples check single-foot
+./target/release/sway-stage --layouts-dir examples check two-foot
+./target/release/sway-stage --layouts-dir examples check four-windows
 ```
 
-Use an isolated disposable Sway session with Foot installed and `SWAYSOCK` set. From a
-terminal in this repository, run the following, then manually switch to a completely
-empty disposable workspace during the five-second delay. Stay on that workspace until
-the launcher exits. The delay lets the launching terminal remain on another workspace:
+Use an isolated disposable Sway session with `SWAYSOCK` pointing to that session.
+Install/verify Foot and, for the four-window example, `firefox-esr` with the exact app ID
+in the YAML; adapt the example to your installation before checking it. From a terminal
+in this repository, run **one** command below, then manually switch to a completely empty
+disposable workspace during the five-second delay. The launching terminal must remain
+on another workspace. Stay on the target until the launcher exits.
 
 ```sh
-sleep 5; /home/zac/Code/sway-stage/target/release/sway-stage --layouts-dir /home/zac/Code/sway-stage/examples load single-foot
+sleep 5; /home/zac/Code/sway-stage/target/release/sway-stage --layouts-dir /home/zac/Code/sway-stage/examples load two-foot
 ```
 
-Adjust the absolute repository paths if needed. Success exits 0 without stdout; the Foot
-window remains open. An occupied workspace, focus switch (even away and back), unexpected
-window, wrong placement, or uncertain observation stops the run. Applications are left
-in place on failure; inspect them before retrying. Do not run another launch with the
-same app ID concurrently: exact selectors and new container IDs cannot prove causality.
-The loader also conservatively aborts on any window move event, even elsewhere, because
-window events lack workspace ancestry. New-window close events and structural prelaunch
-activity also abort when their placement history cannot be established.
+Expect two Foot windows, left then right. Repeat on a **different empty workspace**:
+
+```sh
+sleep 5; /home/zac/Code/sway-stage/target/release/sway-stage --layouts-dir /home/zac/Code/sway-stage/examples load four-windows
+```
+
+Expect Firefox, a middle Foot, and a right vertical group with upper/lower Foot windows.
+Default sizing will differ from the configured weights, and browser final focus is not
+applied. Adjust the absolute repository paths if needed. Success exits 0 without stdout;
+inspect the hierarchy manually with `cargo run --example inspect_sway` if useful.
+Fixture success does not establish compatibility with your Sway version.
+
+Occupied workspaces, focus switches (even away and back), unexpected windows or hierarchy,
+wrong placement, and uncertain observation stop the run. Applications remain in place
+on failure; inspect them before retrying. Avoid concurrent launches with the same app ID:
+selectors and new IDs cannot prove causality. Any window move event still aborts, even
+elsewhere. Split reparenting is checked as an exact tree transition, with new structural
+IDs read back from Sway; the reviewed split path emits no window move events. Uncertain
+structural activity between launches or during command verification also aborts.
 
 Direct `std::process::Command` launching preserves literal arguments, child cwd and
 environment inheritance/overrides. Application standard streams go to `/dev/null`;
@@ -84,9 +98,9 @@ Manual verification on your Sway version is still required.
 
 Each `load` overwrites a private (0600) `last-run.log` in
 `$XDG_STATE_HOME/sway-stage`, falling back to `$HOME/.local/state/sway-stage`.
-The log records timestamps, stages, workspace/window IDs, identities, placement, and
-elapsed time, omitting titles, full argv, and environment values. Fatal errors go to
-stderr with the log path and attempt `notify-send` with a two-second wait. Logging and
+The log records timestamps, stages, workspace/window IDs, identities, placement, elapsed
+time, structural commands/replies, and expected/observed hierarchies. It omits titles,
+full argv, and environment values. Fatal errors go to stderr with the log path and attempt `notify-send` with a two-second wait. Logging and
 notification failures remain secondary. `list`, `check`, help, and version remain
 independent of IPC, logging, and notification tools.
 

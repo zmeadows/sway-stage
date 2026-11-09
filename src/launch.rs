@@ -1,23 +1,28 @@
-//! Conservative single-window launch; no Sway layout or focus commands.
+//! Sequential launch and guarded, recursive tiled construction.
 
-use crate::config::{Config, Matcher, NodeKind};
+use crate::config::{Config, Matcher, NodeKind, Orientation};
 use crate::diagnostics::Diagnostics;
 use crate::observation::{Observer, Snapshot};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
-use swayipc::{Event, Floating, Node, NodeType, ScratchpadState, WindowChange};
+use swayipc::{
+    CommandType, Event, Floating, Node, NodeLayout, NodeType, ScratchpadState, WindowChange,
+};
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OBSERVED_LIMIT: usize = 256;
 
 pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String> {
-    single_window(config)?;
     let socket = env::var_os("SWAYSOCK")
         .filter(|path| !path.is_empty())
         .ok_or("connect: SWAYSOCK is unset or empty; run inside Sway")?;
@@ -26,118 +31,630 @@ pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String
     load_with(config, &mut connect, diagnostics)
 }
 
-fn single_window(config: &Config) -> Result<(), String> {
-    if !matches!(config.layout.value.kind, NodeKind::Window { .. }) {
-        return Err("nested layout execution is not yet implemented; load requires a single window at the root (use check to validate general layouts)".into());
-    }
-    Ok(())
-}
-
-// Supplying concrete sockets is the same isolated test seam used by Observer. Process
-// spawning and the entire observation/acceptance sequence still run normally in fixtures.
+// Concrete socket injection keeps all fixture traffic disconnected from socket discovery.
 fn load_with(
     config: &Config,
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
-    single_window(config)?;
-    let NodeKind::Window {
-        id,
-        command,
-        matcher,
-        cwd,
-        env,
-    } = &config.layout.value.kind
-    else {
-        unreachable!("single_window validated the root");
-    };
-    diagnostics.stage(format!("subscribe leaf={id:?}"));
+    diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let target = initial.target;
-    diagnostics.stage(format!("prelaunch leaf={id:?} workspace={target}"));
+    diagnostics.stage(format!("prelaunch workspace={target}"));
     require_empty(&initial, diagnostics)?;
-    let mut existing: HashSet<i64> = initial.tree.iter().map(|node| node.id).collect();
+    let mut existing = initial.tree.iter().map(|node| node.id).collect();
     prelaunch_history(&initial, &mut existing)?;
-
-    // A second fenced tree reconciles events newer than the first tree. Keep the union
-    // of IDs: a preexisting window which closes cannot later become ours.
-    let before = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
-    require_empty(&before, diagnostics)?;
-    existing.extend(before.tree.iter().map(|node| node.id));
-    prelaunch_history(&before, &mut existing)?;
-    let mut windows = Windows {
+    let workspace = initial
+        .tree
+        .find_as_ref(|n| n.id == target)
+        .ok_or("target missing")?;
+    let expected = Hierarchy::Split(Some(target), workspace.layout, Vec::new());
+    let mut session = Construction {
+        observer,
+        connect,
+        diagnostics,
         target,
         existing,
-        matcher,
-        observed: BTreeMap::new(),
-        matched: None,
-        invalid: BTreeMap::new(),
+        accepted: BTreeMap::new(),
+        expected,
+        timeout_ms: config.window_timeout_ms,
     };
+    session.build(&config.layout.value, None)?;
+    session
+        .diagnostics
+        .record("construction complete; weights and final focus remain pending (2C.2)");
+    Ok(())
+}
 
-    let duration = Duration::from_millis(config.window_timeout_ms);
-    let started = Instant::now();
-    let deadline = started
-        .checked_add(duration)
-        .ok_or("window_timeout_ms exceeds the monotonic clock range; use a smaller timeout")?;
-    diagnostics.stage(format!("launch leaf={id:?} workspace={target}"));
-    diagnostics.record(&format!(
-        "expected {matcher:?}; launching once (argv/env omitted)"
-    ));
-    let mut child = spawn(command, cwd.as_ref(), env)?;
-    diagnostics.record(&format!("spawned pid={}", child.id()));
-    let mut exited = false;
-    let mut accepted = None;
-    loop {
-        let phase = if accepted.is_some() {
-            "final verification"
-        } else {
-            "wait"
+// The workspace is the outer Split. Structural IDs are bound from the first verified
+// tree after a split, never predicted or retained across an explicitly replaced wrapper.
+#[derive(Clone, Debug)]
+enum Hierarchy {
+    Window(i64),
+    Split(Option<i64>, NodeLayout, Vec<Hierarchy>),
+}
+
+impl Hierarchy {
+    fn at_mut(&mut self, path: &[usize]) -> &mut Self {
+        let Some((index, rest)) = path.split_first() else {
+            return self;
         };
-        diagnostics.stage(format!("{phase} leaf={id:?} workspace={target}"));
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "window timeout: {}",
-                windows.wait_diagnostics(started)
-            ));
+        let Self::Split(_, _, children) = self else {
+            unreachable!("split path");
+        };
+        children[*index].at_mut(rest)
+    }
+
+    fn verify(&mut self, node: &Node) -> Result<(), String> {
+        if !node.floating_nodes.is_empty()
+            || matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn))
+            || matches!(
+                node.scratchpad_state,
+                Some(ScratchpadState::Fresh | ScratchpadState::Changed)
+            )
+        {
+            return Err(format!("invalid hierarchy state id={}", node.id));
         }
-        let snapshot = observer
-            .snapshot(connect()?, deadline.min(Instant::now() + IPC_TIMEOUT))
-            .map_err(|error| format!("{error}; {}", windows.wait_diagnostics(started)))?;
-        let candidate = windows.reconcile(&snapshot, diagnostics)?;
-        if let Some(accepted) = accepted {
-            if candidate != Some(accepted) {
-                return Err(format!(
-                    "accepted window id={accepted} or surrounding window state failed revalidation"
-                ));
+        match self {
+            Self::Window(id) if node.id == *id && node.nodes.is_empty() => Ok(()),
+            Self::Split(id, layout, children)
+                if id.is_none_or(|id| id == node.id)
+                    && node.layout == *layout
+                    && node.nodes.len() == children.len()
+                    && (node.node_type == NodeType::Workspace
+                        || (node.node_type == NodeType::Con
+                            && node.fullscreen_mode == Some(0)
+                            && node.app_id.is_none()
+                            && node.window.is_none()
+                            && node.shell.is_none())) =>
+            {
+                *id = Some(node.id);
+                for (expected, actual) in children.iter_mut().zip(&node.nodes) {
+                    expected.verify(actual)?;
+                }
+                Ok(())
             }
-            // Any event in this batch may postdate its tree. Only finish at a fence
-            // without window activity, following a fresh verification of the same ID.
+            _ => Err(format!(
+                "unexpected hierarchy at id={} layout={:?} children={:?}",
+                node.id,
+                node.layout,
+                node.nodes.iter().map(|n| n.id).collect::<Vec<_>>()
+            )),
+        }
+    }
+
+    fn id(&self) -> i64 {
+        match self {
+            Self::Window(id) | Self::Split(Some(id), _, _) => *id,
+            Self::Split(None, _, _) => unreachable!("verified structural identity"),
+        }
+    }
+}
+
+struct Construction<'a> {
+    observer: Observer,
+    connect: &'a mut dyn FnMut() -> Result<UnixStream, String>,
+    diagnostics: &'a mut Diagnostics,
+    target: i64,
+    existing: HashSet<i64>,
+    accepted: BTreeMap<i64, &'a Matcher>,
+    expected: Hierarchy,
+    timeout_ms: u64,
+}
+
+impl<'a> Construction<'a> {
+    fn verify(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+        validate_accepted(snapshot, &self.accepted, self.target, self.diagnostics)?;
+        let workspace = snapshot
+            .tree
+            .find_as_ref(|n| n.id == self.target)
+            .ok_or("target missing")?;
+        self.diagnostics.record(&format!(
+            "expected hierarchy {:?}; observed {}",
+            self.expected,
+            describe(workspace)
+        ));
+        self.expected.verify(workspace)
+    }
+
+    // No mutation/launch is allowed through a fence with newer window activity.
+    fn settled(&mut self) -> Result<Snapshot, String> {
+        let deadline = Instant::now() + IPC_TIMEOUT;
+        loop {
+            let snapshot = self.observer.snapshot((self.connect)()?, deadline)?;
+            for event in &snapshot.events {
+                if let Event::Window(window) = event
+                    && !self.accepted.contains_key(&window.container.id)
+                    && matches!(
+                        window.change,
+                        WindowChange::New
+                            | WindowChange::Close
+                            | WindowChange::Move
+                            | WindowChange::Floating
+                            | WindowChange::FullscreenMode
+                    )
+                {
+                    return Err(format!(
+                        "window activity id={} during prelaunch/command fence; ownership is uncertain",
+                        window.container.id
+                    ));
+                }
+            }
+            self.verify(&snapshot)?;
+            self.existing.extend(
+                snapshot
+                    .tree
+                    .iter()
+                    .map(|n| n.id)
+                    .filter(|id| !self.accepted.contains_key(id)),
+            );
+            for event in &snapshot.events {
+                if let Event::Window(window) = event
+                    && !self.accepted.contains_key(&window.container.id)
+                {
+                    self.existing.insert(window.container.id);
+                }
+            }
             if !snapshot
                 .events
                 .iter()
-                .any(|event| matches!(event, Event::Window(_)))
+                .any(|e| matches!(e, Event::Window(_)))
             {
-                diagnostics.record(&format!(
-                    "accepted id={accepted}; final hierarchy/identity verified after {}ms",
-                    started.elapsed().as_millis()
-                ));
-                reap_if_exited(&mut child, &mut exited, diagnostics)?;
-                return Ok(());
+                return Ok(snapshot);
             }
-        } else if let Some(candidate) = candidate {
-            accepted = Some(candidate);
-            diagnostics.record(&format!(
-                "provisionally accepted id={candidate}; rechecking fresh state"
-            ));
-            continue;
-        }
-        reap_if_exited(&mut child, &mut exited, diagnostics)?;
-        let poll = deadline.min(Instant::now() + POLL_INTERVAL);
-        while let Some(event) = observer.next_until(poll)? {
-            windows.event(&event, diagnostics)?;
         }
     }
+
+    fn command(&mut self, command: String, expected: Hierarchy) -> Result<Snapshot, String> {
+        self.diagnostics.stage(format!("command {command}"));
+        let before = self.settled()?;
+        if matches!(command.as_str(), "splith" | "splitv")
+            && !before
+                .tree
+                .find_as_ref(|n| n.id == self.target)
+                .is_some_and(|n| n.focused)
+        {
+            return Err("workspace wrapping requires explicit target parent focus".into());
+        }
+        let replies = run_command((self.connect)()?, command, Instant::now() + IPC_TIMEOUT)?;
+        self.diagnostics
+            .record(&format!("command replies: {replies:?}"));
+        if replies.is_empty() || replies.iter().any(Result::is_err) {
+            return Err(format!("Sway command failed: {replies:?}"));
+        }
+        self.expected = expected;
+        let snapshot = self.settled()?;
+        self.diagnostics.record(&format!(
+            "verified structural identities {:?}",
+            self.expected
+        ));
+        Ok(snapshot)
+    }
+
+    fn focus(&mut self, path: &[usize]) -> Result<(), String> {
+        let id = self.expected.at_mut(path).id();
+        let snapshot = self.command(format!("[con_id={id}] focus"), self.expected.clone())?;
+        if !snapshot
+            .tree
+            .find_as_ref(|n| n.id == id)
+            .is_some_and(|n| n.focused)
+        {
+            return Err(format!("explicit focus id={id} was not observed"));
+        }
+        Ok(())
+    }
+
+    fn build(
+        &mut self,
+        node: &'a crate::config::Node,
+        after: Option<Vec<usize>>,
+    ) -> Result<Vec<usize>, String> {
+        let NodeKind::Split { split, children } = &node.kind else {
+            return self.launch(node, after);
+        };
+        let first = self.build(&children[0].value, after)?;
+        let layout = match split {
+            Orientation::Horizontal => NodeLayout::SplitH,
+            Orientation::Vertical => NodeLayout::SplitV,
+        };
+        let split_command = match split {
+            Orientation::Horizontal => "splith",
+            Orientation::Vertical => "splitv",
+        };
+        let mut expected = self.expected.clone();
+        let group;
+        let command;
+        if first.is_empty() {
+            // The first completed child occupies the workspace. workspace_split wraps
+            // its populated children, preserving even equal-axis meaningful groups.
+            // Select its direct owned child and explicitly focus its known parent.
+            let direct = vec![0];
+            self.focus(&direct)?;
+            let id = self.expected.at_mut(&direct).id();
+            let snapshot =
+                self.command(format!("[con_id={id}] focus parent"), self.expected.clone())?;
+            if !snapshot
+                .tree
+                .find_as_ref(|n| n.id == self.target)
+                .is_some_and(|n| n.focused)
+            {
+                return Err("expected explicit workspace parent focus before wrapping".into());
+            }
+            let Hierarchy::Split(_, old_layout, old_children) = expected else {
+                unreachable!()
+            };
+            expected = Hierarchy::Split(
+                Some(self.target),
+                layout,
+                vec![Hierarchy::Split(None, old_layout, old_children)],
+            );
+            command = split_command.to_owned();
+            group = Vec::new();
+        } else {
+            let id = self.expected.at_mut(&first).id();
+            let parent = &first[..first.len() - 1];
+            let Hierarchy::Split(_, parent_layout, siblings) = expected.at_mut(parent) else {
+                unreachable!()
+            };
+            let singleton = siblings.len() == 1;
+            let ordinary_parent = matches!(parent_layout, NodeLayout::SplitH | NodeLayout::SplitV);
+            if singleton {
+                *parent_layout = layout;
+                group = parent.to_vec();
+            } else {
+                let child = expected.at_mut(&first).clone();
+                *expected.at_mut(&first) = Hierarchy::Split(None, layout, vec![child]);
+                group = first;
+            }
+            command = if singleton && !ordinary_parent {
+                let layout_command = match split {
+                    Orientation::Horizontal => "layout splith",
+                    Orientation::Vertical => "layout splitv",
+                };
+                format!("[con_id={id}] {layout_command}")
+            } else {
+                format!("[con_id={id}] {split_command}")
+            };
+        }
+        self.diagnostics.record(&format!(
+            "expected split/reparent transition {:?} -> {expected:?}",
+            self.expected
+        ));
+        self.command(command, expected)?;
+        for (index, child) in children.iter().enumerate().skip(1) {
+            let mut previous = group.clone();
+            previous.push(index - 1);
+            self.build(&child.value, Some(previous))?;
+        }
+        Ok(group)
+    }
+
+    fn launch(
+        &mut self,
+        node: &'a crate::config::Node,
+        after: Option<Vec<usize>>,
+    ) -> Result<Vec<usize>, String> {
+        let NodeKind::Window {
+            id,
+            command,
+            matcher,
+            cwd,
+            env,
+        } = &node.kind
+        else {
+            unreachable!()
+        };
+        if let Some(path) = &after {
+            self.focus(path)?;
+        }
+        self.diagnostics
+            .stage(format!("prelaunch leaf={id:?} workspace={}", self.target));
+        let before = self.settled()?;
+        if let Some(path) = &after {
+            let previous = self.expected.at_mut(path).id();
+            if !before
+                .tree
+                .find_as_ref(|n| n.id == previous)
+                .is_some_and(|n| n.focused)
+            {
+                return Err(format!(
+                    "insertion focus left explicitly selected container id={previous} before launch"
+                ));
+            }
+        }
+        let mut path = after.unwrap_or_else(|| vec![0]);
+        if !self.accepted.is_empty() {
+            *path.last_mut().expect("sibling path") += 1;
+        }
+        let mut windows = Windows {
+            target: self.target,
+            existing: self.existing.clone(),
+            matcher,
+            accepted: &self.accepted,
+            observed: BTreeMap::new(),
+            matched: None,
+            invalid: BTreeMap::new(),
+        };
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(Duration::from_millis(self.timeout_ms))
+            .ok_or("window_timeout_ms exceeds the monotonic clock range; use a smaller timeout")?;
+        self.diagnostics
+            .stage(format!("launch leaf={id:?} workspace={}", self.target));
+        self.diagnostics.record(&format!(
+            "expected {matcher:?}; launching once (argv/env omitted)"
+        ));
+        let mut child = spawn(command, cwd.as_ref(), env)?;
+        self.diagnostics
+            .record(&format!("spawned pid={}", child.id()));
+        let mut exited = false;
+        let mut accepted = None;
+        let mut expected = self.expected.clone();
+        loop {
+            self.diagnostics.stage(format!(
+                "{} leaf={id:?}",
+                if accepted.is_some() {
+                    "final verification"
+                } else {
+                    "wait"
+                }
+            ));
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "window timeout: {}",
+                    windows.wait_diagnostics(started)
+                ));
+            }
+            let snapshot = self
+                .observer
+                .snapshot(
+                    (self.connect)()?,
+                    deadline.min(Instant::now() + IPC_TIMEOUT),
+                )
+                .map_err(|error| format!("{error}; {}", windows.wait_diagnostics(started)))?;
+            let was_accepted = accepted.is_some();
+            let candidate = windows.reconcile(&snapshot, self.diagnostics)?;
+            if let Some(previous) = accepted {
+                if candidate != Some(previous) {
+                    return Err(format!(
+                        "accepted window id={previous} disappeared or failed revalidation"
+                    ));
+                }
+            } else if let Some(candidate) = candidate {
+                let parent = &path[..path.len() - 1];
+                let Hierarchy::Split(_, _, children) = expected.at_mut(parent) else {
+                    unreachable!()
+                };
+                children.insert(
+                    *path.last().expect("leaf path"),
+                    Hierarchy::Window(candidate),
+                );
+                accepted = Some(candidate);
+                self.diagnostics.record(&format!(
+                    "provisionally accepted leaf={id:?} id={candidate}; rechecking fresh state"
+                ));
+            }
+            if let Some(candidate) = accepted {
+                let workspace = snapshot
+                    .tree
+                    .find_as_ref(|n| n.id == self.target)
+                    .ok_or("target missing")?;
+                self.diagnostics.record(&format!(
+                    "expected hierarchy {expected:?}; observed {}",
+                    describe(workspace)
+                ));
+                expected.verify(workspace)?;
+                if !snapshot
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::Window(_)))
+                {
+                    // Require two fresh trees, as in the original single-window path.
+                    if was_accepted {
+                        self.diagnostics.record(&format!(
+                            "accepted leaf={id:?} id={candidate}; hierarchy/identity verified"
+                        ));
+                        reap_if_exited(&mut child, &mut exited, self.diagnostics)?;
+                        self.accepted.insert(candidate, matcher);
+                        self.expected = expected;
+                        return Ok(path);
+                    }
+                }
+                if !was_accepted {
+                    continue;
+                }
+            }
+            reap_if_exited(&mut child, &mut exited, self.diagnostics)?;
+            let poll = deadline.min(Instant::now() + POLL_INTERVAL);
+            while let Some(event) = self.observer.next_until(poll)? {
+                windows.event(&event, self.diagnostics)?;
+            }
+        }
+    }
+}
+
+/// A disposable command connection is cancelled on expiry; never retry a command
+/// whose reply was lost because Sway may already have executed it.
+fn run_command(
+    socket: UnixStream,
+    command: String,
+    deadline: Instant,
+) -> Result<Vec<Result<(), String>>, String> {
+    let control = socket
+        .try_clone()
+        .map_err(|e| format!("clone command socket: {e}"))?;
+    let (sender, receiver) = mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("sway-command".into())
+        .spawn(move || {
+            // swayipc 4.0's run_command drops the success flag. Retain it using
+            // its typed decoder, with a bounded frame reader for this command only.
+            let read = || -> Result<Vec<Result<(), String>>, String> {
+                #[derive(serde::Deserialize)]
+                struct Reply {
+                    success: bool,
+                    error: Option<String>,
+                }
+                let mut socket = socket;
+                socket
+                    .write_all(&CommandType::RunCommand.encode_with(command.as_bytes()))
+                    .map_err(|e| format!("command IPC write: {e}"))?;
+                let mut header = [0; 14];
+                socket
+                    .read_exact(&mut header)
+                    .map_err(|e| format!("command IPC header: {e}"))?;
+                if &header[..6] != b"i3-ipc" {
+                    return Err("command IPC: invalid reply magic".into());
+                }
+                let size =
+                    u32::from_ne_bytes(header[6..10].try_into().expect("header size")) as usize;
+                let kind = u32::from_ne_bytes(header[10..14].try_into().expect("header type"));
+                if kind != 0 || size > 1024 * 1024 {
+                    return Err("command IPC: invalid reply type or reply exceeds 1 MiB".into());
+                }
+                let mut payload = vec![0; size];
+                socket
+                    .read_exact(&mut payload)
+                    .map_err(|e| format!("command IPC payload: {e}"))?;
+                let replies: Vec<Reply> = CommandType::RunCommand
+                    .decode((kind, payload))
+                    .map_err(|e| format!("command IPC decode: {e}"))?;
+                Ok(replies
+                    .into_iter()
+                    .map(|reply| {
+                        if !reply.success || reply.error.is_some() {
+                            Err(reply
+                                .error
+                                .unwrap_or_else(|| "Sway reported success=false".into()))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .collect())
+            };
+            let result = read();
+            let _ = sender.send(result);
+        })
+        .map_err(|e| format!("start command reader: {e}"))?;
+    let result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let _ = control.shutdown(Shutdown::Both);
+    if worker.join().is_err() {
+        return Err("command reader panicked".into());
+    }
+    match result {
+        Ok(Ok(replies)) => Ok(replies),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(format!("command deadline/channel failure: {error}")),
+    }
+}
+
+fn describe(node: &Node) -> String {
+    if node.nodes.is_empty() {
+        return node.id.to_string();
+    }
+    format!(
+        "{}:{:?}[{}]",
+        node.id,
+        node.layout,
+        node.nodes
+            .iter()
+            .map(describe)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn validate_accepted(
+    snapshot: &Snapshot,
+    accepted: &BTreeMap<i64, &Matcher>,
+    target: i64,
+    diagnostics: &mut Diagnostics,
+) -> Result<(), String> {
+    for event in &snapshot.events {
+        accepted_event(event, accepted, diagnostics)?;
+    }
+    let mut windows = Vec::new();
+    collect(&snapshot.tree, None, false, false, false, &mut windows);
+    for (id, matcher) in accepted {
+        let located = windows
+            .iter()
+            .find(|w| w.node.id == *id)
+            .ok_or_else(|| format!("accepted window id={id} disappeared"))?;
+        if located.workspace != Some(target)
+            || located.floating
+            || located.fullscreen
+            || located.scratchpad
+            || located.node.fullscreen_mode != Some(0)
+            || !matches_window(matcher, located.node)
+        {
+            return Err(format!(
+                "accepted window id={id} lost placement, identity or tiled state"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn matches_window(matcher: &Matcher, node: &Node) -> bool {
+    match matcher {
+        Matcher::AppId(value) => node.app_id.as_ref() == Some(value),
+        Matcher::Class(value) => {
+            node.window_properties
+                .as_ref()
+                .and_then(|p| p.class.as_ref())
+                == Some(value)
+        }
+    }
+}
+
+fn accepted_event(
+    event: &Event,
+    accepted: &BTreeMap<i64, &Matcher>,
+    diagnostics: &mut Diagnostics,
+) -> Result<(), String> {
+    let Event::Window(window) = event else {
+        return Ok(());
+    };
+    let node = &window.container;
+    // split/container_split reparents without emitting window::move. No ancestry in
+    // a move payload can prove it stayed on target, even during our command fence.
+    if window.change == WindowChange::Move {
+        diagnostics.record(&format!(
+            "unexpected move id={}; no safe ancestry history",
+            node.id
+        ));
+        return Err(format!(
+            "window move id={}; target safety is uncertain",
+            node.id
+        ));
+    }
+    if node.iter().any(|n| accepted.contains_key(&n.id))
+        && matches!(
+            window.change,
+            WindowChange::Close
+                | WindowChange::Floating
+                | WindowChange::FullscreenMode
+                | WindowChange::New
+        )
+    {
+        return Err(format!(
+            "accepted window/group id={} closed or changed floating/fullscreen/ownership state",
+            node.id
+        ));
+    }
+    if let Some(matcher) = accepted.get(&node.id)
+        && (window.change == WindowChange::Close
+            || matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn))
+            || node.fullscreen_mode != Some(0)
+            || !matches_window(matcher, node))
+    {
+        return Err(format!(
+            "accepted window id={} closed or changed identity/floating/fullscreen state",
+            node.id
+        ));
+    }
+    Ok(())
 }
 
 fn spawn(
@@ -287,6 +804,7 @@ struct Windows<'a> {
     target: i64,
     existing: HashSet<i64>,
     matcher: &'a Matcher,
+    accepted: &'a BTreeMap<i64, &'a Matcher>,
     observed: BTreeMap<i64, String>,
     matched: Option<i64>,
     invalid: BTreeMap<i64, &'static str>,
@@ -367,14 +885,10 @@ impl Windows<'_> {
         let Event::Window(window) = event else {
             return Ok(());
         };
+        accepted_event(event, self.accepted, diagnostics)?;
         let node = &window.container;
-        // Window IPC events omit workspace ancestry. A move away and back cannot be
-        // disproved with a later tree, even for foreign windows. Abort conservatively.
-        if window.change == WindowChange::Move {
-            return Err(format!(
-                "window move id={}; event lacks workspace ancestry, target safety is uncertain",
-                node.id
-            ));
+        if self.accepted.contains_key(&node.id) {
+            return Ok(());
         }
         if self.existing.contains(&node.id) {
             return Ok(());
@@ -404,6 +918,7 @@ impl Windows<'_> {
         snapshot: &Snapshot,
         diagnostics: &mut Diagnostics,
     ) -> Result<Option<i64>, String> {
+        validate_accepted(snapshot, self.accepted, self.target, diagnostics)?;
         for event in &snapshot.events {
             self.event(event, diagnostics)?;
         }
@@ -413,6 +928,9 @@ impl Windows<'_> {
         let mut unresolved = false;
         for located in &windows {
             let node = located.node;
+            if self.accepted.contains_key(&node.id) {
+                continue;
+            }
             if self.existing.contains(&node.id) {
                 if located.workspace == Some(self.target) {
                     return Err(format!(
@@ -482,20 +1000,6 @@ impl Windows<'_> {
                 .any(|event| matches!(event, Event::Window(w) if w.container.id == matched))
             {
                 return Err(format!("matched window id={matched} disappeared"));
-            }
-        }
-        // A single leaf must be the direct, sole tiled child. Empty wrappers or foreign
-        // structural containers are not something this milestone can safely interpret.
-        if let Some(candidate) = candidate {
-            let workspace = snapshot
-                .tree
-                .find_as_ref(|n| n.id == self.target)
-                .ok_or("target missing")?;
-            if workspace.nodes.len() != 1
-                || workspace.nodes[0].id != candidate
-                || !workspace.floating_nodes.is_empty()
-            {
-                return Err("unexpected single-window hierarchy on target workspace".into());
             }
         }
         Ok(if unresolved { None } else { candidate })

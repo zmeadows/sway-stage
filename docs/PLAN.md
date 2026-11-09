@@ -3,8 +3,9 @@
 Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
 modules only as implemented responsibilities justify them. The
 [specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. Milestones 1, 2A, and 2B are implemented; 2C–4 remain pending.
-Live Sway behavior remains manually unverified.
+engineering decisions. Milestones 1, 2A, 2B, and 2C.1 are implemented. Sizing/final focus (2C.2) and
+milestones 3–4 remain pending. The user has manually verified the single-Foot, two-Foot,
+and four-window Firefox/Foot layouts on Sway; broader compositor behavior remains unverified.
 
 ## Preliminary step: read-only IPC inspection
 
@@ -138,7 +139,7 @@ they still used only disposable socket pairs. Hosted CI and live Sway remain unv
 
 ## 2B. Safe single-window launching and diagnostics
 
-Implemented: `load NAME` supports only a validated root window. Split roots are rejected
+Historical 2B delivery (extended by 2C.1 below): `load NAME` supports only a validated root window. Split roots are rejected
 before IPC or launching. `src/launch.rs` owns the concrete synchronous launch/acceptance
 sequence, `src/diagnostics.rs` owns operational logging/notifications, and the existing
 observer now lives in `src/observation.rs`. The development observation example imports
@@ -246,19 +247,91 @@ timeout configuration, so socket tests run with approved escalation while still 
 only disposable socket pairs. No live compositor connections or desktop operations were
 performed. Hosted CI, live placement/activation, multi-seat behavior, and a supported Sway
 version remain unverified. Existing upstream decoding/socket-establishment limits from 2A
-still apply. Milestone 2C remains pending.
+still apply. Milestone 2C.1 extends this path below.
 
-## 2C. Nested layout construction, sizing, and final focus
+## 2C.1. Generic nested layout construction
 
-Pending. Extend the guarded single-window path to nested splits, relative sizing, and
-default/overridden final focus. Verify nested ownership, command replies and observed
-hierarchy, weight tolerance, bounded resizing, accepted-window loss, and interference
-before every mutation. Keep all failures non-destructive.
+Implemented by extending `src/launch.rs`: one observer, a cumulative global prelaunch ID
+history, accepted container IDs with their original matchers, and an expected ordered
+hierarchy. Application launch, identity matching, deadlines, and non-destructive failure
+handling share the single-window path. No dependencies or lockfile changes were needed.
 
-An explicitly authorized, isolated Sway smoke test must reproduce the reference's four
-windows and test abort behavior before declaring this milestone complete. Until then,
-report compositor behavior as unverified. Do not build a generic backend/plugin framework
-to accommodate tests; pure tree calculations and a small IPC boundary are sufficient.
+The recursive algorithm completes the first child, encloses it in the required split,
+then focuses each completed child by ID before launching the next sibling. Sway's
+singleton split optimization changes the existing parent's axis; a populated workspace
+split wraps its completed children when the first child itself is a split. This preserves
+meaningful groups even on equal axes, without placeholders, scratchpad use, moves, or
+arbitrary extra splits. When workspace wrapping is needed, select an owned direct child,
+focus its parent, verify workspace focus explicitly, and guard that focus again immediately
+before the workspace split. Other commands use numeric container criteria exclusively.
+
+Before each command/launch, fresh fenced state must match all accepted identities,
+placement, tiled/fullscreen state, and hierarchy. Every command reply is checked and its
+exact expected structural result is read back before continuing. New wrapper IDs are
+bound from the verified tree, not predicted; unexpected wrapper replacement fails.
+Logs record leaf IDs/accepted IDs, commands/replies, expected and observed hierarchy,
+reparent transitions, wrapper identities, interference and the failing operation.
+
+Source review on 2026-11-09 against upstream master:
+
+- [`container_split`, `container_replace`, `container_flatten` and `container_squash`](https://github.com/swaywm/sway/blob/master/sway/tree/container.c)
+  explain singleton orientation changes, wrapper creation and simplification. The split
+  path reparents without emitting window `move` events.
+- [`workspace_split`/`workspace_wrap_children`](https://github.com/swaywm/sway/blob/master/sway/tree/workspace.c)
+  wrap populated children while retaining their old axis.
+- [`view_map`](https://github.com/swaywm/sway/blob/master/sway/tree/view.c) inserts the
+  new tiled view after the focused container, including a focused structural group.
+- [`split`](https://github.com/swaywm/sway/blob/master/sway/commands/split.c),
+  [`focus`](https://github.com/swaywm/sway/blob/master/sway/commands/focus.c), and
+  [`layout`](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c) supply
+  the command semantics; [`arrange`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c)
+  supplies ordinary default sizing without tree squashing.
+
+Expected reparenting is authorized only as that exact tree transition between guarded
+command fences. No move-event exemption is needed or permitted: payloads lack ancestry,
+so even a move during our command is fatal. Foreign structural activity can still cause
+conservative aborts. Tree/event fencing reduces races but cannot make IPC transactional.
+These source-level findings are not proof of compatibility with an installed Sway version.
+
+The locked `swayipc-types` 2.0.3 `CommandOutcome::decode` ignores `success` and can lose an
+incomplete error object, so `Connection::run_command` alone cannot meet the reply invariant.
+A small disposable command connection uses swayipc's request encoder and typed decoder,
+retaining `success` plus optional error text. Its frame reader checks magic, reply type,
+a 1 MiB response bound, and a monotonic deadline; an uncertain command is never retried.
+The existing tree/event decoder and socket-establishment limitations still apply.
+
+Isolated socket transcripts cover the single-window regressions, two H/V siblings,
+three siblings, nested splits on either/both sides, three meaningful levels, equal-axis
+groups, initial tabbed workspace orientation, the four-window example, and repeated
+selectors. Failure cases cover reparenting/reordering, invalid hierarchy, missing/closed
+accepted windows, unexpected descendants, focus away-and-back, IPC loss, unsuccessful or
+empty replies, malformed command frames, and stalled/truncated command replies. Fixture
+transcripts supply trees and exact commands; they do not simulate a window manager.
+
+Verification: `cargo fmt --all -- --check`, Clippy with warnings denied, locked all-target
+check, all 60 tests (51 unit/IPC and 9 CLI), locked release build, and locked Rust 1.89.0
+all-target check pass. Both manual example files also pass the release binary's `check`.
+The sandbox denied socket timeout setup, so IPC tests used approved escalation and only
+disposable socket pairs. No packages or toolchains were installed. Insertion focus is
+rechecked before each subsequent spawn; interference stops before launching another app.
+
+Weights and final focus remain validated but unapplied. Manual two-Foot and four-window
+checks are documented in the README. The user reports that both the two-Foot and
+four-window Firefox/Foot manual checks passed. This confirms those construction cases;
+arbitrary layouts, live interference/abort behavior, multi-seat behavior, and a supported
+Sway version remain unverified. The agent performed no live Sway operations. The code
+is ready for 2C.2 work.
+
+## 2C.2. Proportional sizing and final focus
+
+Pending. Apply relative weights from outer splits inward, verify tolerance with bounded
+adjustment, then explicitly focus the configured or first leaf by accepted ID. Preserve
+the same observation session, ownership checks, hierarchy validation and failure behavior.
+No resizing or final-focus selection is part of 2C.1.
+
+An isolated manual Sway check must reproduce the reference's hierarchy, proportions and
+final focus and test abort behavior before declaring the combined milestone complete.
+Do not build a generic backend/plugin framework to accommodate tests.
 
 ## 3. Capture and optional picker
 
@@ -337,13 +410,14 @@ Recent releases and a compatible declared MSRV are useful evidence, not a mainte
 security guarantee. Before adding each dependency, inspect current releases, advisories,
 license, necessary features, transitive graph, and actual MSRV compilation. Keep the
 lockfile committed; do not silently raise the compiler baseline to satisfy resolution.
-There is no need for an async IPC crate, a custom IPC protocol implementation, a config
-framework, or a process supervision system at this stage.
+There is no need for an async IPC crate, a general IPC protocol implementation, a config
+framework, or a process supervision system. The narrow command-reply reader in 2C.1
+exists to preserve the success flag discarded by the upstream API.
 
 ## Remaining decisions and proof points
 
 - Milestone 2A proves bounded event observation with fixtures; 2B adds fenced single-window
-  acceptance. 2C must extend race-aware guards to layout mutation and sizing.
+  acceptance. 2C.1 extends those guards to construction; 2C.2 must preserve them during sizing.
   Strict wire-validation limits and unbounded socket establishment remain documented above.
 - App IDs/classes cannot prove launch causality, and IPC cannot make observation and
   mutation atomic. Test conservative aborts; do not disguise these limits as recoverable

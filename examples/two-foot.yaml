@@ -1,0 +1,13 @@
+# See docs/SPECIFICATION.md. Construction uses default sizes; weights/final focus are pending.
+version: 1
+layout:
+  split: horizontal
+  children:
+    - id: left
+      command: [foot, --app-id=sway-stage-left]
+      match:
+        app_id: sway-stage-left
+    - id: right
+      command: [foot, --app-id=sway-stage-right]
+      match:
+        app_id: sway-stage-right
