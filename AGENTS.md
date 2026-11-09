@@ -100,8 +100,11 @@ Each kind of information has one home:
 Inspect callers and failure paths before editing. Test behavior at meaningful boundaries:
 configuration fixtures, pure tree/weight calculations, and recorded IPC trees/events.
 Introduce only the smallest test seam needed. Keep automated checks non-interactive and
-independent of a live compositor. Live tests require explicit authorization and an
-isolated disposable Sway session; never point them at the user's session.
+independent of a live compositor. Never execute commands that modify the user's live
+Sway session, including launching or terminating applications, changing focus, or moving
+or resizing windows. Never run `sway-stage load` against the real compositor. All
+live-desktop behavioral verification must be performed manually by the user in an
+isolated disposable Sway session.
 
 After changes, review the diff as a maintainer: can a reader identify authoritative data,
 side effects, failure paths, and the reason for each helper? Update only documentation
