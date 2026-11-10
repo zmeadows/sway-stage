@@ -1,4 +1,4 @@
-//! Raw, read-only Sway IPC through `swaymsg`, decoded independently of the production
+//! Raw Sway IPC through `swaymsg`, decoded independently of the production
 //! `swayipc` client so the harness judges sway-stage against its own view of Sway.
 //!
 //! The types model only fields the harness reads, and unmodeled fields are ignored.
@@ -26,7 +26,7 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 const SUBSCRIBED_EVENTS: &str = r#"["workspace","window","tick"]"#;
 
 /// `swaymsg` bound to one explicit compositor socket. It provides read-only queries, tick
-/// fences, and the event subscription; it has no command interface.
+/// fences, the event subscription, and only the lifecycle's three narrow mutations.
 pub struct Swaymsg {
     executable: PathBuf,
     socket: PathBuf,
@@ -49,6 +49,41 @@ impl Swaymsg {
 
     pub fn get_tree(&self) -> Result<TreeNode, String> {
         self.query("get_tree", None)
+    }
+
+    /// Pin sway-stage children to the socket used for our independent observations.
+    pub fn select_socket(&self, command: &mut Command) {
+        command.env("SWAYSOCK", &self.socket);
+    }
+
+    /// Read-only diagnostics remain possible after SIGINT, without another event fence.
+    pub fn remaining_tree(&self) -> Result<TreeNode, String> {
+        let mut command = self.invocation();
+        command.args(["-t", "get_tree"]);
+        let output = process::run_diagnostic(command, IPC_TIMEOUT)?;
+        serde_json::from_str(&output)
+            .map_err(|error| format!("remaining-window tree: invalid reply: {error}"))
+    }
+
+    pub fn switch_disposable(&self, number: &str) -> Result<(), String> {
+        self.command(&disposable_command(number)?)
+    }
+
+    pub fn restore_workspace(&self, name: &str) -> Result<(), String> {
+        self.command(&restoration_command(name)?)
+    }
+
+    /// The caller must have just revalidated this window's ownership and hierarchy.
+    pub fn close_owned_window(&self, container_id: i64) -> Result<(), String> {
+        self.command(&close_command(container_id)?)
+    }
+
+    fn command(&self, text: &str) -> Result<(), String> {
+        process::check_interruption()?;
+        let mut command = self.invocation();
+        command.args(["-t", "command", text]);
+        let output = process::run(command, "Sway command", IPC_TIMEOUT)?;
+        decode_command_reply(&output).map_err(|error| format!("Sway command {text:?}: {error}"))
     }
 
     pub fn get_workspaces(&self) -> Result<Vec<Workspace>, String> {
@@ -133,17 +168,18 @@ impl EventSubscription {
     pub fn next_event(&mut self, deadline: Instant) -> Result<Event, String> {
         let mut chunk = [0; READ_CHUNK_BYTES];
         loop {
+            process::check_interruption()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("event observation deadline expired".into());
+            }
             if let Some(newline_index) = self.pending.iter().position(|byte| *byte == b'\n') {
                 let line: Vec<u8> = self.pending.drain(..=newline_index).collect();
                 return decode_event(&line[..newline_index]);
             }
 
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err("event observation deadline expired".into());
-            }
             self.output
-                .set_read_timeout(Some(remaining))
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(50))))
                 .map_err(|error| format!("configure event socket: {error}"))?;
             match self.output.read(&mut chunk) {
                 Ok(0) => return Err("Sway event subscription disconnected".into()),
@@ -156,7 +192,8 @@ impl EventSubscription {
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
                 {
-                    return Err("event observation deadline expired".into());
+                    // Short reads allow SIGINT polling without losing partial lines.
+                    continue;
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error) => return Err(format!("read Sway events: {error}")),
@@ -175,6 +212,63 @@ impl EventSubscription {
             None => Ok(()),
         }
     }
+}
+
+/// Positive decimal workspace numbers, with neither leading zeros nor command syntax.
+pub fn workspace_number(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 9
+        || !matches!(bytes[0], b'1'..=b'9')
+        || !bytes.iter().all(u8::is_ascii_digit)
+    {
+        return Err("use an explicit positive workspace number (1–999999999)".into());
+    }
+    Ok(text.to_owned())
+}
+
+/// Validate before any switch, and again where the restoration command is constructed.
+pub fn validate_restoration_name(name: &str) -> Result<(), String> {
+    let mut bytes = name.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || b" _.:+-".contains(&byte))
+    {
+        return Err("starting workspace name cannot be safely represented by this harness".into());
+    }
+    Ok(())
+}
+
+fn disposable_command(number: &str) -> Result<String, String> {
+    let number = workspace_number(number)?;
+    Ok(format!("workspace --no-auto-back-and-forth {number}"))
+}
+
+fn restoration_command(name: &str) -> Result<String, String> {
+    validate_restoration_name(name)?;
+    Ok(format!("workspace --no-auto-back-and-forth \"{name}\""))
+}
+
+fn close_command(container_id: i64) -> Result<String, String> {
+    if container_id <= 0 {
+        return Err("owned window must have a positive container ID".into());
+    }
+    Ok(format!("[con_id={container_id}] kill"))
+}
+
+fn decode_command_reply(output: &str) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Reply {
+        success: bool,
+    }
+
+    let replies: Vec<Reply> = serde_json::from_str(output)
+        .map_err(|_| "invalid command reply; expected exactly one explicit success".to_owned())?;
+    if !matches!(replies.as_slice(), [Reply { success: true }]) {
+        return Err("expected exactly one successful command reply".into());
+    }
+    Ok(())
 }
 
 impl Drop for EventSubscription {

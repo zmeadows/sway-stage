@@ -5,6 +5,25 @@ use crate::fixtures::{
 };
 use serde_json::{Value, json};
 
+#[test]
+fn reporting_uncertainty_permanently_invalidates_history() {
+    let mut trusted = true;
+    assert_eq!(
+        Failure::Check("sizing".into()).report_history(&mut trusted),
+        "sizing"
+    );
+    assert!(trusted);
+    assert_eq!(
+        Failure::Uncertain("ownership".into()).report_history(&mut trusted),
+        "ownership"
+    );
+    assert!(!trusted);
+    Failure::Check("later failure".into()).report_history(&mut trusted);
+    assert!(!trusted);
+    Failure::Uncertain("interrupted".into()).report_history(&mut trusted);
+    assert!(!trusted);
+}
+
 /// The target workspace holding one focused window.
 fn focused_target() -> Value {
     desktop(

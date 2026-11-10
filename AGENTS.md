@@ -130,14 +130,22 @@ isolated disposable Sway session.
 
 Both integration harnesses, `scripts/integration.py` and its Rust replacement, the
 `integration` Cargo example in `tools/integration/`, are exclusively for the user's manual
-execution. Agents must never execute either one, including `--help`, partial runs, or trial
-runs: never run the script, `cargo run --example integration`, or the built example binary.
+execution. The Rust lifecycle is implemented but awaits the user's manual acceptance;
+keep the Python reference until that acceptance. Agents must never execute either one,
+including `--help`, partial runs, or trial runs: never run the script,
+`cargo run --example integration`, or the built example binary.
 Validate them only by syntax parsing, compilation, static inspection, and the offline
 `integration_harness` tests. That test target is a separate crate root without the harness
 entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
 processes. Never connect either harness to a live compositor. Their explicit workspace
 switching and owned-window cleanup are development-harness exceptions to the CLI's
 no-switch/no-close policy, not permission for agents to perform desktop operations.
+
+Window cleanup must remain an explicit verified success phase, never a destructor or
+failure handler. SIGINT only records a request; ordinary control flow invalidates focus
+history, stops further mutations, and skips restoration. Child process groups isolate
+terminal interrupts, but termination must target only a harness-owned direct child by PID,
+never a process group, descendant application, or process discovered through `/proc`.
 
 **Human readability review.** After every source change, reread the modified code in full
 as a maintainer meeting it for the first time, not only as a diff. Check that names are

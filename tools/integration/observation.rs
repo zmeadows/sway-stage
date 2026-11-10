@@ -50,9 +50,17 @@ impl Events {
     /// Returns once Sway's initial tick proves the subscription is registered.
     pub fn subscribe(swaymsg: &Swaymsg) -> Result<Self, String> {
         let mut subscription = swaymsg.subscribe()?;
-        match subscription.next_event(Instant::now() + IPC_TIMEOUT)? {
-            Event::Tick(tick) if tick.first => {}
-            _ => return Err("missing initial subscription tick".into()),
+        let readiness = subscription
+            .next_event(Instant::now() + IPC_TIMEOUT)
+            .and_then(|event| match event {
+                Event::Tick(tick) if tick.first => Ok(()),
+                _ => Err("missing initial subscription tick".into()),
+            });
+        if let Err(mut error) = readiness {
+            if let Err(stop_error) = subscription.close() {
+                error.push_str(&format!("; {stop_error}"));
+            }
+            return Err(error);
         }
 
         Ok(Self {
@@ -219,10 +227,25 @@ impl Failure {
     /// Returns the message to report. An uncertain failure also distrusts focus history,
     /// which refuses every later fence and so forbids cleanup and workspace restoration.
     pub fn report(self, events: &mut Events) -> String {
+        self.report_history(&mut events.focus_history_trusted)
+    }
+
+    fn report_history(self, focus_history_trusted: &mut bool) -> String {
         match self {
             Failure::Check(message) => message,
-            Failure::Uncertain(message) => events.distrust_focus_history(message),
+            Failure::Uncertain(message) => {
+                *focus_history_trusted = false;
+                message
+            }
         }
+    }
+}
+
+// Strings come only from ordinary filesystem/process checks or observations that already
+// invalidate their own history. Verification retains Failure until the central report.
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Check(message)
     }
 }
 

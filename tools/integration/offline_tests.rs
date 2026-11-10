@@ -15,6 +15,7 @@ mod capture;
 mod fixtures;
 mod ipc;
 mod layout;
+mod lifecycle;
 mod observation;
 mod ownership;
 mod process;

@@ -265,6 +265,22 @@ fn unusable_geometry_fails_ordinarily_but_overlap_is_uncertain() {
 }
 
 #[test]
+fn failure_context_omits_launch_arguments_and_environment() {
+    let mut scenario = standard_scenario("horizontal-pair");
+    let leaf = scenario.layout.first_leaf_mut();
+    leaf.command.push("sensitive-launch-argument".into());
+    leaf.env
+        .push(("PRIVATE_VALUE".into(), "sensitive-environment-value".into()));
+    let message = check_message(verify(
+        horizontal_pair_desktop(&scenario, (700, 300), 21),
+        &scenario,
+        &accepted(&[(20, "window1"), (21, "window2")]),
+    ));
+    assert_contains(&message, "Expected layout:");
+    assert!(!message.contains("sensitive-") && !message.contains("PRIVATE_VALUE"));
+}
+
+#[test]
 fn floating_fullscreen_scratchpad_and_unsupported_containers_are_uncertain() {
     let scenario = standard_scenario("horizontal-pair");
     let owned = accepted(&[(20, "window1"), (21, "window2")]);

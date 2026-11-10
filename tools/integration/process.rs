@@ -16,8 +16,10 @@ use std::io::{ErrorKind, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,10 +30,39 @@ const MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Resolves a bare command name on `PATH` to a canonical absolute path.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// The handler only records a request. Desktop decisions and child shutdown happen in
+/// normal control flow. Repeated SIGINTs cannot bypass the guarded failure path.
+pub fn install_sigint_handler() -> Result<(), String> {
+    signal_hook::flag::register(signal_hook::consts::SIGINT, &INTERRUPTED)
+        .map(|_| ())
+        .map_err(|error| format!("install SIGINT handler: {error}"))
+}
+
+pub fn interruption_requested() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
+pub fn check_interruption() -> Result<(), String> {
+    require_not_interrupted(interruption_requested())
+}
+
+fn require_not_interrupted(requested: bool) -> Result<(), String> {
+    if requested {
+        return Err("interrupted; focus history is no longer trusted".into());
+    }
+    Ok(())
+}
+
+/// Resolves a command name on `PATH` or an explicit path to a canonical executable.
 pub fn find_executable(name: &str) -> Result<PathBuf, String> {
-    let candidate = find_on_path(name)
-        .ok_or_else(|| format!("required executable not found on PATH: {name}"))?;
+    let candidate = if name.contains('/') {
+        Some(PathBuf::from(name)).filter(|path| is_executable_file(path))
+    } else {
+        find_on_path(name)
+    }
+    .ok_or_else(|| format!("required executable not found or not executable: {name}"))?;
     fs::canonicalize(&candidate)
         .map_err(|error| format!("resolve {}: {error}", candidate.display()))
 }
@@ -47,20 +78,38 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
         }
 
         let candidate = directory.join(name);
-        let is_executable_file = fs::metadata(&candidate)
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
-        if is_executable_file {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
     None
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 /// Runs `command` to completion within `timeout` and returns its stdout, which must be
 /// UTF-8. Stdin is null. Environment changes the caller made on `command` apply to this
 /// child only. A nonzero exit reports the child's stderr. On expiry or a capture failure,
 /// the direct child is killed and reaped before the error is returned.
-pub fn run(mut command: Command, operation: &str, timeout: Duration) -> Result<String, String> {
+pub fn run(command: Command, operation: &str, timeout: Duration) -> Result<String, String> {
+    run_bounded(command, operation, timeout, false)
+}
+
+/// Only the read-only remaining-window query may run after an interrupt. It still has
+/// output limits, a deadline, and direct-child shutdown on failure.
+pub fn run_diagnostic(command: Command, timeout: Duration) -> Result<String, String> {
+    run_bounded(command, "remaining-window tree query", timeout, true)
+}
+
+fn run_bounded(
+    mut command: Command,
+    operation: &str,
+    timeout: Duration,
+    diagnostic: bool,
+) -> Result<String, String> {
     let (stdout_socket, child_stdout) = socket_pair(operation)?;
     let (stderr_socket, child_stderr) = socket_pair(operation)?;
     let mut stdout = CapturedOutput::new("stdout", stdout_socket, MAX_STDOUT_BYTES)
@@ -72,9 +121,10 @@ pub fn run(mut command: Command, operation: &str, timeout: Duration) -> Result<S
         .stdin(Stdio::null())
         .stdout(child_stdout)
         .stderr(child_stderr);
-    let mut child = spawn(command, operation)?;
+    let mut child = spawn(command, operation, diagnostic)?;
 
-    let status = match collect_until_exit(&mut child, &mut stdout, &mut stderr, timeout) {
+    let status = match collect_until_exit(&mut child, &mut stdout, &mut stderr, timeout, diagnostic)
+    {
         Ok(status) => status,
         Err(error) => {
             let mut message = format!("{operation}: {error}");
@@ -103,7 +153,7 @@ pub fn spawn_with_output(
         .stdin(Stdio::null())
         .stdout(child_stdout)
         .stderr(Stdio::null());
-    let child = spawn(command, operation)?;
+    let child = spawn(command, operation, false)?;
     Ok((child, output))
 }
 
@@ -134,11 +184,19 @@ pub fn kill_and_reap(child: &mut Child, description: &str) -> Result<(), String>
 
 /// Takes `command` by value so it is dropped on return. A `Command` keeps its own copies
 /// of the child's socket ends, and end of output is observable only once they are closed.
-fn spawn(mut command: Command, operation: &str) -> Result<Child, String> {
+fn spawn(mut command: Command, operation: &str, diagnostic: bool) -> Result<Child, String> {
     // Executables are resolved beforehand; never rely on PATH lookup at spawn time.
     if !Path::new(command.get_program()).is_absolute() {
         return Err(format!("{operation}: executable must be an absolute path"));
     }
+    if !diagnostic {
+        check_interruption()?;
+    }
+
+    // A terminal sends SIGINT to its foreground process group. Isolate each direct child
+    // before exec so Ctrl-C reaches the harness, not sway-stage's launched applications.
+    // Never signal the group: cancellation kills only this direct child by Child's PID.
+    command.process_group(0);
     command
         .spawn()
         .map_err(|error| format!("{operation}: start: {error}"))
@@ -157,10 +215,14 @@ fn collect_until_exit(
     stdout: &mut CapturedOutput,
     stderr: &mut CapturedOutput,
     timeout: Duration,
+    diagnostic: bool,
 ) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     let mut exit_status = None;
     loop {
+        if !diagnostic {
+            check_interruption()?;
+        }
         let stdout_progressed = stdout.read_chunk()?;
         let stderr_progressed = stderr.read_chunk()?;
         if exit_status.is_none() {
@@ -233,6 +295,21 @@ impl CapturedOutput {
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(error) => return Err(format!("read {}: {error}", self.name)),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn interruption_is_a_stop_request_even_when_reported_repeatedly() {
+        assert!(super::require_not_interrupted(false).is_ok());
+        for _ in 0..2 {
+            assert!(
+                super::require_not_interrupted(true)
+                    .unwrap_err()
+                    .contains("interrupted")
+            );
         }
     }
 }

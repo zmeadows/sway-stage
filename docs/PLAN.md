@@ -25,12 +25,11 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
   scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
   workspace restoration.
-- In progress: a development-only Rust replacement for that script in `tools/integration/`
-  (the `integration` Cargo example). It has bounded processes, raw `swaymsg` queries, the
-  persistent event subscription with tick fences, validated snapshots, the ten scenario
-  definitions, and independent layout, ownership, and capture verification, tested
-  offline by the `integration_harness` test target. It refuses to run until scenario
-  execution, cleanup, and restoration are ported; see [the Rust port](#rust-port).
+- The development-only Rust replacement in `tools/integration/` (the `integration` Cargo
+  example) implements the complete lifecycle: CLI, two preflights, ten scenarios,
+  independent verification, guarded cleanup, restoration, SIGINT handling, and reporting.
+  It is verified offline by `integration_harness` but awaits manual desktop acceptance;
+  the Python script remains the behavioral reference. See [the Rust port](#rust-port).
 
 Next remaining milestone: public release preparation (4).
 
@@ -64,8 +63,8 @@ multi-seat behavior, and a supported Sway version.
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
   one retained `GET_TREE` response and refuses unrepresentable arrangements when rendered.
-- **3B. Integration harness.** All six standard and four extended scenarios passed the
-  user's manual runs.
+- **3B. Integration harness.** All six standard and four extended Python scenarios passed
+  the user's manual runs. The complete Rust port awaits separate manual acceptance.
 - **3A.1. Optional command inference and integration coverage.** Implemented
   `capture --infer-commands` with bounded Linux process-argument reads and per-window
   null fallback. Offline fixtures cover malformed data, argument preservation, PID
@@ -127,9 +126,8 @@ own `swaymsg` subscription process is terminated on exit.
 
 Firefox uses a fresh private profile, HOME, and XDG directories per scenario, with local
 first-run preferences, `--no-remote --new-instance --profile`, and
-`about:blank`. Native Wayland is required via child-only environment settings. A bounded,
-display-disconnected help probe checks the installed variant's profile, new-instance, and
-new-window options. The expected app ID comes from its adjacent `application.ini`
+`about:blank`. Native Wayland is required via child-only environment settings.
+The expected app ID comes from its adjacent `application.ini`
 `App.RemotingName` (including `firefox-esr`), or an explicit `--firefox-app-id` override;
 the observed native identity must agree. Both remoting flags are deliberate: newer
 [Mozilla startup code](https://github.com/mozilla/gecko-dev/blob/master/toolkit/xre/nsAppRunner.cpp)
@@ -153,7 +151,7 @@ present. Otherwise it is skipped; an empty original workspace destroyed by Sway 
 recreated. A concurrent user action can still occur after the last guard and before a
 command, so run only in a disposable session and leave input idle.
 
-The six standard and four extended scenarios, including inference checks, have passed
+The six standard and four extended Python scenarios, including inference checks, have passed
 manual acceptance. Verification that interference stops safely with useful diagnostics
 remains outstanding. No live execution by an agent is permitted,
 including help, partial runs, or trial runs.
@@ -162,36 +160,65 @@ including help, partial runs, or trial runs.
 
 `tools/integration/` ports the script with the same scenarios and safety model; the
 script remains the behavioral reference until the port passes the same manual runs.
-Decisions so far:
+The executable lifecycle is complete but has not been manually accepted. Decisions:
 
 - Scenarios use harness-owned layout types, independent of `LayoutNode` and the
   production parser. Expected YAML keeps the script's fixed format, including JSON flow
   commands and environments, and capture is still compared line by line.
 - The script's `require`/`require_control` split is `Failure::Check`/`Failure::Uncertain`.
   `Failure::report` distrusts focus history for uncertain failures, after which every
-  fence is refused, so neither cleanup nor restoration can follow. As in the script, only
+  fence is refused, so neither cleanup nor restoration can follow. In layout verification,
   unusable geometry and sizing beyond 5 points are ordinary failures; hierarchy, identity,
   order, focus, history, and ownership failures are uncertain.
 - Firefox and Xterm keep their unresolved `PATH` names, like `shutil.which`, so wrapper or
   multi-call links still work; Foot and `sleep` are canonicalized. A Firefox root is
   `sway-stage-firefox-RUN_ID-SCENARIO` in the temporary directory, created exclusively
   with mode 0700, rather than a random `mkdtemp` name.
+- `lifecycle.rs` keeps preparation, observation, load/capture verification, cleanup, and
+  restoration in synchronous execution order. The initial preflight precedes six standard
+  configuration checks; a second preflight immediately precedes the designated switch.
+  Optional executable discovery waits until the extended scenarios; each application is
+  prepared only just before its scenario. Standard
+  configurations are checked again per scenario, with an additional fresh empty-workspace
+  fence and global ID snapshot immediately before every load. YAML directories are 0700
+  and files 0600, automatically removed separately from retained Firefox roots.
+- The only command interfaces switch to the validated positive decimal target, restore
+  the validated original name, or issue `[con_id=EXACT_ID] kill`. Each requires exactly one
+  explicit successful reply. Cleanup refreshes event, ownership, signature, and complete
+  hierarchy evidence before each close; bounded observations then verify disappearance,
+  ownership, and the predicted remaining hierarchy before advancing the baseline. Close
+  order is launch order even though accepted IDs are stored in a sorted map.
+- No failure path enters window cleanup. Uncertain verification failures pass through
+  `Failure::report` before any restoration decision. Ordinary failures may restore only
+  with fresh quiet observations, trusted disposable focus, and the exact original ID/name
+  still present. Restoration also verifies the destination ID after switching. An
+  unestablished disposable identity never permits restoration.
+- `signal-hook` with default features disabled installs only an atomic SIGINT flag action;
+  no signal handler performs IPC or cleanup. Subprocess and event reads poll interruption,
+  and every desktop mutation checks it. Interruption invalidates history and skips
+  restoration. Every helper and directly launched CLI child uses
+  `CommandExt::process_group(0)` to isolate terminal Ctrl-C. Timeout, interruption, and
+  capture failures kill and reap only the direct child by PID, never its descendants or
+  process group. The subscription helper is stopped on every exit, including readiness
+  failure. Unlike Python's helper shutdown, Rust uses direct SIGKILL with a two-second
+  reap bound rather than SIGTERM followed by SIGKILL.
+- Failure diagnostics retain the last associated IDs and query the tree read-only, even
+  after interruption; candidate IDs, selectors, PIDs, workspaces, and unsafe state do not
+  imply ownership. Inferred arguments stay in memory. Layout failure context omits launch
+  arguments and environment values, including Firefox details. Counts and retained browser
+  roots are reported on success and failure. Typed JSON decoding, bounded child output,
+  and ignoring relative `PATH` entries can reject inputs Python accepts.
 - `integration_harness` is a separate crate root over the harness modules without
   `main.rs`. Its tests use constructed Sway trees and events, temporary files, and the
-  test process's own `/proc/PID/cmdline` for process evidence.
+  test process's own `/proc/PID/cmdline` for process evidence. CLI parsing, preflight,
+  exact command construction/replies, cleanup transitions/refusals, restoration eligibility,
+  permanent history invalidation, interruption decisions, and private temporary YAML are
+  covered without reading `SWAYSOCK`, connecting to Sway, or starting processes.
 
-The lifecycle port must still add preflight, the workspace switch, scenario execution,
-cleanup, restoration, and reporting. It must also:
-
-- Call `prepare_extended` immediately before each extended scenario, as the script's
-  lazy generator does, and list retained Firefox roots at exit, after failures too.
-- Pass every `Failure` through `report` and attempt no cleanup after any failure. Write
-  `verify_capture`'s filled draft as `captured.yaml` and require `check` to accept it.
-- Treat an interrupt like the script's `KeyboardInterrupt`: distrust focus history, report
-  candidate windows, skip restoration, and stop the event helper. The standard library
-  has no signal API, so this needs a reviewed dependency or a small `unsafe` handler. Until
-  then, the default SIGINT action ends the harness without restoration or cleanup, and a
-  terminal interrupt also reaches the helper in the same process group.
+Remaining acceptance is user-only: all ten scenarios and inference checks, unavailable
+optional application SKIPs, and conservative failures under interference and Ctrl-C.
+Keep the Python implementation and its manual instructions until the user accepts Rust.
+Agents must never execute either harness, including help or partial runs.
 
 ## 3C. Combined Fuzzel menu — complete
 
@@ -446,7 +473,7 @@ Sway version.
 
 ## Dependencies
 
-Reviewed against upstream documentation on 2026-11-09:
+Reviewed against upstream documentation on 2026-11-09; harness signal handling on 2026-11-10:
 
 | Need | Decision |
 | --- | --- |
@@ -457,6 +484,7 @@ Reviewed against upstream documentation on 2026-11-09:
 | Processes | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, Fuzzel crate, or supervision system. |
 | Errors and logging | Standard-library I/O and contextual `String` errors; add a logging or error crate only for a concrete need. |
 | Tests | `serde_json` as a development dependency, already locked through `swayipc`. |
+| Harness SIGINT | Development-only [signal-hook 0.4.6](https://docs.rs/signal-hook/0.4.6/signal_hook/), default features disabled; the flag API avoids handwritten unsafe signal handling. |
 
 serde-saphyr brings granit-parser, encoding_rs/encoding_rs_io, smallvec, num-traits, and
 annotate-snippets for parsing, and base64 0.23, nohash-hasher 0.2, and zmij (already locked
@@ -469,6 +497,15 @@ applicable advisory; this is not a security guarantee. Do not use the archived
 `serde_yaml`. Before adding a dependency, inspect releases, advisories, license, needed
 features, the transitive graph, and actual MSRV compilation; keep the lockfile committed
 and never silently raise the compiler baseline.
+
+The harness signal dependency adds `signal-hook-registry` 1.4.8, `libc` 0.2.191, and
+`errno` 0.3.14 on Linux; the lockfile also records errno's Windows-only `windows-sys`
+0.61.2 and `windows-link` 0.2.1. All declare MIT OR Apache-2.0 licensing.
+Default signal iterator/channel features and optional C compilation are disabled.
+Cached crate manifests and the flag implementation were
+reviewed; the RustSec advisory index contained no matching advisory for these added
+crates. The locked graph is checked on Rust 1.89.0. These are development dependencies
+and do not enter the production binary's dependency graph.
 
 serde-saphyr is configured strictly: duplicate and merge keys are errors, aliases have a
 zero budget, unsupported tags are rejected on values and field names, and only one
@@ -585,7 +622,7 @@ python3 scripts/integration.py --workspace 9 --extended
 
 Additional prerequisites: native `firefox-esr` (preferred) or `firefox` on `PATH`, a valid
 `WAYLAND_DISPLAY`, and readable `/proc/PID/cmdline` for browser and repeated-ID Foot
-ownership checks. Firefox must support the probed options and keep its literal launch
+ownership checks. Firefox must support the configured options and keep its literal launch
 arguments visible; packaging wrappers or sandboxed builds that obscure this evidence fail
 conservatively. If adjacent application metadata is unavailable or the distribution uses
 another app ID, add `--firefox-app-id EXACT_ID` after verifying it for that installation.
@@ -598,6 +635,35 @@ Xterm coverage additionally requires `xterm`, `Xwayland`, and `xdpyinfo` on `PAT
 unavailable server (or missing probe); a later Xterm launch or class mismatch fails.
 Keep the disposable session idle throughout. All four extended scenarios passed the
 user's manual verification, including the later inference checks.
+
+For the complete Rust port's separate acceptance, build both executables, then run each
+invocation separately from an existing workspace other than disposable workspace 9:
+
+```sh
+cargo build --release --locked
+cargo build --release --locked --example integration
+./target/release/examples/integration --workspace 9
+./target/release/examples/integration --workspace 9 --extended
+```
+
+The same prerequisites, idle-input requirement, target restrictions, and retained-profile
+rules apply; Python itself is unnecessary for Rust. A successful standard run reports six
+passes; an extended run reports ten when all optional prerequisites are available, or
+explicit SKIPs for unavailable applications/subsystems. Both must verify capture and
+guarded cleanup and restore the recorded original workspace if it still exists. The
+`--binary` and `--firefox-app-id` overrides have the same meanings as in Python.
+
+In additional, separate disposable-session runs, interrupt during a load or capture and
+during cleanup, using Ctrl-C in the invoking terminal or SIGINT directed only to the
+harness PID from another terminal. Expect a failure, remaining-window diagnostics,
+retained-profile paths, no further closes or scenarios, and no restoration after the
+interrupt is observed. If a close was already dispatched, it may still complete. Check
+that the harness's direct child is reaped and that interruption did not signal application
+processes. Separately switch away and back, introduce a foreign window, or change an owned
+window's state: expect conservative failure without further cleanup or automatic focus
+restoration. These manual checks do not imply transactional protection against races.
+Do not remove the Python script until this acceptance is complete. Agents must never
+execute any of these harness commands.
 
 ### Individual examples
 

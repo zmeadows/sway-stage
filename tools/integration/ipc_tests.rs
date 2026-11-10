@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn commands_accept_only_validated_workspace_names_numbers_and_exact_ids() {
+    assert_eq!(
+        disposable_command("9").unwrap(),
+        "workspace --no-auto-back-and-forth 9"
+    );
+    assert_eq!(
+        restoration_command("1: Main +_a.b-c").unwrap(),
+        "workspace --no-auto-back-and-forth \"1: Main +_a.b-c\""
+    );
+    assert_eq!(close_command(42).unwrap(), "[con_id=42] kill");
+    assert_eq!(
+        close_command(i64::MAX).unwrap(),
+        format!("[con_id={}] kill", i64::MAX)
+    );
+    for invalid in ["0", "09", "1000000000", "9;kill", "9\n", "９"] {
+        assert!(disposable_command(invalid).is_err());
+    }
+    for invalid in [
+        "", "-a", "a\"", "a\\b", "a;b", "a,b", "a\nb", "a\tb", "a\0b", "é",
+    ] {
+        assert!(restoration_command(invalid).is_err(), "{invalid:?}");
+    }
+    assert!(close_command(0).is_err());
+    assert!(close_command(-1).is_err());
+}
+
+#[test]
+fn commands_require_exactly_one_explicit_successful_reply() {
+    decode_command_reply(r#"[{"success":true}]"#).unwrap();
+    decode_command_reply(r#"[{"success":true,"ignored":"field"}]"#).unwrap();
+    for invalid in [
+        "",
+        "not JSON",
+        "null",
+        "[]",
+        "[true]",
+        "[{}]",
+        r#"{"success":true}"#,
+        r#"[{"success":false}]"#,
+        r#"[{"success":"true"}]"#,
+        r#"[{"success":1}]"#,
+        r#"[{"success":true},{"success":true}]"#,
+        r#"[{"success":true},{}]"#,
+        r#"[{"success":true}] trailing"#,
+    ] {
+        assert!(decode_command_reply(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn buffered_events_cannot_extend_an_expired_observation_deadline() {
+    // An in-process socket pair, with no helper, process launch, or compositor connection.
+    let (output, _peer) = UnixStream::pair().unwrap();
+    let line = b"{\"first\":false,\"payload\":\"already queued\"}\n".to_vec();
+    let mut subscription = EventSubscription {
+        helper: None,
+        output,
+        pending: line.clone(),
+    };
+    let error = subscription.next_event(Instant::now()).unwrap_err();
+    assert_eq!(error, "event observation deadline expired");
+    assert_eq!(subscription.pending, line);
+    assert!(matches!(
+        subscription.next_event(Instant::now() + IPC_TIMEOUT),
+        Ok(Event::Tick(_))
+    ));
+}
+
+#[test]
 fn monitor_lines_decode_by_their_distinct_keys() {
     let tick = decode_event(br#"{"first": false, "payload": "sway-stage-integration:00"}"#);
     assert!(matches!(

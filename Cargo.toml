@@ -26,6 +26,7 @@ swayipc = "4.0.0"
 
 [dev-dependencies]
 serde_json = "1.0"
+signal-hook = { version = "0.4.6", default-features = false }
 
 # Development-only Sway diagnostics; `examples/` holds user-facing YAML layouts.
 [[example]]

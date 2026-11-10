@@ -645,6 +645,11 @@ pub fn configuration_yaml(scenario: &Scenario) -> String {
         .expect("a configuration looks up no measured shares")
 }
 
+/// Layout context for a failed verification, without launch arguments or environment.
+pub fn diagnostic_yaml(scenario: &Scenario) -> String {
+    render_yaml(scenario, &Rendering::Diagnostic).expect("diagnostics look up no measured shares")
+}
+
 /// What `capture` must print for the scenario once its arrangement is verified, apart from
 /// comments: measured shares as weights, null commands, and no timeout or environment.
 /// `measured_shares` maps each non-root node's child-index path to its percentage.
@@ -657,6 +662,7 @@ pub fn expected_draft(
 
 enum Rendering<'a> {
     Configuration,
+    Diagnostic,
     Draft(&'a BTreeMap<Vec<usize>, f64>),
 }
 
@@ -667,7 +673,7 @@ fn render_yaml(scenario: &Scenario, rendering: &Rendering) -> Result<String, Str
         "version: 1".to_owned(),
         format!("focus: {}", scenario.focus),
     ];
-    if let Rendering::Configuration = rendering {
+    if !matches!(rendering, Rendering::Draft(_)) {
         lines.push(format!("window_timeout_ms: {}", scenario.window_timeout_ms));
     }
     lines.push("layout:".to_owned());
@@ -702,7 +708,7 @@ fn emit_node(
 
     if !path.is_empty() {
         let weight = match rendering {
-            Rendering::Configuration => node.weight().to_string(),
+            Rendering::Configuration | Rendering::Diagnostic => node.weight().to_string(),
             Rendering::Draft(measured_shares) => measured_shares
                 .get(path.as_slice())
                 .ok_or_else(|| format!("no measured share for {}", describe_path(path)))?
@@ -715,7 +721,7 @@ fn emit_node(
         ConfiguredNode::Window(window) => {
             let command = match rendering {
                 Rendering::Configuration => json_sequence(&window.command),
-                Rendering::Draft(_) => "null".to_owned(),
+                Rendering::Diagnostic | Rendering::Draft(_) => "null".to_owned(),
             };
             fields.push(format!("command: {command}"));
             fields.push("match:".to_owned());

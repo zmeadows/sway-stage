@@ -10,7 +10,7 @@ use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, Shell, TreeN
 use crate::observation::{Failure, walk};
 use crate::ownership::AcceptedWindows;
 use crate::scenarios::{
-    ConfiguredNode, Scenario, Selector, SplitAxis, configuration_yaml, describe_path,
+    ConfiguredNode, Scenario, Selector, SplitAxis, describe_path, diagnostic_yaml,
 };
 
 /// Deviations above this many percentage points are reported: sway-stage's sizing target.
@@ -313,7 +313,7 @@ pub fn verify_layout(
     if let Err(failure) = comparison {
         let context = format!(
             "\nExpected layout:\n{}Observed: {}",
-            configuration_yaml(scenario),
+            diagnostic_yaml(scenario),
             outline(workspace)
         );
         return Err(match failure {
