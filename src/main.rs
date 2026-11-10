@@ -15,7 +15,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture only reads Sway; fill in its null command and match placeholders before checking or loading a draft. The picker is not implemented yet."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. The picker is not implemented yet."
 )]
 struct Cli {
     /// Read layouts from PATH instead of the XDG configuration directory
@@ -40,7 +40,11 @@ enum Command {
         name: String,
     },
     /// Print an editable YAML draft of the focused workspace's tiled layout, read-only
-    Capture,
+    Capture {
+        /// Recover best-effort process arguments; review for secrets and reproducibility
+        #[arg(long)]
+        infer_commands: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -54,7 +58,7 @@ fn main() -> ExitCode {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
         Some(Command::Load { name }) => load(&name, cli.layouts_dir),
-        Some(Command::Capture) => capture(),
+        Some(Command::Capture { infer_commands }) => capture(infer_commands),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -128,8 +132,8 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
 
 /// Reports failure with a notification, like load, but never touches `last-run.log`, which
 /// records layout launches only. Capture does not use layout discovery.
-fn capture() -> Result<(), String> {
-    print_draft().map_err(|error| {
+fn capture(infer_commands: bool) -> Result<(), String> {
+    print_draft(infer_commands).map_err(|error| {
         // notify_failure reports its own failure to stderr; the capture error stays primary.
         let _ = diagnostics::notify_failure("capture", &error);
         format!("capture: {error}")
@@ -137,8 +141,8 @@ fn capture() -> Result<(), String> {
 }
 
 /// Writes the draft only once it is complete. Flushing surfaces a write error before exit.
-fn print_draft() -> Result<(), String> {
-    let draft = capture::capture()?;
+fn print_draft(infer_commands: bool) -> Result<(), String> {
+    let draft = capture::capture(infer_commands)?;
     let mut stdout = io::stdout().lock();
     stdout
         .write_all(draft.as_bytes())

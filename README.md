@@ -111,9 +111,11 @@ where you redirect stdout. The draft keeps the split hierarchy, window order, si
 percentage weights, each window's exact app ID (or Xwayland class), and the focused
 window. Windows are named `window1`, `window2`, ... in layout order.
 
-Capture cannot know how a window was started, so every window has `command: null`, and
-a window without an identifier has `match: null`. `check` and `load` reject these
-placeholders until you replace them, for example with `command: [foot, --app-id=notes]`
+Default capture gives every window `command: null`; a window without an identifier
+has `match: null`. Optional `capture --infer-commands` recovers current Linux process
+arguments where possible, keeping nulls on failure. Review recovered commands before
+executing or sharing: they may contain secrets and may not reproduce the application.
+`check` and `load` reject remaining placeholders until you replace them, for example with `command: [foot, --app-id=notes]`
 and `match: {app_id: notes}`. Run `capture` from a keybinding, from a terminal that is
 part of the arrangement, or from elsewhere with a delay:
 

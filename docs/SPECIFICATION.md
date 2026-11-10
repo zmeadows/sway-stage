@@ -29,7 +29,7 @@ The command surface (`pick` is not yet implemented):
 | --- | --- |
 | `load NAME` | Validate the named layout, then construct it on the focused empty workspace. |
 | `check NAME` | Validate a layout's syntax and semantics without IPC or launching anything. |
-| `capture` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
+| `capture [--infer-commands]` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
 | `pick` | Offer named layouts through `fuzzel --dmenu`, then perform `load` for the selection. |
 | `list` | Print available layout names, one per line in lexical order. No IPC. |
 
@@ -117,10 +117,11 @@ tree depth (32 nodes along a path), and total layout nodes (256) before side eff
 parser resource limits must also prevent pathological input before semantic validation.
 Report the filename, node/field path, and line/column where available.
 
-Capture drafts use `command: null` as an explicit editing placeholder. If an observed
-window has no usable identifier, emit `match: null` too. These are permitted in capture
+Default capture drafts use `command: null` as an explicit editing placeholder.
+With `--infer-commands`, successfully recovered process arguments replace that placeholder.
+If an observed window has no usable identifier, emit `match: null` too. These are permitted in capture
 output only: `check` and `load` reject them with instructions to fill them in. A draft
-otherwise follows the same format. There is no executable fallback or command inference.
+otherwise follows the same format. There is no executable fallback.
 
 ## Loading and safety
 
@@ -220,8 +221,8 @@ of percentage commands.
 
 ## Capture
 
-`capture` takes no arguments and is read-only IPC: workspace and tree queries and tick
-fences only. It never sends commands, changes focus, launches applications, or writes
+`capture` accepts only the optional `--infer-commands` flag and uses read-only IPC:
+workspace and tree queries and tick fences only. It never sends commands, changes focus, launches applications, or writes
 files. On success, stdout holds exactly one draft document.
 
 The draft follows the version 1 format. It preserves the focused workspace's ordered tiled
@@ -230,10 +231,28 @@ summed extent along the split axis, rounded to hundredths with a minimum of `0.0
 reconstructs proportions well within the sizing tolerance; the root has no weight. Leaf
 IDs are `window1`, `window2`, ... in depth-first order, and `focus` names the focused
 window. `match` uses the window's nonempty Wayland app ID, otherwise its nonempty Xwayland
-class, otherwise `null`. `command` is always `null`. A leading comment explains the
-placeholders. Do not serialize Sway container IDs, workspace names/numbers, outputs,
-titles, PIDs, commands, cwd, or environment from the running session. The result records
-arrangement and selectors, not a runnable session restoration.
+class, otherwise `null`. Without the flag, `command` is always `null`. A leading comment
+explains the placeholders. Do not serialize Sway container IDs, workspace names/numbers,
+outputs, titles, PIDs, cwd, or environment from the running session. The result records
+arrangement and selectors, with optional process arguments, rather than session restoration.
+
+With `--infer-commands`, attempt each leaf's Linux `/proc/PID/cmdline` only when its
+container ID and positive PID agree across both observations. Read at most 64 KiB plus
+one oversize detection byte. Require a nonempty executable, a final NUL terminator, and
+valid UTF-8 arguments; preserve argument boundaries and empty arguments. Unavailable,
+inconsistent, inaccessible, empty, malformed, or oversized process information leaves
+`command: null` for that window without failing capture. No process-name searches,
+parent traversal, command rewriting, environment capture, or application-specific recovery
+is performed. Never execute or probe inferred commands.
+
+Recovered arrays represent current process arguments, which may differ from the original
+launch command and may not reproduce the application. They may contain passwords or
+tokens. An additional brief YAML comment asks users to review commands before executing
+or sharing. Arguments appear only in the opted-in stdout draft, never diagnostics,
+notifications, logs, caches, or automatically written configuration files. Process exit,
+PID reuse, and argument changes can race with observation; inference is best-effort and
+cannot promise transactional process identity. Null command and match placeholders still
+require editing before `check` or `load` accepts the draft.
 
 A single-window workspace is a root leaf. A container with one tiled child, including the
 workspace itself, is replaced by that child, which takes the container's extent among its

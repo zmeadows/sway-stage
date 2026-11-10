@@ -2,7 +2,7 @@
 //!
 //! Capture observes only through `Observer`: workspace and tree queries plus tick fences.
 //! It never sends a Sway command, launches anything, or writes a file, and it records
-//! arrangement and window selectors, never launch commands.
+//! arrangement and window selectors, with optional best-effort process arguments.
 
 use crate::config::{MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
 use crate::observation::{
@@ -10,12 +10,22 @@ use crate::observation::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 use swayipc::{Event, Floating, Node, NodeLayout, NodeType, ScratchpadState, WindowChange};
 
 // Bounds the subscription and each fenced observation, as for load.
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
+
+// A modest per-window bound; read one extra byte to detect truncation.
+const MAX_CMDLINE_BYTES: usize = 64 * 1024;
+
+const INFERENCE_HEADER: &str = "\
+# Review recovered commands before executing or sharing: process arguments are
+# best-effort, may contain secrets, and may not reproduce the original application.
+";
 
 const DRAFT_HEADER: &str = "\
 # Layout draft from `sway-stage capture`. Before it can run, replace every
@@ -26,14 +36,18 @@ const DRAFT_HEADER: &str = "\
 
 /// Observes the focused workspace and returns the complete draft document. Nothing is
 /// printed here, so a failed capture cannot leave partial YAML on stdout.
-pub fn capture() -> Result<String, String> {
+pub fn capture(infer_commands: bool) -> Result<String, String> {
     let socket = observation::sway_socket()?;
     let mut connect = || observation::connect(&socket);
-    capture_with(&mut connect)
+    capture_with(&mut connect, infer_commands, &mut read_process_command)
 }
 
 // Concrete socket injection keeps all fixture traffic disconnected from socket discovery.
-fn capture_with(connect: &mut dyn FnMut() -> Result<UnixStream, String>) -> Result<String, String> {
+fn capture_with(
+    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    infer_commands: bool,
+    read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
+) -> Result<String, String> {
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
     reject_window_activity(&initial)?;
@@ -48,7 +62,55 @@ fn capture_with(connect: &mut dyn FnMut() -> Result<UnixStream, String>) -> Resu
         return Err("the workspace changed during capture; retry once it is idle".into());
     }
 
-    render_draft(&captured)
+    let mut command_for = |container_id| {
+        if !infer_commands {
+            return None;
+        }
+        let initial_window = initial.tree.find_as_ref(|node| node.id == container_id)?;
+        let confirming_window = confirming
+            .tree
+            .find_as_ref(|node| node.id == container_id)?;
+        let pid = initial_window.pid.filter(|pid| *pid > 0)?;
+        if confirming_window.pid != Some(pid) {
+            return None;
+        }
+        // Matching snapshots narrow stale-PID races, but /proc is not transactional:
+        // a process may exit, replace its argv, or have its PID reused after observation.
+        read_command(pid)
+    };
+    render_draft(&captured, infer_commands, &mut command_for)
+}
+
+/// An inaccessible or vanished process is an ordinary inference miss, never a capture
+/// error. Neither I/O errors nor argument contents escape this boundary into diagnostics.
+fn read_process_command(pid: i32) -> Option<Vec<String>> {
+    if pid <= 0 {
+        return None;
+    }
+    let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
+    read_command_line(file)
+}
+
+fn read_command_line(reader: impl Read) -> Option<Vec<String>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CMDLINE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_CMDLINE_BYTES || bytes.last() != Some(&0) {
+        return None;
+    }
+
+    // Remove exactly the final terminator: any other adjacent NULs are empty arguments.
+    let arguments: Vec<String> = bytes[..bytes.len() - 1]
+        .split(|byte| *byte == 0)
+        .map(|argument| String::from_utf8(argument.to_vec()))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if arguments[0].is_empty() {
+        return None;
+    }
+    Some(arguments)
 }
 
 /// The observed facts a draft is generated from, which both observations must agree on.
@@ -302,8 +364,7 @@ enum DraftNode {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
-        /// Always `null`: capture never infers how an application was launched.
-        command: (),
+        command: Option<Vec<String>>,
         #[serde(rename = "match")]
         selector: Option<Selector>,
     },
@@ -311,9 +372,13 @@ enum DraftNode {
 
 /// Names windows `window1`, `window2`, ... in depth-first (visual and launch) order and
 /// serializes the whole document in memory.
-fn render_draft(captured: &CapturedWorkspace) -> Result<String, String> {
+fn render_draft(
+    captured: &CapturedWorkspace,
+    infer_commands: bool,
+    command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
+) -> Result<String, String> {
     let mut draft_ids = HashMap::new();
-    let layout = draft_node(&captured.root, None, &mut draft_ids);
+    let layout = draft_node(&captured.root, None, &mut draft_ids, command_for);
     let focus = draft_ids.remove(&captured.focused_id).ok_or_else(|| {
         format!(
             "focus is on container id={} rather than a window, for example after `focus parent`; focus a window and retry",
@@ -331,9 +396,16 @@ fn render_draft(captured: &CapturedWorkspace) -> Result<String, String> {
         prefer_block_scalars: false,
         compact_list_indent: false,
     };
-    let yaml = serde_saphyr::to_string_with_options(&draft, options)
-        .map_err(|error| format!("serialize draft: {error}"))?;
-    Ok(format!("{DRAFT_HEADER}{yaml}"))
+    let yaml = serde_saphyr::to_string_with_options(&draft, options).map_err(|error| {
+        // Serializer errors must not echo recovered arguments into notifications.
+        if infer_commands {
+            "serialize draft: YAML serialization failed".to_owned()
+        } else {
+            format!("serialize draft: {error}")
+        }
+    })?;
+    let inference_header = if infer_commands { INFERENCE_HEADER } else { "" };
+    Ok(format!("{DRAFT_HEADER}{inference_header}{yaml}"))
 }
 
 /// `weight` is `None` only for the root, whose weight would have no effect. `draft_ids`
@@ -342,6 +414,7 @@ fn draft_node(
     captured: &CapturedNode,
     weight: Option<f64>,
     draft_ids: &mut HashMap<i64, String>,
+    command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
 ) -> DraftNode {
     match captured {
         CapturedNode::Window {
@@ -353,7 +426,7 @@ fn draft_node(
             DraftNode::Window {
                 id,
                 weight,
-                command: (),
+                command: command_for(*container_id),
                 selector: selector.clone(),
             }
         }
@@ -367,7 +440,9 @@ fn draft_node(
             let children = children
                 .iter()
                 .zip(child_weights)
-                .map(|(child, child_weight)| draft_node(child, Some(child_weight), draft_ids))
+                .map(|(child, child_weight)| {
+                    draft_node(child, Some(child_weight), draft_ids, command_for)
+                })
                 .collect();
             DraftNode::Split {
                 split: *axis,

@@ -664,11 +664,15 @@ def verify_layout(workspace, layout, focus, accepted, events):
     return shares, diagnostics
 
 
+def capture_lines(draft):
+    return [line.rstrip() for line in draft.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
 def verify_capture(draft, layout, focus, shares, directory, binary):
     # This is a comparison with one known serializer format, not a YAML parser. A format
     # change fails visibly; check supplies authoritative syntax and semantic validation.
-    actual = [line.rstrip() for line in draft.splitlines()
-              if line.strip() and not line.lstrip().startswith("#")]
+    actual = capture_lines(draft)
     expected = yaml_document(layout, focus, shares).splitlines()
     require(len(actual) == len(expected),
             f"capture draft has unexpected fields/structure:\n{draft}")
@@ -707,6 +711,50 @@ def verify_capture(draft, layout, focus, shares, directory, binary):
     require(placeholders == len(list(leaves(layout))), "capture command placeholder count differs")
     (directory / "captured.yaml").write_text("\n".join(filled) + "\n", encoding="utf-8")
     run([binary, "--layouts-dir", str(directory), "check", "captured"], "check filled capture")
+
+
+def verify_inferred_capture(draft, normal_draft, layout):
+    # Recognize only the serializer's block command sequences, and compare everything
+    # else byte for byte with the already verified normal draft. Do not parse general
+    # YAML or include recovered scalars in diagnostics or files.
+    lines = capture_lines(draft)
+    normalized = []
+    commands = []
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if not line.lstrip().startswith("command:"):
+            normalized.append(line)
+            line_index += 1
+            continue
+
+        indent = len(line) - len(line.lstrip())
+        require(line.strip() == "command:", "inferred capture lacks a command array")
+        normalized.append(" " * indent + "command: null")
+        argument_prefix = " " * (indent + 2) + "- "
+        arguments = []
+        line_index += 1
+        while line_index < len(lines) and lines[line_index].startswith(argument_prefix):
+            # Only simple, generated --app-id tokens are interpreted below. Other
+            # arguments remain opaque; strict syntax/escaping is covered offline in Rust.
+            scalar = lines[line_index][len(argument_prefix):]
+            if len(scalar) >= 2 and scalar[0] == scalar[-1] and scalar[0] in "\"'":
+                scalar = scalar[1:-1]
+            arguments.append(scalar)
+            line_index += 1
+        require(arguments and arguments[0], "inferred capture has an empty executable")
+        commands.append(arguments)
+
+    require(normalized == capture_lines(normal_draft),
+            "inference changed capture hierarchy, order, sizing, matchers, IDs, or focus")
+    configured_leaves = list(leaves(layout))
+    require(len(commands) == len(configured_leaves), "inferred command count differs")
+    for arguments, leaf in zip(commands, configured_leaves):
+        app_id = leaf["match"]["app_id"]
+        paired = any(argument == "--app-id" and arguments[index + 1] == app_id
+                     for index, argument in enumerate(arguments[:-1]))
+        require(f"--app-id={app_id}" in arguments or paired,
+                f"inferred command does not identify the correct Foot window: {leaf['id']}")
 
 
 def remove_from_shape(hierarchy, closing_id):
@@ -943,6 +991,16 @@ def main():
                 events.require_control(signature(workspace) == before_capture,
                                        "capture changed the workspace")
                 verify_capture(draft, layout, focus, shares, directory, binary)
+
+                if name in {"single-window", "horizontal-pair"}:
+                    stage = f"{name}: inferred capture"
+                    inferred_draft = run([binary, "capture", "--infer-commands"], stage, 15)
+                    tree, _, workspace, history = snapshot(sway, events)
+                    require_quiet(history, events)
+                    ownership(tree, workspace["id"], layout, preexisting_ids, events, known)
+                    events.require_control(signature(workspace) == before_capture,
+                                           "inferred capture changed the workspace")
+                    verify_inferred_capture(inferred_draft, draft, layout)
 
                 stage = f"{name}: cleanup"
                 cleanup(sway, events, layout, preexisting_ids, known, workspace)

@@ -574,7 +574,6 @@ fn serve_capture(listener: UnixListener, tree: Value) -> thread::JoinHandle<()> 
 fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
     let fixture = Fixture::new();
     let socket = fixture.path.join("sway.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
     let mut editor = sway_node(20, "con", 1280, vec![]);
     editor["shell"] = json!("xdg_shell");
     editor["app_id"] = json!("dev:editor");
@@ -584,22 +583,43 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
     unidentified["shell"] = json!("xdg_shell");
     let workspace = sway_node(10, "workspace", 1920, vec![editor, unidentified]);
     let output = sway_node(2, "output", 1920, vec![workspace]);
-    let server = serve_capture(listener, sway_node(1, "root", 1920, vec![output]));
-
-    let output = fixture
-        .command()
-        .env("SWAYSOCK", &socket)
-        .arg("capture")
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    server.join().unwrap();
-    assert!(output.stderr.is_empty(), "{output:?}");
+    let tree = sway_node(1, "root", 1920, vec![output]);
+    let mut drafts = Vec::new();
+    for infer_commands in [false, true] {
+        // Separate fixture socket names avoid rebinding a retained filesystem entry.
+        let socket = socket.with_extension(if infer_commands {
+            "inferred.sock"
+        } else {
+            "sock"
+        });
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = serve_capture(listener, tree.clone());
+        let mut command = fixture.command();
+        command.env("SWAYSOCK", &socket).arg("capture");
+        if infer_commands {
+            command.arg("--infer-commands");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        server.join().unwrap();
+        assert!(output.stderr.is_empty(), "{output:?}");
+        drafts.push(String::from_utf8(output.stdout).unwrap());
+    }
+    // Missing PIDs retain placeholders; only the opt-in review comment is added.
+    let without_comments = |draft: &str| {
+        draft
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(without_comments(&drafts[0]), without_comments(&drafts[1]));
+    assert!(drafts[1].contains("Review recovered commands before executing or sharing"));
     // Capture writes no launch log and needs no layout directory.
     assert!(!fixture.path.join(".local").exists());
     assert!(!fixture.path.join(".config").exists());
 
-    let draft = String::from_utf8(output.stdout).unwrap();
+    let draft = drafts.remove(0);
     assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
     assert!(
         draft.contains("version: 1\nfocus: window1\nlayout:\n  split: horizontal\n"),

@@ -78,6 +78,16 @@ fn quiet(tree: Value) -> Observation {
 /// connections beyond the recorded observations are closed unanswered, as by a failed Sway.
 /// `request` asserts every request type, so a Sway command would fail the test.
 fn capture_observing(observations: Vec<Observation>) -> Result<String, String> {
+    capture_observing_commands(observations, false, &mut |_| {
+        panic!("default reads no processes")
+    })
+}
+
+fn capture_observing_commands(
+    observations: Vec<Observation>,
+    infer_commands: bool,
+    read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
+) -> Result<String, String> {
     let (event_client, mut events) = pair();
     let (query_server_sender, query_servers) = mpsc::channel();
     let server = thread::spawn(move || {
@@ -113,7 +123,7 @@ fn capture_observing(observations: Vec<Observation>) -> Result<String, String> {
             .map_err(|_| "fixture disconnected".to_owned())?;
         Ok(client)
     };
-    let result = capture_with(&mut connect);
+    let result = capture_with(&mut connect, infer_commands, read_command);
     drop(query_server_sender);
     server.join().unwrap();
     result
@@ -710,4 +720,195 @@ fn a_failed_confirming_observation_produces_no_draft() {
     let idle = workspace("splith", vec![left(), right()], 20);
     let error = capture_observing(vec![quiet(idle)]).unwrap_err();
     assert!(error.contains("get workspaces"), "{error}");
+}
+
+#[test]
+fn command_line_reader_preserves_literal_arguments_and_empty_arguments() {
+    let arguments = [
+        "foot",
+        "--app-id",
+        "two words",
+        "'quotes'\"",
+        "雪🦀",
+        "#secret: [x]",
+        "*alias",
+        "true",
+        "null",
+        "line\nbreak",
+        "",
+        "",
+    ];
+    let bytes = arguments.join("\0") + "\0";
+    assert_eq!(read_command_line(bytes.as_bytes()).unwrap(), arguments);
+    assert_eq!(read_command_line(&b"foot\0"[..]).unwrap(), ["foot"]);
+}
+
+#[test]
+fn command_line_reader_rejects_unusable_or_incomplete_data_and_bounds_reads() {
+    for bytes in [
+        &b""[..],
+        &b"\0"[..],
+        &b"\0argument\0"[..],
+        &b"foot"[..],
+        &b"foot\0unfinished"[..],
+        &b"foot\0\xff\0"[..],
+        &b"\xff\0"[..],
+    ] {
+        assert!(read_command_line(bytes).is_none());
+    }
+
+    let mut maximum = vec![b'x'; MAX_CMDLINE_BYTES];
+    maximum[MAX_CMDLINE_BYTES - 1] = 0;
+    assert!(read_command_line(maximum.as_slice()).is_some());
+    maximum.push(0);
+    assert!(read_command_line(maximum.as_slice()).is_none());
+
+    let mut endless = std::io::repeat(b'x').take(MAX_CMDLINE_BYTES as u64 + 10);
+    assert!(read_command_line(&mut endless).is_none());
+    // The bounded reader stops even if the source has no EOF.
+    assert_eq!(endless.limit(), 9);
+}
+
+#[test]
+fn process_read_failures_are_silent_inference_misses() {
+    struct Unavailable(std::io::ErrorKind);
+    impl Read for Unavailable {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                self.0,
+                "sensitive argument must not escape",
+            ))
+        }
+    }
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        assert!(read_command_line(Unavailable(kind)).is_none());
+    }
+    for pid in [i32::MIN, -1, 0] {
+        assert!(read_process_command(pid).is_none());
+    }
+}
+
+fn view_with_pid(id: i64, pid: Value) -> Value {
+    let mut window = view(id, Some("shared-app"), 960, 1080);
+    window["pid"] = pid;
+    window
+}
+
+#[test]
+fn inference_preserves_window_association_structure_and_yaml_arguments() {
+    let windows = [
+        view_with_pid(20, json!(101)),
+        view_with_pid(21, json!(102)),
+        view_with_pid(22, json!(103)),
+    ];
+    let tree = workspace(
+        "splith",
+        vec![
+            windows[0].clone(),
+            group(30, "splitv", 960, 1080, windows[1..].to_vec()),
+        ],
+        22,
+    );
+    let default = capture_idle(tree.clone()).unwrap();
+    let commands = [
+        vec![
+            "foot",
+            "--app-id",
+            "one",
+            "two words",
+            "",
+            "雪",
+            "#x: [y]",
+            "'\"",
+            "\n",
+        ],
+        vec!["other", "--app-id=two", "null", "*alias"],
+    ];
+    let mut requested = Vec::new();
+    let inferred =
+        capture_observing_commands(vec![quiet(tree.clone()), quiet(tree)], true, &mut |pid| {
+            requested.push(pid);
+            match pid {
+                101 | 102 => Some(
+                    commands[(pid - 101) as usize]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                ),
+                103 => None,
+                _ => panic!("unexpected PID"),
+            }
+        })
+        .unwrap();
+    assert_eq!(requested, [101, 102, 103]);
+    assert!(inferred.contains(INFERENCE_HEADER));
+    assert_eq!(inferred.matches("command: null").count(), 2); // Header plus failed leaf.
+
+    let inferred_config = filled(&inferred);
+    let default_config = filled(&default);
+    assert_eq!(inferred_config.focus, default_config.focus);
+    let NodeKind::Split { children, .. } = &inferred_config.layout.value.kind else {
+        panic!("expected horizontal root");
+    };
+    let NodeKind::Split {
+        children: nested, ..
+    } = &children[1].value.kind
+    else {
+        panic!("expected nested vertical split");
+    };
+    for (child, arguments) in [(&children[0], &commands[0]), (&nested[0], &commands[1])] {
+        let NodeKind::Window {
+            command, matcher, ..
+        } = &child.value.kind
+        else {
+            panic!("expected window");
+        };
+        assert_eq!(command, arguments);
+        assert!(matches!(matcher, Matcher::AppId(app_id) if app_id == "shared-app"));
+    }
+    // Ignore only the command values and added comment in a structural comparison.
+    let normalize = |draft: &str| {
+        let mut lines = Vec::new();
+        let mut in_command = false;
+        for line in draft.lines().filter(|line| !line.starts_with('#')) {
+            if line.trim_start().starts_with("command:") {
+                lines.push(format!(
+                    "{}command: null",
+                    " ".repeat(line.len() - line.trim_start().len())
+                ));
+                in_command = true;
+            } else if in_command && line.trim_start().starts_with("- ") {
+                continue;
+            } else {
+                in_command = false;
+                lines.push(line.to_owned());
+            }
+        }
+        lines.join("\n")
+    };
+    assert_eq!(normalize(&inferred), normalize(&default));
+}
+
+#[test]
+fn absent_invalid_or_changed_pids_leave_null_without_reading_processes() {
+    for (initial_pid, confirming_pid) in [
+        (Value::Null, Value::Null),
+        (json!(0), json!(0)),
+        (json!(-1), json!(-1)),
+        (json!(101), json!(102)),
+        (json!(101), Value::Null),
+        (Value::Null, json!(101)),
+    ] {
+        let initial = workspace("splith", vec![view_with_pid(20, initial_pid)], 20);
+        let confirming = workspace("splith", vec![view_with_pid(20, confirming_pid)], 20);
+        let draft =
+            capture_observing_commands(vec![quiet(initial), quiet(confirming)], true, &mut |_| {
+                panic!("unreliable PID must not be read")
+            })
+            .unwrap();
+        assert!(draft.contains("  command: null"));
+    }
 }

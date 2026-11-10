@@ -8,7 +8,7 @@ justify them.
 
 ## Status
 
-Implemented through milestone 3B (extended harness execution awaits the user):
+Implemented through milestones 3B and 3A.1 (new inference coverage awaits manual execution):
 
 - Layout discovery, `list`, and `check` with strict YAML validation.
 - `load` for a root window and arbitrarily nested splits, with relative weights applied by
@@ -16,7 +16,7 @@ Implemented through milestone 3B (extended harness execution awaits the user):
 - Launch diagnostics: a private `last-run.log`, stderr errors, and bounded `notify-send`
   notifications for fatal errors and sizing warnings.
 - Read-only `capture`, printing an editable draft with `command: null` (and, without an
-  identifier, `match: null`) placeholders.
+  identifier, `match: null`) placeholders, plus opt-in `--infer-commands` process arguments.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
@@ -34,8 +34,9 @@ temporary directory; sandboxes that forbid binding Unix sockets fail it.
 
 The user has manually verified all six original Foot integration scenarios, including
 raw-tree sizing/focus and read-only capture checks, as well as construction of the
-single-Foot, two-Foot, and four-window Firefox/Foot examples. Still unverified live: the
-extended scenarios, abort behavior under real interference, keybinding launch contexts,
+single-Foot, two-Foot, and four-window Firefox/Foot examples. All four extended scenarios
+also passed the user's manual runs. Still unverified live: the new inference checks,
+abort behavior under real interference, keybinding launch contexts,
 multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
@@ -54,9 +55,16 @@ multi-seat behavior, and a supported Sway version.
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
   two agreeing fenced observations and refuses unrepresentable arrangements.
-- **3B. Integration harness.** The six original Foot scenarios passed the user's manual
-  runs. Four optional extended scenarios have received static review and syntax validation;
-  their live acceptance remains with the user.
+- **3B. Integration harness.** All six standard and four extended scenarios passed the
+  user's manual runs.
+- **3A.1. Optional command inference and integration coverage.** Implemented
+  `capture --infer-commands` with bounded Linux process-argument reads and per-window
+  null fallback. Offline fixtures cover malformed data, argument preservation, PID
+  consistency, partial success, and unchanged structure. The existing `single-window`
+  and `horizontal-pair` scenarios compare normal and inferred captures, require each
+  Foot's run-specific `--app-id`, and recheck workspace ownership/state after each.
+  These new observational checks await the user's manual run; scenario definitions,
+  Firefox/Xterm assertions, and cleanup behavior are unchanged.
 
 ## 3B. Self-contained Sway integration harness
 
@@ -79,7 +87,12 @@ Only transparent single-child wrappers collapse. Capture is secondary: a narrow 
 with the known draft format checks fields, nesting, identifiers, focus, placeholders, and
 weights against the raw measurements. A filled copy must pass strict `check`; raw workspace
 state before and after capture must agree. This intentionally fails visibly if capture's
-serialization format changes rather than implementing a YAML parser.
+serialization format changes rather than implementing a YAML parser. In `single-window`
+and `horizontal-pair`, a second capture uses `--infer-commands`; its block command arrays
+must contain each corresponding Foot's unique `--app-id` token (either combined or paired).
+Ignoring commands and comments, both captures must agree exactly. Recovered arguments
+are kept in memory, never printed in reports or saved to the temporary configurations.
+The ordinary capture checks and independent ownership guards still run unchanged.
 
 The harness uses bounded `subprocess.run` calls for commands and queries. Its sole `Popen`
 is the persistent `swaymsg` workspace/window/tick subscription, with bounded reads and
@@ -128,14 +141,17 @@ present. Otherwise it is skipped; an empty original workspace destroyed by Sway 
 recreated. A concurrent user action can still occur after the last guard and before a
 command, so run only in a disposable session and leave input idle.
 
-Extended manual acceptance remains outstanding, as does verification that interference
-stops safely with useful diagnostics. No live execution by an agent is permitted,
+The six standard and four extended scenarios have passed manual acceptance. The new
+inference checks and verification that interference stops safely with useful diagnostics
+remain outstanding. No live execution by an agent is permitted,
 including help, partial runs, or trial runs.
 
 ## 3C. Fuzzel picker
 
 Add an optional `pick` command through a `fuzzel --dmenu` subprocess
 (`std::process::Command`, no shell), reusing configuration discovery and the `load` path.
+The future Fuzzel interface may invoke capture with `--infer-commands` by default through
+its configuration or launch arguments; that interface is outside milestone 3A.1.
 Only after an exact selection may it start launch diagnostics and call `load_named` in
 `src/main.rs`; cancellation and preselection errors leave the log alone and report through
 `diagnostics::notify_failure`.
@@ -236,7 +252,14 @@ points even across 255 siblings. Capture-specific Serde types serialize through
 serde-saphyr with single-line scalars and indented sequences, so ambiguous scalars are
 quoted and control characters escaped; a fixed comment header is prepended. The strict
 `config` types are not reused, and `config` exports its depth and node limits so filled
-drafts stay loadable. Failures report through `diagnostics::notify_failure`, never
+drafts stay loadable. Optional inference extends the same draft window's command field;
+its reader boundary takes a PID, opens only `/proc/PID/cmdline`, and silently rejects
+unavailable or invalid data. Reads are bounded to 64 KiB plus a detection byte and preserve
+UTF-8 argv boundaries, including empty arguments. The initial and confirming leaf PIDs
+must agree and be positive; PID changes suppress inference without changing arrangement
+comparison. Reads occur after snapshot confirmation, so process exit, PID reuse, or argv
+changes remain possible. No inferred arguments reach error diagnostics or persistent
+storage. Failures report through `diagnostics::notify_failure`, never
 `Diagnostics::start`, so `last-run.log` is untouched.
 
 **Diagnostics.** Each launch replaces `last-run.log` by unlinking it and creating a new
@@ -374,10 +397,11 @@ environment values.
 - `swayipc` decoding and socket establishment limits are listed under the findings above.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
-- Extended application coverage and live abort behavior await manual verification.
+- New inference integration checks and live abort behavior await manual verification.
 - Capture is deliberately sensitive to activity: any window event other than a title,
-  urgency, or mark change fails it, as does focus on a container. It never infers
-  commands or approximates tabbed, stacked, floating, or fullscreen state.
+  urgency, or mark change fails it, as does focus on a container. Command inference is
+  opt-in and best-effort; capture never approximates tabbed, stacked, floating, or
+  fullscreen state.
 - Milestone 3C must settle how `fuzzel --dmenu` reports cancellation (exit status and
   output) as distinct from failure.
 
@@ -431,7 +455,8 @@ Xterm coverage additionally requires `xterm`, `Xwayland`, and `xdpyinfo` on `PAT
 `DISPLAY` pointing to the disposable session's reachable Xwayland server advertising the
 `XWAYLAND` extension. The bounded read-only `xdpyinfo -queryExtensions` probe skips an
 unavailable server (or missing probe); a later Xterm launch or class mismatch fails.
-Keep the disposable session idle throughout. Extended scenarios have not yet been run live.
+Keep the disposable session idle throughout. All four extended scenarios passed the
+user's manual verification before milestone 3A.1.
 
 ### Individual examples
 
