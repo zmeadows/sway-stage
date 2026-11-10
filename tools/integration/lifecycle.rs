@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -158,8 +159,9 @@ impl Harness {
         process::check_interruption()?;
         let sway = Swaymsg::from_environment()?;
         let binary = process::find_executable(&arguments.binary)?;
-        let foot = executable_text("foot")?;
-        let sleep = executable_text("sleep")?;
+        let search_path = env::var_os("PATH").unwrap_or_default();
+        let foot = unresolved_executable_text("foot", &search_path)?;
+        let sleep = unresolved_executable_text("sleep", &search_path)?;
         let run_id = random_run_id()?;
         if sway.seat_names()?.len() != 1 {
             return Err("this harness requires exactly one Sway seat".into());
@@ -198,9 +200,16 @@ impl Harness {
             directory.write(scenario.name, &configuration_yaml(scenario))?;
             check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
         }
-        if self.arguments.extended {
+        // Discovery only searches PATH. Profiles, probes, and launches wait for preparation
+        // immediately before each extended scenario.
+        let optional_applications = if self.arguments.extended {
             scenarios.extend(extended_scenarios(&self.run_id, &self.foot, &self.sleep));
-        }
+            Some(OptionalApplications::find(
+                self.arguments.firefox_app_id.clone(),
+            ))
+        } else {
+            None
+        };
         self.stage = "preflight".into();
         let ready = preflight(&self.sway, &mut self.events, &self.arguments.workspace)?;
         self.original = Some(ready.original.clone());
@@ -228,7 +237,6 @@ impl Harness {
         });
         require_empty(switched.focused_workspace())?;
 
-        let mut applications = None;
         for scenario in scenarios {
             interruption_check()?;
             self.current_scenario = Some(ScenarioProgress {
@@ -236,7 +244,7 @@ impl Harness {
                 preexisting_ids: None,
                 accepted: AcceptedWindows::new(),
             });
-            self.run_scenario(&directory, &mut applications)?;
+            self.run_scenario(&directory, optional_applications.as_ref())?;
         }
 
         self.stage = "final restoration".into();
@@ -251,7 +259,7 @@ impl Harness {
     fn run_scenario(
         &mut self,
         directory: &TemporaryConfigurations,
-        applications: &mut Option<OptionalApplications>,
+        optional_applications: Option<&OptionalApplications>,
     ) -> Result<(), Failure> {
         let progress = self
             .current_scenario
@@ -267,11 +275,8 @@ impl Harness {
         self.stage = format!("{name}: scenario preparation");
         interruption_check()?;
         if scenario.extension.is_some() {
-            // Optional executable discovery waits until every standard scenario has passed,
-            // so a failed or standard-only run never probes for Firefox or Xterm.
-            let applications = applications.get_or_insert_with(|| {
-                OptionalApplications::find(self.arguments.firefox_app_id.clone())
-            });
+            let applications = optional_applications
+                .expect("extended scenarios run only after optional application discovery");
             prepare_extended(
                 scenario,
                 &self.run_id,
@@ -821,8 +826,11 @@ fn check_configuration(
     Ok(())
 }
 
-fn executable_text(name: &str) -> Result<String, String> {
-    let path = process::find_executable(name)?;
+/// Foot and `sleep` keep the path found on `PATH`, unresolved, because a multi-call
+/// executable such as BusyBox chooses its applet from the name it is invoked by.
+fn unresolved_executable_text(name: &str, search_path: &OsStr) -> Result<String, String> {
+    let path = process::find_in_search_path(name, search_path)
+        .ok_or_else(|| format!("required executable not found or not executable: {name}"))?;
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| format!("executable path is not UTF-8: {}", path.display()))

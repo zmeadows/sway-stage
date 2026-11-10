@@ -11,6 +11,7 @@
 //! applications started by `sway-stage load`, and never targets a window.
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::os::fd::OwnedFd;
@@ -72,7 +73,12 @@ pub fn find_executable(name: &str) -> Result<PathBuf, String> {
 /// Relative `PATH` entries are skipped so the current directory can never supply one.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let search_path = env::var_os("PATH").unwrap_or_default();
-    for directory in env::split_paths(&search_path) {
+    find_in_search_path(name, &search_path)
+}
+
+/// `find_on_path` over an explicit `PATH`-style list, so tests need not change `PATH`.
+pub fn find_in_search_path(name: &str, search_path: &OsStr) -> Option<PathBuf> {
+    for directory in env::split_paths(search_path) {
         if !directory.is_absolute() {
             continue;
         }

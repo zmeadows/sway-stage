@@ -168,7 +168,7 @@ pub enum Extension {
     DuplicateFootIds,
 }
 
-/// The six Foot-only scenarios. `foot` and `sleep` are resolved absolute executables.
+/// The six Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use SplitAxis::{Horizontal, Vertical};
 

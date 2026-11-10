@@ -522,3 +522,34 @@ fn temporary_yaml_is_private_replaced_safely_and_automatically_removed() {
     drop(directory);
     assert!(!path.exists());
 }
+
+#[test]
+fn foot_and_sleep_keep_their_path_names_through_symlinks() {
+    let scratch = env::temp_dir().join(format!(
+        "sway-stage-integration-test-{}-unresolved-executables",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    let not_executable = scratch.join("not-executable");
+    let multicall = scratch.join("multicall");
+    fs::create_dir_all(&not_executable).unwrap();
+    fs::create_dir_all(&multicall).unwrap();
+
+    // A non-executable `sleep` earlier on PATH is passed over.
+    fs::write(not_executable.join("sleep"), "").unwrap();
+    let busybox = multicall.join("busybox");
+    fs::write(&busybox, "").unwrap();
+    fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("busybox", multicall.join("sleep")).unwrap();
+    symlink("missing", multicall.join("foot")).unwrap();
+    let search_path = env::join_paths([&not_executable, &multicall]).unwrap();
+
+    let sleep = unresolved_executable_text("sleep", &search_path).unwrap();
+    assert_eq!(sleep, multicall.join("sleep").to_str().unwrap());
+
+    let missing_target = unresolved_executable_text("foot", &search_path).unwrap_err();
+    assert_contains(&missing_target, "required executable not found");
+    assert!(unresolved_executable_text("absent", &search_path).is_err());
+
+    fs::remove_dir_all(&scratch).unwrap();
+}

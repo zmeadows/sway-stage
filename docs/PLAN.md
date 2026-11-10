@@ -172,15 +172,16 @@ runs.
   which every fence is refused, so neither cleanup nor restoration can follow. In layout
   verification, unusable geometry and sizing beyond 5 points are ordinary failures;
   hierarchy, identity, order, focus, history, and ownership failures are uncertain.
-- Firefox and Xterm keep their unresolved `PATH` names so wrapper or multi-call links still
-  work; Foot and `sleep` are canonicalized. A Firefox root is
+- Foot, `sleep`, Firefox, and Xterm keep their unresolved `PATH` names so wrapper or
+  multi-call links such as BusyBox still work; `sway-stage` and `swaymsg` are
+  canonicalized. A Firefox root is
   `sway-stage-firefox-RUN_ID-SCENARIO` in the temporary directory, with a random run ID,
   created exclusively with mode 0700.
 - `lifecycle.rs` keeps preparation, observation, load/capture verification, cleanup, and
   restoration in synchronous execution order. The initial preflight precedes six standard
   configuration checks; a second preflight immediately precedes the designated switch.
-  Optional executable discovery waits until the extended scenarios; each application is
-  prepared only just before its scenario. Standard
+  With `--extended`, Firefox and Xterm are found on `PATH` once at the start of the run;
+  each application is prepared only just before its scenario. Standard
   configurations are checked again per scenario, with an additional fresh empty-workspace
   fence and global ID snapshot immediately before every load. YAML directories are 0700
   and files 0600, automatically removed separately from retained Firefox roots.
