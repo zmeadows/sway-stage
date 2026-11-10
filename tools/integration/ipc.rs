@@ -364,3 +364,7 @@ pub struct EventWorkspace {
     pub id: i64,
     pub name: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "ipc_tests.rs"]
+mod tests;

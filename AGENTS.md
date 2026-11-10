@@ -112,8 +112,9 @@ Each kind of information has one home:
   and the user's manual verification procedure. Condense completed work into decisions
   and findings; do not accumulate per-change histories or test counts.
 - `examples/`: user-facing illustrative YAML configurations, linked to the specification.
-- `tools/`: development-only Rust diagnostics, registered in `Cargo.toml` as Cargo examples
-  and run only by the user against a live Sway session.
+- `tools/`: development-only Rust diagnostics and the integration harness, registered in
+  `Cargo.toml` as Cargo examples and run only by the user against a live Sway session. The
+  harness's offline tests are a separate `integration_harness` test target.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help becomes the command reference
   when implemented. Keep it consistent with the specification without duplicating it.
@@ -127,11 +128,16 @@ or resizing windows. Never run `sway-stage load` against the real compositor. Al
 live-desktop behavioral verification must be performed manually by the user in an
 isolated disposable Sway session.
 
-`scripts/integration.py` is exclusively for the user's manual execution. Agents must never
-execute it, including `--help`, partial runs, or trial runs. Validate it only by syntax
-parsing and static inspection; never connect it to a live compositor. Its explicit
-workspace switching and owned-window cleanup are development-harness exceptions to the
-CLI's no-switch/no-close policy, not permission for agents to perform desktop operations.
+Both integration harnesses, `scripts/integration.py` and its Rust replacement, the
+`integration` Cargo example in `tools/integration/`, are exclusively for the user's manual
+execution. Agents must never execute either one, including `--help`, partial runs, or trial
+runs: never run the script, `cargo run --example integration`, or the built example binary.
+Validate them only by syntax parsing, compilation, static inspection, and the offline
+`integration_harness` tests. That test target is a separate crate root without the harness
+entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
+processes. Never connect either harness to a live compositor. Their explicit workspace
+switching and owned-window cleanup are development-harness exceptions to the CLI's
+no-switch/no-close policy, not permission for agents to perform desktop operations.
 
 **Human readability review.** After every source change, reread the modified code in full
 as a maintainer meeting it for the first time, not only as a diff. Check that names are

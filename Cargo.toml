@@ -46,3 +46,9 @@ name = "integration"
 path = "tools/integration/main.rs"
 test = false
 bench = false
+
+# Offline tests of the harness modules. A separate crate root without main.rs, so no test
+# can reach the harness entry point.
+[[test]]
+name = "integration_harness"
+path = "tools/integration/offline_tests.rs"

@@ -27,8 +27,10 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
   workspace restoration.
 - In progress: a development-only Rust replacement for that script in `tools/integration/`
   (the `integration` Cargo example). It has bounded processes, raw `swaymsg` queries, the
-  persistent event subscription with tick fences, and validated snapshots, but it refuses
-  to run until scenarios, verification, cleanup, and restoration are ported.
+  persistent event subscription with tick fences, validated snapshots, the ten scenario
+  definitions, and independent layout, ownership, and capture verification, tested
+  offline by the `integration_harness` test target. It refuses to run until scenario
+  execution, cleanup, and restoration are ported; see [the Rust port](#rust-port).
 
 Next remaining milestone: public release preparation (4).
 
@@ -155,6 +157,41 @@ The six standard and four extended scenarios, including inference checks, have p
 manual acceptance. Verification that interference stops safely with useful diagnostics
 remains outstanding. No live execution by an agent is permitted,
 including help, partial runs, or trial runs.
+
+### Rust port
+
+`tools/integration/` ports the script with the same scenarios and safety model; the
+script remains the behavioral reference until the port passes the same manual runs.
+Decisions so far:
+
+- Scenarios use harness-owned layout types, independent of `LayoutNode` and the
+  production parser. Expected YAML keeps the script's fixed format, including JSON flow
+  commands and environments, and capture is still compared line by line.
+- The script's `require`/`require_control` split is `Failure::Check`/`Failure::Uncertain`.
+  `Failure::report` distrusts focus history for uncertain failures, after which every
+  fence is refused, so neither cleanup nor restoration can follow. As in the script, only
+  unusable geometry and sizing beyond 5 points are ordinary failures; hierarchy, identity,
+  order, focus, history, and ownership failures are uncertain.
+- Firefox and Xterm keep their unresolved `PATH` names, like `shutil.which`, so wrapper or
+  multi-call links still work; Foot and `sleep` are canonicalized. A Firefox root is
+  `sway-stage-firefox-RUN_ID-SCENARIO` in the temporary directory, created exclusively
+  with mode 0700, rather than a random `mkdtemp` name.
+- `integration_harness` is a separate crate root over the harness modules without
+  `main.rs`. Its tests use constructed Sway trees and events, temporary files, and the
+  test process's own `/proc/PID/cmdline` for process evidence.
+
+The lifecycle port must still add preflight, the workspace switch, scenario execution,
+cleanup, restoration, and reporting. It must also:
+
+- Call `prepare_extended` immediately before each extended scenario, as the script's
+  lazy generator does, and list retained Firefox roots at exit, after failures too.
+- Pass every `Failure` through `report` and attempt no cleanup after any failure. Write
+  `verify_capture`'s filled draft as `captured.yaml` and require `check` to accept it.
+- Treat an interrupt like the script's `KeyboardInterrupt`: distrust focus history, report
+  candidate windows, skip restoration, and stop the event helper. The standard library
+  has no signal API, so this needs a reviewed dependency or a small `unsafe` handler. Until
+  then, the default SIGINT action ends the harness without restoration or cleanup, and a
+  terminal interrupt also reaches the helper in the same process group.
 
 ## 3C. Combined Fuzzel menu — complete
 

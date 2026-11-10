@@ -28,9 +28,18 @@ const MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Resolves a bare command name on `PATH` to a canonical absolute path. Relative `PATH`
-/// entries are skipped so the current directory can never supply an executable.
+/// Resolves a bare command name on `PATH` to a canonical absolute path.
 pub fn find_executable(name: &str) -> Result<PathBuf, String> {
+    let candidate = find_on_path(name)
+        .ok_or_else(|| format!("required executable not found on PATH: {name}"))?;
+    fs::canonicalize(&candidate)
+        .map_err(|error| format!("resolve {}: {error}", candidate.display()))
+}
+
+/// Returns the first executable file `name` in an absolute `PATH` directory, without
+/// resolving symlinks, so a wrapper or multi-call link keeps the name it is invoked by.
+/// Relative `PATH` entries are skipped so the current directory can never supply one.
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let search_path = env::var_os("PATH").unwrap_or_default();
     for directory in env::split_paths(&search_path) {
         if !directory.is_absolute() {
@@ -41,11 +50,10 @@ pub fn find_executable(name: &str) -> Result<PathBuf, String> {
         let is_executable_file = fs::metadata(&candidate)
             .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
         if is_executable_file {
-            return fs::canonicalize(&candidate)
-                .map_err(|error| format!("resolve {}: {error}", candidate.display()));
+            return Some(candidate);
         }
     }
-    Err(format!("required executable not found on PATH: {name}"))
+    None
 }
 
 /// Runs `command` to completion within `timeout` and returns its stdout, which must be

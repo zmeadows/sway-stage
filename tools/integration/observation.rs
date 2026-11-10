@@ -204,6 +204,28 @@ impl Events {
     }
 }
 
+/// A failed verification, classified by what it leaves in doubt. Either kind ends the run
+/// without further cleanup; only `report` turns one into a message.
+#[derive(Debug)]
+pub enum Failure {
+    /// An expectation failed, such as sizing, while window ownership and user control
+    /// remain established. Workspace restoration may still be attempted.
+    Check(String),
+    /// Window ownership, placement, identity, or user control is uncertain.
+    Uncertain(String),
+}
+
+impl Failure {
+    /// Returns the message to report. An uncertain failure also distrusts focus history,
+    /// which refuses every later fence and so forbids cleanup and workspace restoration.
+    pub fn report(self, events: &mut Events) -> String {
+        match self {
+            Failure::Check(message) => message,
+            Failure::Uncertain(message) => events.distrust_focus_history(message),
+        }
+    }
+}
+
 /// Sway state from `get_workspaces`, then `get_tree`, then a fence covering every event
 /// emitted before both replies. The tree may still predate some of those events.
 pub struct Snapshot {
@@ -382,3 +404,7 @@ fn fence_token() -> Result<String, String> {
         .collect();
     Ok(format!("sway-stage-integration:{hex}"))
 }
+
+#[cfg(test)]
+#[path = "observation_tests.rs"]
+mod tests;
