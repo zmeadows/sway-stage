@@ -242,7 +242,8 @@ its parent's orientation.
 
 Refuse an empty workspace; any floating container; a tabbed or stacked container, even
 with a single child; a fullscreen window or container (the workspace's own
-`fullscreen_mode` is ignored); unsupported node types and malformed containers;
+`fullscreen_mode` is ignored); a scratchpad window or container, even when shown;
+unsupported node types and malformed containers;
 nonpositive extents along a split axis; focus on anything but a window, such as a group
 after `focus parent`; and an arrangement exceeding the depth or node limits.
 

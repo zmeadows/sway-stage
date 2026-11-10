@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
-use swayipc::{Event, Floating, Node, NodeLayout, NodeType, WindowChange};
+use swayipc::{Event, Floating, Node, NodeLayout, NodeType, ScratchpadState, WindowChange};
 
 // Bounds the subscription and each fenced observation, as for load.
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
@@ -229,6 +229,14 @@ fn capture_node(
     if container.fullscreen_mode != Some(0) {
         return Err(format!(
             "container id={id} is fullscreen or reports no fullscreen state; exit fullscreen and retry"
+        ));
+    }
+    if matches!(
+        container.scratchpad_state,
+        Some(ScratchpadState::Fresh | ScratchpadState::Changed)
+    ) {
+        return Err(format!(
+            "container id={id} belongs to the scratchpad; remove it from the scratchpad and retry"
         ));
     }
 

@@ -619,6 +619,21 @@ fn unrepresentable_arrangements_fail_without_a_draft() {
 }
 
 #[test]
+fn scratchpad_windows_and_groups_are_refused_even_when_visible_and_tiled() {
+    for state in ["fresh", "changed"] {
+        let mut scratchpad_window = left();
+        scratchpad_window["scratchpad_state"] = json!(state);
+        let mut scratchpad_group = group(30, "splith", 1920, 1080, vec![left(), right()]);
+        scratchpad_group["scratchpad_state"] = json!(state);
+
+        for container in [scratchpad_window, scratchpad_group] {
+            let error = capture_idle(workspace("splith", vec![container], 20)).unwrap_err();
+            assert!(error.contains("belongs to the scratchpad"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn any_difference_between_the_two_observations_aborts() {
     let left_with_width = |width: i32| view(20, Some("left"), width, 1080);
     let right_with_app_id = |app_id: &str| view(21, Some(app_id), 960, 1080);

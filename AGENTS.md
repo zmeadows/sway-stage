@@ -125,6 +125,12 @@ or resizing windows. Never run `sway-stage load` against the real compositor. Al
 live-desktop behavioral verification must be performed manually by the user in an
 isolated disposable Sway session.
 
+`scripts/integration.py` is exclusively for the user's manual execution. Agents must never
+execute it, including `--help`, partial runs, or trial runs. Validate it only by syntax
+parsing and static inspection; never connect it to a live compositor. Its explicit
+workspace switching and owned-window cleanup are development-harness exceptions to the
+CLI's no-switch/no-close policy, not permission for agents to perform desktop operations.
+
 **Human readability review.** After every source change, reread the modified code in full
 as a maintainer meeting it for the first time, not only as a diff. Check that names are
 informative enough to follow without reconstructing context; that control flow and phases

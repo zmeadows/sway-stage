@@ -8,7 +8,7 @@ justify them.
 
 ## Status
 
-Implemented through milestone 3A:
+Implemented through milestone 3B (harness execution awaits the user):
 
 - Layout discovery, `list`, and `check` with strict YAML validation.
 - `load` for a root window and arbitrarily nested splits, with relative weights applied by
@@ -19,9 +19,10 @@ Implemented through milestone 3A:
   identifier, `match: null`) placeholders.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
+- Development-only `scripts/integration.py`: six Foot scenarios with independent raw-tree
+  verification, capture checks, guarded cleanup, and workspace restoration.
 
-Remaining: the integration harness (3B), the Fuzzel picker (3C), then public release
-preparation (4).
+Remaining: the Fuzzel picker (3C), then public release preparation (4).
 
 Automated tests are offline. Configuration and CLI tests use temporary directories and a
 fake `notify-send`; IPC tests replay recorded trees and the window events Sway emits for
@@ -52,31 +53,47 @@ contexts, multi-seat behavior, and a supported Sway version.
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
   two agreeing fenced observations and refuses unrepresentable arrangements.
+- **3B. Integration harness implementation.** `scripts/integration.py`; static review and
+  syntax validation only. The user's first live run remains outstanding.
 
-## 3B. Self-contained Sway integration harness (next)
+## 3B. Self-contained Sway integration harness
 
-A development-only `scripts/integration.py` that the user runs manually inside a Sway
-session to exercise `load` and `capture` end to end. When the user runs it, it may
-manipulate its designated workspace; agents must never run it against a live desktop.
+Implemented as development-only `scripts/integration.py`, using Python's standard library
+and `swaymsg`. It generates temporary YAML outside normal layout discovery and exercises
+single-window, horizontal-pair, vertical-pair, uneven-sibling, mixed-nesting, and deep-nesting
+layouts, including a meaningful horizontal group inside another horizontal group. Each Foot
+gets a random run/scenario/window app ID and runs `sleep 300`, with no shell or hold option.
 
-- Start from an existing workspace and use one designated, disposable workspace that must
-  be empty at the start; refuse to run otherwise.
-- Load predefined layouts there sequentially: single window, horizontal pair, vertical
-  pair, uneven siblings, mixed-orientation nesting, and deeper and same-axis nesting.
-  Prefer Foot with a distinct app ID per window; Firefox may be an optional compatibility
-  scenario.
-- After each load, inspect raw Sway IPC trees independently of `sway-stage` to verify
-  hierarchy, child order, app IDs, axis shares within the sizing tolerance, and final
-  focus. Then run `capture` and compare its draft with the scenario as an additional
-  check, never the sole oracle.
-- Between scenarios, close only windows positively identified as the current scenario's:
-  containers that appeared during it, with its expected app IDs, on the designated
-  workspace. Whenever ownership is uncertain, abort without destructive cleanup and
-  report what remains.
-- Return to the original workspace and print a concise pass/fail summary per scenario.
+The independent verifier checks exact identities and leaf count, visual order, split axes,
+meaningful hierarchy, final focus, and rectangle-based normalized sibling shares at every
+split. Deviations above 1 percentage point are diagnostics; above 5 fail the scenario.
+Only transparent single-child wrappers collapse. Capture is secondary: a narrow comparison
+with the known draft format checks fields, nesting, identifiers, focus, placeholders, and
+weights against the raw measurements. A filled copy must pass strict `check`; raw workspace
+state before and after capture must agree. This intentionally fails visibly if capture's
+serialization format changes rather than implementing a YAML parser.
 
-Complete when the scenarios run unattended in an isolated session, each failure names its
-scenario and check, and cleanup never touches a window it cannot attribute.
+The harness uses bounded `subprocess.run` calls for commands and queries. Its sole `Popen`
+is the persistent `swaymsg` workspace/window/tick subscription, with bounded reads and
+shutdown, needed to retain away-and-back focus history. Snapshot tick fences and fresh
+guards reduce races; they cannot provide transactional isolation. Any focus switch,
+unexpected structural activity, IPC failure, or uncertainty aborts. No scenario follows a
+failure. Cleanup requires globally new container IDs, exact app IDs, the designated
+workspace, safe tiled state, and the verified arrangement. Each exact-ID close is guarded
+by a new snapshot; disappearance and the remaining hierarchy are checked afterwards.
+Failure paths never attempt further closes, moves, process termination, repairs, or
+relaunches, and report observed test IDs/app IDs for manual inspection. Only the harness's
+own `swaymsg` subscription process is terminated on exit.
+
+Restoration is independent of cleanup: it requires reliable focus history, the disposable
+workspace still focused, and the original workspace's recorded identity and name still
+present. Otherwise it is skipped; an empty original workspace destroyed by Sway is not
+recreated. A concurrent user action can still occur after the last guard and before a
+command, so run only in a disposable session and leave input idle.
+
+Manual acceptance remains outstanding: the user must confirm that all six scenarios run
+unattended in an isolated session and that failures stop safely with useful diagnostics.
+No live execution by an agent is permitted, including help, partial runs, or trial runs.
 
 ## 3C. Fuzzel picker
 
@@ -332,6 +349,34 @@ environment values.
 
 For the user only, in an isolated, disposable Sway session with `SWAYSOCK` pointing to it.
 Agents must never run these commands; see [AGENTS.md](../AGENTS.md).
+
+### Integration harness (user only)
+
+Prerequisites: Python 3.9 or newer, `swaymsg`, Foot, and `sleep` on `PATH`; a built
+`target/release/sway-stage`; and a valid `SWAYSOCK` for the isolated disposable Sway
+session. Only one Sway seat is supported. Start on an existing workspace other than the
+explicit target, keep input idle until the harness exits, and choose a disposable positive
+numeric workspace that is absent or completely empty (including floating windows and
+empty containers). An existing workspace with that number but a different name is refused.
+The starting name must contain only ASCII letters/digits, spaces, or `_ . : + -`, beginning
+with a letter/digit, so restoration needs no command escaping. Agents must never execute
+this script, even with `--help`; only syntax parsing and static review are allowed.
+
+From the repository root, the user's first run is:
+
+```sh
+python3 scripts/integration.py --workspace 9
+```
+
+Use `--binary /absolute/path/to/sway-stage` to select another build. The script preflights
+and switches to the requested empty workspace, runs all six scenarios with guarded cleanup
+between them, and restores the original workspace when safe. It never chooses an alternate
+target. A failure stops the run and leaves remaining windows alone; their bounded commands
+normally expire within five minutes of launch. Read the reported IDs/app IDs before any
+manual intervention. Workspace/window rules, minimum sizes, gaps, activity, or version
+differences may cause a conservative failure; no live compatibility claim is made yet.
+
+### Individual examples
 
 Build and validate from the repository root. Install Foot and, for the four-window example,
 `firefox-esr` with the app ID used in the YAML; adapt the example to your installation
