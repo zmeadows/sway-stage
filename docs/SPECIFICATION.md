@@ -29,10 +29,11 @@ The command surface:
 | `load NAME` | Validate the named layout, then construct it on the focused empty workspace. |
 | `check NAME` | Validate a layout's syntax and semantics without IPC or launching anything. |
 | `capture [--infer-commands]` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
-| `menu [--infer-commands]` | Use Fuzzel to load a named layout or capture and save a named draft. |
+| `menu [--infer-commands]` | Use Fuzzel to load a named layout or capture a named draft into the layouts directory. |
 | `list` | Print available layout names, one per line in lexical order. No IPC. |
 
-`--layouts-dir PATH` overrides discovery for `load`, `check`, `list`, and `menu`. Otherwise
+`--layouts-dir PATH` overrides discovery for `load`, `check`, `list`, and `menu`, including
+the menu's capture destination. Otherwise
 use `$XDG_CONFIG_HOME/sway-stage/layouts`, or `$HOME/.config/sway-stage/layouts` if
 `XDG_CONFIG_HOME` is unset or empty. A nonempty XDG path must be absolute; if neither
 base is usable, report an error. An explicit relative directory is relative to the CLI's
@@ -101,24 +102,27 @@ Capture is selected, using the saved window PIDs with best-effort null fallback.
 may have changed or processes exited during the unlimited menu wait. By default commands
 remain null. Standalone capture continues to use one tree snapshot at invocation.
 
-Save to `$XDG_CONFIG_HOME/sway-stage/drafts/`, falling back to
-`$HOME/.config/sway-stage/drafts/` when XDG_CONFIG_HOME is unset or empty. Use discovery's
-same absolute-base validation. `--layouts-dir` never changes this destination. Create
-needed directories only when saving, with private permissions (0700); do not change
-permissions of existing directories. New draft files are private (0600).
+Save into the layouts directory, resolved exactly as for discovery: `--layouts-dir PATH`
+when given, otherwise the XDG default. A missing explicit directory remains a discovery
+error before either prompt. Create a missing default directory and its parents only when
+saving, with private permissions (0700); do not change permissions of existing directories.
+New draft files are private (0600).
 
 Names must match `[A-Za-z0-9][A-Za-z0-9_-]*` and contain at most 250 ASCII characters,
-leaving room for the `.yaml` suffix. Save `development` as `drafts/development.yaml`.
+leaving room for the `.yaml` suffix. Save `development` as `layouts/development.yaml`.
 Reject empty or invalid names, separators, traversal, and collisions at either `.yaml` or
 `.yml`, including symlinks. Never trim, rewrite, or normalize input. Publish complete drafts
 exclusively so concurrent creation cannot silently overwrite a `.yaml` file. A failed write
 must not expose an incomplete YAML draft; preserve uncertain files for manual inspection
-rather than attempting destructive rollback. Report save errors under `menu` without
+rather than attempting destructive rollback. Staging files must not use a `.yaml` or
+`.yml` extension, so discovery never sees them. Report save errors under `menu` without
 including inferred arguments.
 
 Save the complete capture output without interpreting or validating it as an executable
 configuration. Drafts may contain inferred commands needing review, `command: null`, or
-`match: null`; never repair them or move them to executable layouts automatically. On a
+`match: null`. A saved draft is immediately discoverable, so `list` and the menu offer it,
+but `check` and `load` reject placeholders before any IPC or launch. Users edit it in place
+and run `check`; never repair, rewrite, or remove it automatically. On a
 successful save, attempt a brief notification identifying the saved path. Notification
 failure is secondary and does not fail the save. No extra confirmation or load-success
 notification is needed.

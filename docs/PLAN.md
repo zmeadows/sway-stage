@@ -18,7 +18,7 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
 - Read-only `capture`, printing an editable draft with `command: null` (and, without an
   identifier, `match: null`) placeholders, plus opt-in `--infer-commands` process arguments.
 - Combined `menu`: Fuzzel layout loading and named draft capture, with opt-in inference
-  and private saves outside the executable layouts directory.
+  and private, non-overwriting saves into the layouts directory.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
@@ -179,23 +179,30 @@ No later tree query or fallback capture occurs. Inference runs only on Capture a
 saved PIDs, allowing stale-process null fallback. Cancellation discards any draft in
 memory. Selection/capture/save failures notify under `menu` without launch logs.
 
-`discovery::config_home` shares configuration-base validation. Drafts always go to its
-`sway-stage/drafts` child, independently of `--layouts-dir`. Directory creation uses 0700
-without changing existing permissions. Saving creates a 0600 `.partial` staging file
+Drafts are saved into `discovery::Directory::resolve`'s path, the same directory the
+action menu discovered, so `--layouts-dir` controls loading and saving alike. A missing
+explicit directory fails discovery before either prompt; a missing default directory is
+created only on save. A separate drafts directory was dropped to remove the manual move
+step: the strict validation in `check`/`load` already rejects placeholders before any IPC,
+so listing an unfinished draft is harmless. Old `drafts/` directories are neither migrated
+nor touched. Directory creation uses 0700 without changing existing permissions. Saving creates a 0600 `.partial` staging file
 exclusively, writes and syncs the unchanged draft, then publishes with `hard_link` so an
 existing `.yaml` destination cannot be overwritten. Both `.yaml` and `.yml` collisions
 are checked; names are ASCII layout names limited to 250 bytes. Write/publication failure
 retains the staging file and reports its path; no partial YAML is published and no failure
 rollback removes uncertain files. Successful publication removes its staging link and
 attempts a best-effort path notification. The filesystem must support hard links within
-the drafts directory. External concurrent changes across two suffixes are not atomic.
+the layouts directory. External concurrent changes across two suffixes are not atomic.
+The `.partial` staging name is outside discovery's extensions.
 
 Offline tests use fake Fuzzel/notify-send and single-tree capture IPC fixtures. They verify
 the tree response precedes the first Fuzzel launch, both prompts use the original output,
 Capture renders saved state, and Load independently observes its target after Fuzzel exit.
 They also cover deferred snapshot errors, empty/unsupported initial layouts, exact
-selections, cancellation, subprocess/protocol errors, opt-in inference, draft destinations,
-permissions, collisions, exclusive publication, write failures, and launch-log isolation.
+selections, cancellation, subprocess/protocol errors, opt-in inference, default/HOME and
+explicit (relative) save destinations, permissions, collisions, exclusive publication,
+write and directory-creation failures, discovery of saved drafts, placeholder rejection
+by `check`, `load`, and menu loading, and launch-log isolation.
 The ten-scenario integration harness is unchanged. Live menu acceptance is user-only;
 see the manual procedure below.
 
@@ -221,7 +228,7 @@ static linking, other platforms, or untested compositor versions.
 | `config.rs` | Strict YAML parsing into `LayoutNode` trees and semantic validation. |
 | `observation.rs` | Event reader, fenced snapshots, and read-only tree inspection. |
 | `launch.rs` | Launching, window acceptance, guarded construction, sizing, and focus. |
-| `menu.rs` | Fuzzel actions/name prompts and private, exclusive draft saving. |
+| `menu.rs` | Fuzzel actions/name prompts and private, exclusive saving into the layouts directory. |
 | `capture.rs` | Read-only conversion of the focused workspace into a YAML draft. |
 | `diagnostics.rs` | `last-run.log`, stderr reporting, and bounded notifications. |
 
@@ -472,10 +479,12 @@ an occupied workspace to confirm refusal. For capture, focus a supported tiled a
 note the original focused window and proportions, invoke the menu, and move the pointer
 between windows while the action menu is open before selecting Capture. Move it again
 while entering a fresh name such as `captured-development`. Verify a path
-notification and the complete draft in `$XDG_CONFIG_HOME/sway-stage/drafts` (or
-`$HOME/.config/sway-stage/drafts`). The normal command must leave null commands; the
+notification and the complete draft in the `--layouts-dir` directory (`examples` for the
+commands above; use a fresh name and delete the test file afterwards). Without
+`--layouts-dir`, the draft goes to `$XDG_CONFIG_HOME/sway-stage/layouts` (or
+`$HOME/.config/sway-stage/layouts`). The normal command must leave null commands; the
 inference command may recover process argv, which needs review. Neither capture changes
-the arrangement or launch log, and `--layouts-dir examples` does not change the save path.
+the arrangement or launch log. The saved name appears in `list` and the next menu.
 
 On two monitors, invoke the menu from a supported layout on output A. While each prompt
 is open, move the pointer to output B and change workspace focus, then return to complete
@@ -495,8 +504,9 @@ these corrected interactions until the user performs them.
 
 Press Escape in the action menu, then separately choose Capture and press Escape at the
 name prompt. Both should exit successfully without files, errors, or a replaced launch
-log. Try an invalid name and an existing draft name: expect a menu error and preserved
-files. Drafts require manual review/editing and `check` before moving into layouts.
+log. Try an invalid name and an existing layout name: expect a menu error and preserved
+files. `check NAME` must reject an unedited null-command draft; selecting it from the menu
+must fail validation without launching anything. Edit it in place, then `check` it.
 Agents must never run these desktop checks.
 
 ### Integration harness (user only)

@@ -86,7 +86,7 @@ sway-stage list          # print layout names; does not read their contents
 sway-stage check dev     # validate without contacting Sway or launching anything
 sway-stage load dev      # build the layout on the focused, empty workspace
 sway-stage capture > draft.yaml  # draft a layout from the focused workspace
-sway-stage menu                 # load a layout or capture a named draft through Fuzzel
+sway-stage menu                 # load a layout or save a named capture through Fuzzel
 sway-stage menu --infer-commands # opt into command inference for menu captures
 ```
 
@@ -108,19 +108,20 @@ nothing and exits 0; failures exit 1 and invalid usage exits 2.
 `menu` lists `Load: NAME` entries and a `Capture current layout…` action, even if no
 layouts exist. Loading still requires an empty workspace at load time. Capture saves the
 arrangement from before the menu opened; later focus changes do not alter it. Both prompts
-use the original monitor when known. After asking for a name, it saves `NAME.yaml` in
-`$XDG_CONFIG_HOME/sway-stage/drafts`
-(by default `~/.config/sway-stage/drafts`). Names use the layout-name grammar, at most 250
-characters; existing `.yaml` or `.yml` drafts are never overwritten. `--layouts-dir` affects
-loading only, not draft saving. Escape at either prompt cancels without saving or loading.
-For example:
+use the original monitor when known. After asking for a name, it saves `NAME.yaml` in the
+layouts directory: `--layouts-dir PATH` if given, otherwise
+`$XDG_CONFIG_HOME/sway-stage/layouts` (by default `~/.config/sway-stage/layouts`). Names
+use the layout-name grammar, at most 250 characters; existing `.yaml` or `.yml` layouts are
+never overwritten. Escape at either prompt cancels without saving or loading. For example:
 
 ```text
 bindsym $mod+Shift+m exec sway-stage menu
 ```
 
-Review and edit saved drafts, fill remaining placeholders, and validate with `check`
-before moving them into the executable layouts directory. Command inference stays opt-in.
+A saved capture is a draft: it appears in `list` and the menu immediately, but `check` and
+`load` reject it until you edit it in place, review any inferred commands, and fill
+remaining placeholders. Run `sway-stage check NAME` before loading it. Command inference
+stays opt-in.
 
 ### Capturing an arrangement
 

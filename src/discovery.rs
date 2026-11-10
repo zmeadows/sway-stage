@@ -82,8 +82,8 @@ impl Directory {
     }
 }
 
-/// Shared XDG configuration base for executable layouts and separate capture drafts.
-pub fn config_home() -> Result<PathBuf, String> {
+/// XDG configuration base containing the default layouts directory.
+fn config_home() -> Result<PathBuf, String> {
     if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         let path = PathBuf::from(xdg);
         if !path.is_absolute() {

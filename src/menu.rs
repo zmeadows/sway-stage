@@ -1,4 +1,5 @@
-//! Optional synchronous Fuzzel interface and private, non-overwriting capture drafts.
+//! Optional synchronous Fuzzel interface and private, non-overwriting saves of captured
+//! drafts into the layouts directory.
 
 use crate::{capture, diagnostics, discovery};
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -46,7 +47,13 @@ pub fn select(
         })
 }
 
-pub fn capture_draft(snapshot: &capture::Snapshot, infer_commands: bool) -> Result<(), String> {
+/// Saves into the same directory `select` discovered, so `--layouts-dir` controls both.
+/// The draft is not validated: placeholders stay until the user edits and checks it.
+pub fn capture_draft(
+    snapshot: &capture::Snapshot,
+    layouts_dir: Option<PathBuf>,
+    infer_commands: bool,
+) -> Result<(), String> {
     // The action prompt has exited. Render the pre-menu state without querying Sway again.
     let draft = snapshot
         .render(infer_commands)
@@ -54,8 +61,9 @@ pub fn capture_draft(snapshot: &capture::Snapshot, infer_commands: bool) -> Resu
     let Some(name) = fuzzel("--prompt-only=Draft name: ", None, snapshot.output_name())? else {
         return Ok(());
     };
-    let directory = discovery::config_home()?.join("sway-stage/drafts");
-    let path = save_draft(&directory, &name, &draft)?;
+
+    let layouts_directory = discovery::Directory::resolve(layouts_dir)?;
+    let path = save_draft(&layouts_directory.path, &name, &draft)?;
     diagnostics::notify_draft_saved(&path);
     Ok(())
 }
@@ -144,17 +152,18 @@ fn save_draft(directory: &Path, name: &str, draft: &str) -> Result<PathBuf, Stri
     validate_draft_name(name)?;
     let path = directory.join(format!("{name}.yaml"));
     let alternate = directory.join(format!("{name}.yml"));
-    reject_existing_draft(&path)?;
-    reject_existing_draft(&alternate)?;
+    reject_existing_layout(&path)?;
+    reject_existing_layout(&alternate)?;
 
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(directory)
-        .map_err(|error| format!("create drafts directory {}: {error}", directory.display()))?;
+        .map_err(|error| format!("create layouts directory {}: {error}", directory.display()))?;
 
-    // Stage outside discovery's extensions. A write/sync/publication failure leaves a
-    // clearly named partial file for manual inspection, never a partial .yaml draft.
+    // Stage outside discovery's extensions so list, check, and the menu never see it. A
+    // write/sync/publication failure leaves a clearly named partial file for manual
+    // inspection, never a partial .yaml layout.
     // Do not roll back by unlinking a path whose ownership may have changed on failure.
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let partial_path = directory.join(format!(
@@ -204,7 +213,7 @@ fn publish_draft(
         .write_all(draft.as_bytes())
         .and_then(|()| partial_file.sync_all())
         .map_err(|error| format!("write draft: {error}"))?;
-    reject_existing_draft(alternate)?;
+    reject_existing_layout(alternate)?;
     fs::hard_link(partial_path, path).map_err(|error| {
         format!(
             "publish draft {} without overwriting: {error}",
@@ -213,14 +222,14 @@ fn publish_draft(
     })
 }
 
-fn reject_existing_draft(path: &Path) -> Result<(), String> {
+fn reject_existing_layout(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(format!(
-            "draft already exists at {}; choose another name",
+            "layout already exists at {}; choose another name",
             path.display()
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("inspect draft {}: {error}", path.display())),
+        Err(error) => Err(format!("inspect layout path {}: {error}", path.display())),
     }
 }
 
@@ -315,7 +324,7 @@ mod tests {
         let directory = Directory::new();
         let path = directory.0.join("draft.yaml");
         let alternate = path.with_extension("yml");
-        reject_existing_draft(&path).unwrap();
+        reject_existing_layout(&path).unwrap();
         let partial = directory.0.join("staging.partial");
         let mut file = OpenOptions::new()
             .write(true)

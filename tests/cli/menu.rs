@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 const CAPTURE: &str = "Capture current layout…\n";
 
@@ -230,7 +230,7 @@ fn capture_failure_with_no_layouts_never_opens_the_name_prompt() {
 }
 
 #[test]
-fn captures_save_complete_private_drafts_to_xdg_or_home_with_opt_in_inference() {
+fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference() {
     for (base, infer_commands, notification_status) in [
         (None, false, "0"),
         (Some(""), false, "0"),
@@ -238,26 +238,32 @@ fn captures_save_complete_private_drafts_to_xdg_or_home_with_opt_in_inference() 
     ] {
         let fixture = Fixture::new();
         setup(&fixture);
+        // XDG_CONFIG_HOME is unset, set but empty, or an absolute base. The default
+        // layouts directory and its parents do not exist before saving.
+        let xdg_config_home = base.map(|base| {
+            if base.is_empty() {
+                PathBuf::new()
+            } else {
+                fixture.path.join(base)
+            }
+        });
+        let config_home = match &xdg_config_home {
+            Some(path) if !path.as_os_str().is_empty() => path.clone(),
+            _ => fixture.path.join(".config"),
+        };
         let mut command = command(&fixture, CAPTURE, "development\n");
         command
-            .args(["--layouts-dir", ".", "menu"])
+            .arg("menu")
             .env("NOTIFY_STATUS", notification_status);
-        let directory = if let Some(base) = base.filter(|base| !base.is_empty()) {
-            let base = fixture.path.join(base);
-            command.env("XDG_CONFIG_HOME", &base);
-            base
-        } else {
-            if base == Some("") {
-                command.env("XDG_CONFIG_HOME", "");
-            }
-            fixture.path.join(".config")
-        };
+        if let Some(xdg_config_home) = &xdg_config_home {
+            command.env("XDG_CONFIG_HOME", xdg_config_home);
+        }
         if infer_commands {
             command.arg("--infer-commands");
         }
         let output = run_capture(&fixture, &mut command);
         assert!(output.status.success(), "{output:?}");
-        let path = directory.join("sway-stage/drafts/development.yaml");
+        let path = config_home.join("sway-stage/layouts/development.yaml");
         let draft = fs::read_to_string(&path).unwrap();
         assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
         assert!(draft.contains("app_id: editor"));
@@ -286,8 +292,8 @@ fn captures_save_complete_private_drafts_to_xdg_or_home_with_opt_in_inference() 
             0o600
         );
         for parent in [
-            &directory,
-            &directory.join("sway-stage"),
+            &config_home,
+            &config_home.join("sway-stage"),
             path.parent().unwrap(),
         ] {
             assert_eq!(
@@ -301,6 +307,14 @@ fn captures_save_complete_private_drafts_to_xdg_or_home_with_opt_in_inference() 
         assert!(notification.contains("sway-stage draft saved"));
         assert!(notification.contains(path.to_str().unwrap()));
         assert!(!notification.contains("command:"));
+
+        // Ordinary discovery in the same environment finds the saved layout.
+        let mut list = fixture.command();
+        if let Some(xdg_config_home) = &xdg_config_home {
+            list.env("XDG_CONFIG_HOME", xdg_config_home);
+        }
+        let output = list.arg("list").output().unwrap();
+        assert_eq!(output.stdout, b"development\n", "{output:?}");
     }
 }
 
@@ -348,53 +362,142 @@ fn invalid_draft_names_and_name_prompt_failures_do_not_save() {
 }
 
 #[test]
-fn draft_destination_rejects_invalid_bases_even_with_explicit_layouts() {
-    for (xdg, home, expected) in [
-        (
-            "relative",
-            Some("unused"),
-            "XDG_CONFIG_HOME must be absolute",
-        ),
-        ("", Some("relative"), "HOME must be absolute"),
-        ("", None, "neither XDG_CONFIG_HOME nor HOME is usable"),
-    ] {
+fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() {
+    for config_bases_are_usable in [true, false] {
         let fixture = Fixture::new();
         setup(&fixture);
+        let layouts = fixture.path.join("layouts");
+        fs::create_dir(&layouts).unwrap();
+        fs::set_permissions(&layouts, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(layouts.join("writing.yaml"), WINDOW).unwrap();
+
+        // The relative directory resolves against the working directory, the fixture root.
         let mut command = command(&fixture, CAPTURE, "development\n");
-        command
-            .env("XDG_CONFIG_HOME", xdg)
-            .args(["--layouts-dir", ".", "menu"]);
-        if let Some(home) = home {
-            command.env("HOME", home);
+        command.args(["--layouts-dir", "layouts", "menu"]);
+        if config_bases_are_usable {
+            command.env("XDG_CONFIG_HOME", fixture.path.join("xdg"));
         } else {
-            command.env_remove("HOME");
+            command
+                .env("XDG_CONFIG_HOME", "relative")
+                .env_remove("HOME");
         }
         let output = run_capture(&fixture, &mut command);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
-        assert!(!fixture.path.join("development.yaml").exists());
+        assert!(output.status.success(), "{output:?}");
+
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            format!("Load: writing\n{CAPTURE}")
+        );
+        let path = layouts.join("development.yaml");
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("app_id: editor"), "{saved}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&layouts).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert_eq!(fs::read_dir(&layouts).unwrap().count(), 2);
+        assert!(!fixture.path.join("xdg").exists());
+        assert!(!fixture.path.join(".config").exists());
+        let output = fixture.run(&["--layouts-dir", "layouts", "list"], 0);
+        assert_eq!(output.stdout, b"development\nwriting\n");
     }
+
+    // A missing explicit directory is still a discovery error, raised before either prompt.
+    let fixture = Fixture::new();
+    setup(&fixture);
+    let mut command = command(&fixture, CAPTURE, "development\n");
+    command.args(["--layouts-dir", "missing", "menu"]);
+    let output = run_capture(&fixture, &mut command);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("read directory"));
+    assert!(!fixture.path.join("options").exists());
+    assert!(!fixture.path.join("missing").exists());
+}
+
+#[test]
+fn captured_placeholders_fail_check_and_both_loads_before_contacting_sway() {
+    let fixture = Fixture::new();
+    setup(&fixture);
+    let mut capture_command = command(&fixture, CAPTURE, "development\n");
+    capture_command.arg("menu");
+    let output = run_capture(&fixture, &mut capture_command);
+    assert!(output.status.success(), "{output:?}");
+    let layouts = fixture.path.join(".config/sway-stage/layouts");
+    let path = layouts.join("development.yaml");
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.lines().any(|line| line.trim() == "command: null"));
+
+    // SWAYSOCK is unset: reaching IPC would report that instead of the placeholder.
+    let output = fixture.run(&["check", "development"], 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("capture placeholder"));
+    let output = fixture.run(&["load", "development"], 1);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("capture placeholder"), "{stderr}");
+    assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+
+    let output = command(&fixture, "Load: development\n", "")
+        .arg("menu")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("capture placeholder"), "{stderr}");
+    assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(log.contains("menu load"), "{log}");
+    assert!(!log.contains("validated layout"), "{log}");
+
+    // Failed validation neither repairs nor removes the captured layout.
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+    assert_eq!(fs::read_dir(&layouts).unwrap().count(), 1);
 }
 
 #[test]
 fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
-    for obstacle in ["development.yaml", "development.yml", "directory"] {
+    for obstacle in [
+        "development.yaml",
+        "development.yml",
+        "dangling layouts link",
+    ] {
         let fixture = Fixture::new();
         setup(&fixture);
-        let drafts = fixture.path.join(".config/sway-stage/drafts");
-        let existing = if obstacle == "directory" {
-            fs::create_dir_all(drafts.parent().unwrap()).unwrap();
-            drafts.clone()
+        let layouts = fixture.path.join(".config/sway-stage/layouts");
+        if obstacle == "dangling layouts link" {
+            // Discovery sees an absent default directory, but creating it must fail.
+            fs::create_dir_all(layouts.parent().unwrap()).unwrap();
+            symlink("absent", &layouts).unwrap();
         } else {
-            fs::create_dir_all(&drafts).unwrap();
-            drafts.join(obstacle)
-        };
-        fs::write(&existing, "preserve me").unwrap();
+            fs::create_dir_all(&layouts).unwrap();
+            fs::write(layouts.join(obstacle), "preserve me").unwrap();
+        }
+
         let mut command = command(&fixture, CAPTURE, "development\n");
         command.arg("menu");
         let output = run_capture(&fixture, &mut command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert_eq!(fs::read_to_string(&existing).unwrap(), "preserve me");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if obstacle == "dangling layouts link" {
+            assert!(stderr.contains("create layouts directory"), "{stderr}");
+            assert!(
+                fs::symlink_metadata(&layouts)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(!layouts.parent().unwrap().join("absent").exists());
+        } else {
+            assert!(stderr.contains("already exists"), "{stderr}");
+            assert_eq!(
+                fs::read_to_string(layouts.join(obstacle)).unwrap(),
+                "preserve me"
+            );
+            assert_eq!(fs::read_dir(&layouts).unwrap().count(), 1);
+        }
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(notification.contains("sway-stage menu failed"));
         assert!(!notification.contains("command:"));
@@ -430,7 +533,7 @@ fn saved_layout_and_output_are_fixed_before_either_prompt() {
     let output = run_snapshot(&fixture, &mut command, tree);
     assert!(output.status.success(), "{output:?}");
     let draft =
-        fs::read_to_string(fixture.path.join(".config/sway-stage/drafts/saved.yaml")).unwrap();
+        fs::read_to_string(fixture.path.join(".config/sway-stage/layouts/saved.yaml")).unwrap();
     assert!(draft.contains("focus: window2"), "{draft}");
     assert!(draft.contains("weight: 33.33"));
     assert!(draft.contains("weight: 66.67"));
@@ -462,7 +565,7 @@ fn missing_output_does_not_change_capture_or_cancellation() {
             assert!(!fixture.path.join(".config").exists());
         } else {
             let draft =
-                fs::read_to_string(fixture.path.join(".config/sway-stage/drafts/saved.yaml"))
+                fs::read_to_string(fixture.path.join(".config/sway-stage/layouts/saved.yaml"))
                     .unwrap();
             assert!(draft.contains("app_id: editor"));
         }

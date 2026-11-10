@@ -16,10 +16,10 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures in the XDG drafts directory."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
 )]
 struct Cli {
-    /// Read layouts from PATH instead of the XDG configuration directory
+    /// Read layouts, and save menu captures, in PATH instead of the XDG configuration directory
     #[arg(long, global = true, value_name = "PATH")]
     layouts_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -46,7 +46,7 @@ enum Command {
         #[arg(long)]
         infer_commands: bool,
     },
-    /// Use Fuzzel to load a layout or capture a named draft
+    /// Use Fuzzel to load a layout or save a capture as a named layout draft
     Menu {
         /// Recover best-effort process arguments for captures only; review for secrets
         #[arg(long)]
@@ -175,7 +175,7 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
         Some(menu::Action::Capture) => {
             let snapshot =
                 snapshot.map_err(|error| report_menu_failure(format!("capture: {error}")))?;
-            menu::capture_draft(&snapshot, infer_commands).map_err(report_menu_failure)
+            menu::capture_draft(&snapshot, layouts_dir, infer_commands).map_err(report_menu_failure)
         }
     }
 }
