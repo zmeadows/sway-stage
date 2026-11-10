@@ -25,6 +25,10 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
   scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
   workspace restoration.
+- In progress: a development-only Rust replacement for that script in `tools/integration/`
+  (the `integration` Cargo example). It has bounded processes, raw `swaymsg` queries, the
+  persistent event subscription with tick fences, and validated snapshots, but it refuses
+  to run until scenarios, verification, cleanup, and restoration are ported.
 
 Next remaining milestone: public release preparation (4).
 
