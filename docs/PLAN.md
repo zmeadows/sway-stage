@@ -19,8 +19,9 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
   identifier, `match: null`) placeholders, plus opt-in `--infer-commands` process arguments.
 - Combined `menu`: Fuzzel layout loading and named draft capture, with opt-in inference
   and private, non-overwriting saves into the layouts directory.
-- Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
-  and `observe_sway` runs the production observer for ten seconds.
+- Development tools in `tools/`, run as Cargo examples: `inspect_sway` prints a read-only
+  snapshot of the focused workspace, and `observe_sway` runs the production observer for
+  ten seconds.
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
   scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
   workspace restoration.
@@ -43,7 +44,7 @@ multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
 
-- **Preliminary inspection.** Read-only `inspect_sway` example over `GET_WORKSPACES` and
+- **Preliminary inspection.** Read-only `inspect_sway` tool over `GET_WORKSPACES` and
   `GET_TREE`.
 - **1. Validation and discovery.** Typed split/window model, strict YAML, immediate-file
   discovery, `check`, and `list`; no IPC, launches, logs, or notifications.

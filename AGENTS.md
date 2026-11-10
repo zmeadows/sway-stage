@@ -111,7 +111,9 @@ Each kind of information has one home:
   architectural and dependency decisions, Sway/swayipc technical findings, open questions,
   and the user's manual verification procedure. Condense completed work into decisions
   and findings; do not accumulate per-change histories or test counts.
-- `examples/`: illustrative configurations, linked to the specification.
+- `examples/`: user-facing illustrative YAML configurations, linked to the specification.
+- `tools/`: development-only Rust diagnostics, registered in `Cargo.toml` as Cargo examples
+  and run only by the user against a live Sway session.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help becomes the command reference
   when implemented. Keep it consistent with the specification without duplicating it.
