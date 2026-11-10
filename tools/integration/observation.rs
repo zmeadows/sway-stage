@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::ipc::{
     Event, EventSubscription, Floating, IPC_TIMEOUT, NodeType, ScratchpadState, Swaymsg, TreeNode,
-    WindowEvent, Workspace, WorkspaceChange,
+    WindowEvent, Workspace, WorkspaceChange, WorkspaceEvent,
 };
 
 /// Bounds the events one fence reads, including ticks and workspace events.
@@ -141,67 +141,12 @@ impl Events {
                 }
                 Event::Workspace(workspace_event) => workspace_event,
             };
-
-            let current_id = workspace_event
-                .current
-                .as_ref()
-                .map(|workspace| workspace.id);
-            let old_id = workspace_event.old.as_ref().map(|workspace| workspace.id);
-            match workspace_event.change {
-                WorkspaceChange::Focus => {
-                    if let Some(expected) = expected_switch
-                        && !switched
-                    {
-                        let destination = match (&workspace_event.old, &workspace_event.current) {
-                            (Some(old), Some(current))
-                                if old.id == expected.from_id
-                                    && current.name.as_deref()
-                                        == Some(expected.destination_name.as_str()) =>
-                            {
-                                WorkspaceIdentity {
-                                    id: current.id,
-                                    name: expected.destination_name.clone(),
-                                }
-                            }
-                            _ => {
-                                return Err(format!(
-                                    "unexpected workspace switch: old={:?} current={:?}",
-                                    workspace_event.old, workspace_event.current
-                                ));
-                            }
-                        };
-                        self.current_workspace = Some(destination);
-                        switched = true;
-                    } else if let Some(current_workspace) = &self.current_workspace {
-                        // Refocusing the same workspace is harmless. Any other focus change
-                        // means the user has taken control, even if focus has returned by
-                        // the next snapshot.
-                        if current_id != Some(current_workspace.id)
-                            || old_id.is_some_and(|id| id != current_workspace.id)
-                        {
-                            return Err(
-                                "workspace focus changed; user control takes precedence".into()
-                            );
-                        }
-                    } else {
-                        return Err("workspace focus changed during initial preflight".into());
-                    }
-                }
-                WorkspaceChange::Reload | WorkspaceChange::Rename | WorkspaceChange::Move => {
-                    return Err(format!(
-                        "workspace {:?} during harness execution",
-                        workspace_event.change
-                    ));
-                }
-                WorkspaceChange::Empty => {
-                    if let Some(current_workspace) = &self.current_workspace
-                        && current_id == Some(current_workspace.id)
-                    {
-                        return Err("focused workspace was destroyed".into());
-                    }
-                }
-                WorkspaceChange::Init | WorkspaceChange::Urgent => {}
-            }
+            apply_workspace_event(
+                &workspace_event,
+                expected_switch,
+                &mut switched,
+                &mut self.current_workspace,
+            )?;
         }
         Err(format!("event history exceeded {MAX_FENCE_EVENTS} events"))
     }
@@ -210,6 +155,80 @@ impl Events {
     pub fn close(self) -> Result<(), String> {
         self.subscription.close()
     }
+}
+
+/// Interprets one workspace event read by a fence, failing when it shows that the harness
+/// may have lost control of focus or workspace identity.
+///
+/// Until `expected_switch` has occurred, which `switched` records for the current fence,
+/// the next focus event must be exactly that switch; it establishes the destination as
+/// `current_workspace`. Otherwise the only acceptable focus event refocuses
+/// `current_workspace`, which persists across fences.
+fn apply_workspace_event(
+    workspace_event: &WorkspaceEvent,
+    expected_switch: Option<&ExpectedSwitch>,
+    switched: &mut bool,
+    current_workspace: &mut Option<WorkspaceIdentity>,
+) -> Result<(), String> {
+    let current_id = workspace_event
+        .current
+        .as_ref()
+        .map(|workspace| workspace.id);
+    let old_id = workspace_event.old.as_ref().map(|workspace| workspace.id);
+    match workspace_event.change {
+        WorkspaceChange::Focus => {
+            if let Some(expected) = expected_switch
+                && !*switched
+            {
+                let destination = match (&workspace_event.old, &workspace_event.current) {
+                    (Some(old), Some(current))
+                        if old.id == expected.from_id
+                            && current.name.as_deref()
+                                == Some(expected.destination_name.as_str()) =>
+                    {
+                        WorkspaceIdentity {
+                            id: current.id,
+                            name: expected.destination_name.clone(),
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unexpected workspace switch: old={:?} current={:?}",
+                            workspace_event.old, workspace_event.current
+                        ));
+                    }
+                };
+                *current_workspace = Some(destination);
+                *switched = true;
+            } else if let Some(current_workspace) = current_workspace.as_ref() {
+                // Refocusing the same workspace is harmless. Any other focus change means
+                // the user has taken control, even if focus has returned by the next
+                // snapshot.
+                if current_id != Some(current_workspace.id)
+                    || old_id.is_some_and(|id| id != current_workspace.id)
+                {
+                    return Err("workspace focus changed; user control takes precedence".into());
+                }
+            } else {
+                return Err("workspace focus changed during initial preflight".into());
+            }
+        }
+        WorkspaceChange::Reload | WorkspaceChange::Rename | WorkspaceChange::Move => {
+            return Err(format!(
+                "workspace {:?} during harness execution",
+                workspace_event.change
+            ));
+        }
+        WorkspaceChange::Empty => {
+            if let Some(current_workspace) = current_workspace.as_ref()
+                && current_id == Some(current_workspace.id)
+            {
+                return Err("focused workspace was destroyed".into());
+            }
+        }
+        WorkspaceChange::Init | WorkspaceChange::Urgent => {}
+    }
+    Ok(())
 }
 
 /// A failed verification, classified by what it leaves in doubt. Either kind ends the run

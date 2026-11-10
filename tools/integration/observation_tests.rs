@@ -233,3 +233,288 @@ fn walk_inherits_workspaces_and_unsafe_placement() {
     ];
     assert_eq!(placements, expected);
 }
+
+// Workspace events within one fence. As in the lifecycle, the harness starts on workspace
+// "1" and switches to the disposable workspace "9"; focus must never reach workspace "3".
+
+/// A workspace absent from the fixture desktop.
+const ELSEWHERE_WORKSPACE_ID: i64 = 8;
+
+fn original_identity() -> WorkspaceIdentity {
+    WorkspaceIdentity {
+        id: OTHER_WORKSPACE_ID,
+        name: "1".into(),
+    }
+}
+
+fn elsewhere_identity() -> WorkspaceIdentity {
+    WorkspaceIdentity {
+        id: ELSEWHERE_WORKSPACE_ID,
+        name: "3".into(),
+    }
+}
+
+/// The lifecycle's switch from the original workspace to the disposable workspace.
+fn switch_to_target() -> ExpectedSwitch {
+    ExpectedSwitch {
+        from_id: OTHER_WORKSPACE_ID,
+        destination_name: "9".into(),
+    }
+}
+
+/// A workspace event as `swaymsg -m` prints it, reduced to workspace identities. An absent
+/// workspace is reported as null.
+fn workspace_event(
+    change: &str,
+    old: Option<&WorkspaceIdentity>,
+    current: Option<&WorkspaceIdentity>,
+) -> WorkspaceEvent {
+    let describe = |workspace: Option<&WorkspaceIdentity>| {
+        workspace.map(
+            |workspace| json!({"id": workspace.id, "type": "workspace", "name": workspace.name}),
+        )
+    };
+    let event = json!({"change": change, "old": describe(old), "current": describe(current)});
+    serde_json::from_value(event).expect("a workspace event in Sway's format")
+}
+
+fn focus_event(old: &WorkspaceIdentity, current: &WorkspaceIdentity) -> WorkspaceEvent {
+    workspace_event("focus", Some(old), Some(current))
+}
+
+/// The state that `read_through_fence` carries between workspace events: the established
+/// workspace, which persists across fences, and this fence's expected switch and whether it
+/// has occurred.
+struct FenceState {
+    current_workspace: Option<WorkspaceIdentity>,
+    expected_switch: Option<ExpectedSwitch>,
+    switched: bool,
+}
+
+impl FenceState {
+    /// A fence that has not yet read any workspace event.
+    fn new(
+        current_workspace: Option<WorkspaceIdentity>,
+        expected_switch: Option<ExpectedSwitch>,
+    ) -> Self {
+        Self {
+            current_workspace,
+            expected_switch,
+            switched: false,
+        }
+    }
+
+    fn apply(&mut self, workspace_event: &WorkspaceEvent) -> Result<(), String> {
+        apply_workspace_event(
+            workspace_event,
+            self.expected_switch.as_ref(),
+            &mut self.switched,
+            &mut self.current_workspace,
+        )
+    }
+
+    fn assert_accepts(&mut self, workspace_event: &WorkspaceEvent) {
+        if let Err(error) = self.apply(workspace_event) {
+            panic!("rejected {workspace_event:?}: {error}");
+        }
+    }
+
+    /// Requires a rejection that leaves the fence's state unchanged.
+    fn assert_rejects(&mut self, workspace_event: &WorkspaceEvent, expected_error: &str) {
+        let workspace_before = self.current_workspace.clone();
+        let switched_before = self.switched;
+
+        let Err(error) = self.apply(workspace_event) else {
+            panic!("accepted {workspace_event:?}");
+        };
+        assert_contains(&error, expected_error);
+        assert_eq!(self.current_workspace, workspace_before);
+        assert_eq!(self.switched, switched_before);
+    }
+}
+
+#[test]
+fn refocusing_the_established_workspace_is_accepted() {
+    let original = original_identity();
+    let mut fence = FenceState::new(Some(original.clone()), None);
+
+    fence.assert_accepts(&focus_event(&original, &original));
+    // Without an `old` workspace, focusing the established one is equally harmless.
+    fence.assert_accepts(&workspace_event("focus", None, Some(&original)));
+
+    assert_eq!(fence.current_workspace, Some(original));
+    assert!(!fence.switched);
+}
+
+#[test]
+fn expected_switch_is_accepted_and_establishes_its_destination() {
+    let original = original_identity();
+    let target = target_identity();
+    let mut fence = FenceState::new(Some(original.clone()), Some(switch_to_target()));
+
+    // Creating the destination is not the switch.
+    fence.assert_accepts(&workspace_event("init", None, Some(&target)));
+    assert!(!fence.switched);
+    assert_eq!(fence.current_workspace, Some(original.clone()));
+
+    fence.assert_accepts(&focus_event(&original, &target));
+    assert!(fence.switched);
+    assert_eq!(fence.current_workspace, Some(target.clone()));
+
+    // Later events in the same fence are judged against the destination.
+    fence.assert_accepts(&focus_event(&target, &target));
+    fence.assert_rejects(
+        &workspace_event("empty", None, Some(&target)),
+        "focused workspace was destroyed",
+    );
+    assert_eq!(fence.current_workspace, Some(target));
+}
+
+#[test]
+fn restoration_switch_ignores_the_emptied_disposable_workspace() {
+    let original = original_identity();
+    let target = target_identity();
+    let restoration = ExpectedSwitch {
+        from_id: TARGET_WORKSPACE_ID,
+        destination_name: "1".into(),
+    };
+    let mut fence = FenceState::new(Some(target.clone()), Some(restoration));
+
+    fence.assert_accepts(&focus_event(&target, &original));
+    // Once focus has left it, the empty disposable workspace's destruction is unrelated.
+    fence.assert_accepts(&workspace_event("empty", None, Some(&target)));
+
+    assert!(fence.switched);
+    assert_eq!(fence.current_workspace, Some(original));
+}
+
+#[test]
+fn no_second_switch_is_accepted_after_the_expected_one() {
+    let original = original_identity();
+    let target = target_identity();
+    let elsewhere = elsewhere_identity();
+    let second_switches = [
+        focus_event(&target, &elsewhere),
+        // Ending on the expected destination does not make another transition expected.
+        focus_event(&original, &target),
+        focus_event(&elsewhere, &target),
+    ];
+
+    for second_switch in &second_switches {
+        let mut fence = FenceState::new(Some(original.clone()), Some(switch_to_target()));
+        fence.assert_accepts(&focus_event(&original, &target));
+        fence.assert_rejects(second_switch, "user control takes precedence");
+    }
+}
+
+#[test]
+fn unrelated_workspace_events_are_ignored() {
+    let original = original_identity();
+    let elsewhere = elsewhere_identity();
+    let unrelated_events = [
+        workspace_event("init", None, Some(&elsewhere)),
+        workspace_event("urgent", None, Some(&original)),
+        workspace_event("urgent", None, Some(&elsewhere)),
+        workspace_event("empty", None, Some(&elsewhere)),
+    ];
+
+    for current_workspace in [None, Some(original)] {
+        for unrelated_event in &unrelated_events {
+            let mut fence = FenceState::new(current_workspace.clone(), None);
+            fence.assert_accepts(unrelated_event);
+            assert_eq!(fence.current_workspace, current_workspace);
+            assert!(!fence.switched);
+        }
+    }
+}
+
+#[test]
+fn focus_changes_before_initial_preflight_are_rejected() {
+    let original = original_identity();
+    let elsewhere = elsewhere_identity();
+
+    // Until preflight establishes a workspace, even a refocus is a focus change.
+    for focus_change in [
+        focus_event(&original, &elsewhere),
+        focus_event(&original, &original),
+    ] {
+        FenceState::new(None, None).assert_rejects(&focus_change, "during initial preflight");
+    }
+}
+
+#[test]
+fn focus_changes_involving_another_workspace_are_rejected() {
+    let original = original_identity();
+    let elsewhere = elsewhere_identity();
+    let away = focus_event(&original, &elsewhere);
+    let back = focus_event(&elsewhere, &original);
+    let elsewhere_without_old = workspace_event("focus", None, Some(&elsewhere));
+
+    // A fence stops at the first rejected event, so focus returning later in the same fence
+    // cannot conceal the departure. The return alone is also rejected, because it leaves
+    // another workspace.
+    for focus_change in [away, back, elsewhere_without_old] {
+        let mut fence = FenceState::new(Some(original.clone()), None);
+        fence.assert_rejects(&focus_change, "user control takes precedence");
+    }
+}
+
+#[test]
+fn mismatched_expected_switches_are_rejected() {
+    let original = original_identity();
+    let target = target_identity();
+    let elsewhere = elsewhere_identity();
+    let mismatches = [
+        // The wrong origin, including arrival at the destination from another workspace.
+        focus_event(&elsewhere, &target),
+        // The wrong destination.
+        focus_event(&original, &elsewhere),
+        // No reported origin.
+        workspace_event("focus", None, Some(&target)),
+        // While the switch is pending, even a refocus of the origin is unexpected.
+        focus_event(&original, &original),
+    ];
+
+    for mismatch in &mismatches {
+        let mut fence = FenceState::new(Some(original.clone()), Some(switch_to_target()));
+        fence.assert_rejects(mismatch, "unexpected workspace switch");
+    }
+}
+
+#[test]
+fn destroying_or_restructuring_workspaces_is_rejected() {
+    let original = original_identity();
+    let elsewhere = elsewhere_identity();
+    let cases = [
+        (
+            workspace_event("empty", None, Some(&original)),
+            "focused workspace was destroyed",
+        ),
+        (
+            workspace_event("reload", None, None),
+            "workspace Reload during harness execution",
+        ),
+        // Renaming or moving any workspace, not only the established one, is rejected.
+        (
+            workspace_event("rename", None, Some(&original)),
+            "workspace Rename during harness execution",
+        ),
+        (
+            workspace_event("rename", None, Some(&elsewhere)),
+            "workspace Rename during harness execution",
+        ),
+        (
+            workspace_event("move", None, Some(&original)),
+            "workspace Move during harness execution",
+        ),
+        (
+            workspace_event("move", None, Some(&elsewhere)),
+            "workspace Move during harness execution",
+        ),
+    ];
+
+    for (workspace_change, expected_error) in &cases {
+        let mut fence = FenceState::new(Some(original.clone()), None);
+        fence.assert_rejects(workspace_change, expected_error);
+    }
+}
