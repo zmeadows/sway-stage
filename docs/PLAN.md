@@ -54,13 +54,13 @@ multi-seat behavior, and a supported Sway version.
 - **2C.2. Sizing and focus.** Weighted sizing from outer splits inward, then verified final
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
-  two agreeing fenced observations and refuses unrepresentable arrangements.
+  one retained `GET_TREE` response and refuses unrepresentable arrangements when rendered.
 - **3B. Integration harness.** All six standard and four extended scenarios passed the
   user's manual runs.
 - **3A.1. Optional command inference and integration coverage.** Implemented
   `capture --infer-commands` with bounded Linux process-argument reads and per-window
   null fallback. Offline fixtures cover malformed data, argument preservation, PID
-  consistency, partial success, and unchanged structure. The existing `single-window`
+  validation, partial success, and unchanged structure. The existing `single-window`
   and `horizontal-pair` scenarios compare normal and inferred captures, require each
   Foot's run-specific `--app-id`, and recheck workspace ownership/state after each.
   These new observational checks await the user's manual run; scenario definitions,
@@ -237,13 +237,19 @@ by almost 5 points per load; the extra commands cost a few milliseconds each. Re
 deviation beyond 5 percentage points or unusable geometry becomes a warning, logged,
 printed, and sent as one normal-urgency notification after final focus succeeds.
 
-**Capture.** `capture` subscribes like `load` and takes two fenced snapshots through one
-`Observer`, so a workspace focus change at any point fails it. Each snapshot becomes a
-comparison value of container IDs, split axes, child extents, selectors, and the focused
-container; the two must be equal, and neither history may hold a window event other than
-a title, urgency, or mark change. Window payloads lack workspace ancestry and identity
-updates emit no event, hence both rules. One recursive pass validates and converts the
-target subtree directly, since it needs the structure that `locate_windows` flattens:
+**Capture.** `capture::snapshot` queries exactly one complete tree through `SWAYSOCK`,
+using a disposable query thread and monotonic deadline with socket shutdown to cancel
+stalled or fragmented reads. It does not use or change the loader's `Observer`, subscribe,
+or send ticks. The owned `capture::Snapshot` retains the entire tree, including output
+ancestry and PIDs, and identifies the original workspace by the uniquely focused node's
+workspace ancestry and container ID. An empty workspace may itself be focused. Invalid
+root, duplicate IDs, absent focus, or ambiguous focus fails acquisition; representability
+and occupancy are checked only by `Snapshot::render`. Later desktop activity cannot
+redirect or invalidate rendering. Snapshot acquisition and rendering are separate
+operations for reuse by a future menu.
+
+One recursive pass validates and converts the saved target subtree directly, since it
+needs the structure that `locate_windows` flattens:
 windows are `con` nodes with `shell`, `app_id`, or `window`; a one-child container,
 including the workspace, is replaced by its child after its layout is checked; extents
 come from `sibling_dimensions`. Weights are `proportions` as percentages rounded to
@@ -255,12 +261,11 @@ quoted and control characters escaped; a fixed comment header is prepended. The 
 drafts stay loadable. Optional inference extends the same draft window's command field;
 its reader boundary takes a PID, opens only `/proc/PID/cmdline`, and silently rejects
 unavailable or invalid data. Reads are bounded to 64 KiB plus a detection byte and preserve
-UTF-8 argv boundaries, including empty arguments. The initial and confirming leaf PIDs
-must agree and be positive; PID changes suppress inference without changing arrangement
-comparison. Reads occur after snapshot confirmation, so process exit, PID reuse, or argv
-changes remain possible. No inferred arguments reach error diagnostics or persistent
-storage. Failures report through `diagnostics::notify_failure`, never
-`Diagnostics::start`, so `last-run.log` is untouched.
+UTF-8 argv boundaries, including empty arguments. Reads use positive leaf PIDs recorded
+in the saved tree, with no second PID observation. Process exit, PID reuse, or argv
+changes after the snapshot remain possible and cannot alter the captured structure.
+No inferred arguments reach error diagnostics or persistent storage. Capture failures report through
+`diagnostics::notify_failure`, never `Diagnostics::start`, so `last-run.log` is untouched.
 
 **Diagnostics.** Each launch replaces `last-run.log` by unlinking it and creating a new
 0600 file with `create_new` (0700 directories), so an existing symlink or hard link is never
@@ -398,10 +403,10 @@ environment values.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
 - New inference integration checks and live abort behavior await manual verification.
-- Capture is deliberately sensitive to activity: any window event other than a title,
-  urgency, or mark change fails it, as does focus on a container. Command inference is
-  opt-in and best-effort; capture never approximates tabbed, stacked, floating, or
-  fullscreen state.
+- Capture fixes Sway state at one tree response and ignores subsequent desktop activity.
+  Process arguments may already have changed by inference time; there is no second PID
+  consistency check. Inference is opt-in and best-effort. Capture refuses structural
+  container focus and never approximates tabbed, stacked, floating, or fullscreen state.
 - Milestone 3C must settle how `fuzzel --dmenu` reports cancellation (exit status and
   output) as distinct from failure.
 

@@ -530,43 +530,21 @@ fn sway_node(id: i64, kind: &str, width: i32, nodes: Vec<Value>) -> Value {
     })
 }
 
-/// Answers one capture as Sway would: it acknowledges the event subscription, then serves
-/// two fenced observations of `tree`. Every request type is asserted, so a Sway command
-/// fails the test.
+/// Answers exactly one GET_TREE, refusing all other IPC requests and connections.
 fn serve_capture(listener: UnixListener, tree: Value) -> thread::JoinHandle<()> {
-    const TICK_EVENT: u32 = (1 << 31) | 7;
     thread::spawn(move || {
-        let accept = || {
-            let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            stream
-        };
-        let mut events = accept();
-        assert_eq!(read_ipc_message(&mut events).0, 2);
-        write_ipc_message(&mut events, 2, &json!({"success": true}));
-
-        let workspaces = json!([{
-            "id": 10, "num": 1, "name": "1", "visible": true, "focused": true, "urgent": false,
-            "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}, "output": "fixture"
-        }]);
-        for _ in 0..2 {
-            let mut query = accept();
-            assert_eq!(read_ipc_message(&mut query).0, 1);
-            write_ipc_message(&mut query, 1, &workspaces);
-            assert_eq!(read_ipc_message(&mut query).0, 4);
-            write_ipc_message(&mut query, 4, &tree);
-            let (kind, token) = read_ipc_message(&mut query);
-            assert_eq!(kind, 10);
-            // Sway queues the fence event before replying to SEND_TICK.
-            let fence = json!({"first": false, "payload": String::from_utf8(token).unwrap()});
-            write_ipc_message(&mut events, TICK_EVENT, &fence);
-            write_ipc_message(&mut query, 10, &json!({"success": true}));
-        }
-        // Like Sway, keep the subscription open until sway-stage disconnects; closing it
-        // first would be a lost event stream.
-        assert_eq!(events.read(&mut [0]).unwrap(), 0);
+        let (mut query, _) = listener.accept().unwrap();
+        query
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(read_ipc_message(&mut query).0, 4);
+        write_ipc_message(&mut query, 4, &tree);
+        assert_eq!(query.read(&mut [0]).unwrap(), 0);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     })
 }
 
@@ -643,6 +621,38 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
     fixture.file("draft.yaml", &edited);
     let output = fixture.run(&["--layouts-dir", ".", "check", "draft"], 0);
     assert_eq!(output.stdout, b"draft: valid\n");
+}
+
+#[test]
+fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path.join("state/sway-stage")).unwrap();
+    fixture.file("state/sway-stage/last-run.log", "previous launch\n");
+    let mut empty = sway_node(10, "workspace", 1920, vec![]);
+    empty["focused"] = json!(true);
+    let tree = sway_node(
+        1,
+        "root",
+        1920,
+        vec![sway_node(2, "output", 1920, vec![empty])],
+    );
+    let socket = fixture.path.join("capture.sock");
+    let server = serve_capture(UnixListener::bind(&socket).unwrap(), tree);
+    let output = fixture
+        .command()
+        .env("SWAYSOCK", &socket)
+        .env("XDG_STATE_HOME", fixture.path.join("state"))
+        .arg("capture")
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("empty; there is nothing to capture"));
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap(),
+        "previous launch\n"
+    );
 }
 
 #[test]

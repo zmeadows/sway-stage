@@ -1,22 +1,23 @@
 //! Read-only capture of the focused workspace's tiled arrangement as an editable YAML draft.
 //!
-//! Capture observes only through `Observer`: workspace and tree queries plus tick fences.
+//! Capture retains one complete GET_TREE response and renders only that saved state.
 //! It never sends a Sway command, launches anything, or writes a file, and it records
 //! arrangement and window selectors, with optional best-effort process arguments.
 
 use crate::config::{MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
-use crate::observation::{
-    self, Observer, Snapshot, app_id, class, proportions, sibling_dimensions,
-};
+use crate::observation::{self, app_id, class, proportions, sibling_dimensions};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
-use swayipc::{Event, Floating, Node, NodeLayout, NodeType, ScratchpadState, WindowChange};
+use swayipc::{Connection, Floating, Node, NodeLayout, NodeType, ScratchpadState};
 
-// Bounds the subscription and each fenced observation, as for load.
+// Bounds the complete tree query, including stalled or fragmented replies.
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 // A modest per-window bound; read one extra byte to detect truncation.
@@ -34,51 +35,101 @@ const DRAFT_HEADER: &str = "\
 # the enclosing split. Validate the edited file with `sway-stage check NAME`.
 ";
 
-/// Observes the focused workspace and returns the complete draft document. Nothing is
-/// printed here, so a failed capture cannot leave partial YAML on stdout.
-pub fn capture(infer_commands: bool) -> Result<String, String> {
-    let socket = observation::sway_socket()?;
-    let mut connect = || observation::connect(&socket);
-    capture_with(&mut connect, infer_commands, &mut read_process_command)
+/// Complete read-only Sway state, including output ancestry, window PIDs, and focus.
+/// Acquiring it does not require a nonempty or representable layout.
+pub struct Snapshot {
+    tree: Node,
+    target: i64,
 }
 
-// Concrete socket injection keeps all fixture traffic disconnected from socket discovery.
-fn capture_with(
-    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
-    infer_commands: bool,
-    read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
-) -> Result<String, String> {
-    let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
-    let initial = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
-    reject_window_activity(&initial)?;
-    let captured = capture_workspace(&initial)?;
+impl Snapshot {
+    fn from_tree(tree: Node) -> Result<Self, String> {
+        if tree.node_type != NodeType::Root {
+            return Err("snapshot: invalid tree root".into());
+        }
 
-    // Sway has no transactional read. A second fenced observation must find the same
-    // arrangement with no window activity since subscribing. The observer itself fails if
-    // workspace focus left the target at any point, even if it has since returned.
-    let confirming = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
-    reject_window_activity(&confirming)?;
-    if capture_workspace(&confirming)? != captured {
-        return Err("the workspace changed during capture; retry once it is idle".into());
+        let mut container_ids = HashSet::new();
+        let mut focused_workspace = None;
+        let mut pending = vec![(&tree, None)];
+        while let Some((container, workspace_id)) = pending.pop() {
+            if !container_ids.insert(container.id) {
+                return Err("snapshot: duplicate container identities".into());
+            }
+            let workspace_id = if container.node_type == NodeType::Workspace {
+                Some(container.id)
+            } else {
+                workspace_id
+            };
+            if container.focused {
+                let target = workspace_id.ok_or("snapshot: focus is outside a workspace")?;
+                if focused_workspace.replace(target).is_some() {
+                    return Err("snapshot: expected exactly one focused container".into());
+                }
+            }
+            for child in container.nodes.iter().chain(&container.floating_nodes) {
+                pending.push((child, workspace_id));
+            }
+        }
+        let target = focused_workspace.ok_or("snapshot: no focused container")?;
+        Ok(Self { tree, target })
     }
 
-    let mut command_for = |container_id| {
-        if !infer_commands {
-            return None;
-        }
-        let initial_window = initial.tree.find_as_ref(|node| node.id == container_id)?;
-        let confirming_window = confirming
-            .tree
-            .find_as_ref(|node| node.id == container_id)?;
-        let pid = initial_window.pid.filter(|pid| *pid > 0)?;
-        if confirming_window.pid != Some(pid) {
-            return None;
-        }
-        // Matching snapshots narrow stale-PID races, but /proc is not transactional:
-        // a process may exit, replace its argv, or have its PID reused after observation.
-        read_command(pid)
-    };
-    render_draft(&captured, infer_commands, &mut command_for)
+    /// Validates and renders only saved Sway state. Process arguments remain best-effort.
+    pub fn render(&self, infer_commands: bool) -> Result<String, String> {
+        self.render_with(infer_commands, &mut read_process_command)
+    }
+
+    fn render_with(
+        &self,
+        infer_commands: bool,
+        read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
+    ) -> Result<String, String> {
+        let captured = capture_workspace(self)?;
+        let mut command_for = |container_id| {
+            if !infer_commands {
+                return None;
+            }
+            let window = self.tree.find_as_ref(|node| node.id == container_id)?;
+            let pid = window.pid.filter(|pid| *pid > 0)?;
+            // The process may exit, replace its argv, or have its PID reused after GET_TREE.
+            read_command(pid)
+        };
+        render_draft(&captured, infer_commands, &mut command_for)
+    }
+}
+
+/// Obtains one tree through the explicit SWAYSOCK path, without subscribing to events.
+pub fn snapshot() -> Result<Snapshot, String> {
+    let socket = observation::sway_socket()?;
+    snapshot_from_socket(observation::connect(&socket)?, Instant::now() + IPC_TIMEOUT)
+}
+
+fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
+    let control = socket
+        .try_clone()
+        .map_err(|error| format!("clone query socket: {error}"))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::Builder::new()
+        .name("sway-capture".into())
+        .spawn(move || {
+            let result = Connection::from(socket)
+                .get_tree()
+                .map_err(|error| format!("get tree: {error}"));
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("start capture reader: {error}"))?;
+
+    let result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    // Cancel even a partial frame read before joining; this connection is never reused.
+    let _ = control.shutdown(Shutdown::Both);
+    reader.join().map_err(|_| "capture reader panicked")?;
+    let tree = result.map_err(|error| format!("tree deadline/channel failure: {error}"))??;
+    Snapshot::from_tree(tree)
+}
+
+/// Returns a complete draft in memory, so a failed capture cannot print partial YAML.
+pub fn capture(infer_commands: bool) -> Result<String, String> {
+    snapshot()?.render(infer_commands)
 }
 
 /// An inaccessible or vanished process is an ordinary inference miss, never a capture
@@ -113,23 +164,20 @@ fn read_command_line(reader: impl Read) -> Option<Vec<String>> {
     Some(arguments)
 }
 
-/// The observed facts a draft is generated from, which both observations must agree on.
+/// The saved facts a draft is generated from.
 /// Distinct from the configured `LayoutNode`: it holds Sway container IDs and pixel extents.
-#[derive(Debug, PartialEq)]
 struct CapturedWorkspace {
     root: CapturedNode,
     /// Sway's focused container, which must be one of the captured windows.
     focused_id: i64,
 }
 
-#[derive(Debug, PartialEq)]
 enum CapturedNode {
     Window {
         container_id: i64,
         selector: Option<Selector>,
     },
     Split {
-        container_id: i64,
         axis: SplitAxis,
         /// Child extents along `axis` in pixels, parallel to `children`.
         extents: Vec<f64>,
@@ -150,26 +198,6 @@ enum SplitAxis {
 enum Selector {
     AppId(String),
     Class(String),
-}
-
-/// Window events carry no workspace ancestry, so any change that could alter what capture
-/// records makes the observation uncertain. Titles, urgency hints, and marks are not
-/// captured; a shell setting its terminal title must not prevent a capture.
-fn reject_window_activity(snapshot: &Snapshot) -> Result<(), String> {
-    for event in &snapshot.events {
-        if let Event::Window(window) = event
-            && !matches!(
-                window.change,
-                WindowChange::Title | WindowChange::Urgent | WindowChange::Mark
-            )
-        {
-            return Err(format!(
-                "window activity ({:?} id={}) during capture; retry once windows are idle",
-                window.change, window.container.id
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Converts the target workspace's tiled hierarchy, refusing anything the layout format
@@ -197,7 +225,7 @@ fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
     let mut node_count = 0;
     let root = capture_group(workspace, 1, &mut node_count).map_err(in_workspace)?;
 
-    // The observer verified that exactly one node in the target workspace is focused.
+    // Snapshot acquisition verified exactly one focused node and its workspace ancestry.
     let focused = workspace
         .find_as_ref(|node| node.focused)
         .ok_or("no focused container in target workspace")?;
@@ -250,7 +278,6 @@ fn capture_group(
                 captured_children.push(capture_node(child, depth + 1, node_count)?);
             }
             Ok(CapturedNode::Split {
-                container_id: group.id,
                 axis,
                 extents,
                 children: captured_children,
@@ -434,7 +461,6 @@ fn draft_node(
             axis,
             extents,
             children,
-            ..
         } => {
             let child_weights = percentage_weights(extents);
             let children = children

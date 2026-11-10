@@ -222,7 +222,9 @@ of percentage commands.
 ## Capture
 
 `capture` accepts only the optional `--infer-commands` flag and uses read-only IPC:
-workspace and tree queries and tick fences only. It never sends commands, changes focus, launches applications, or writes
+one `GET_TREE` request through the explicit `SWAYSOCK` path, with a bounded response wait.
+It retains the complete tree in memory without event subscriptions, tick fences, or further
+Sway queries. It never sends commands, changes focus, launches applications, or writes
 files. On success, stdout holds exactly one draft document.
 
 The draft follows the version 1 format. It preserves the focused workspace's ordered tiled
@@ -236,12 +238,12 @@ explains the placeholders. Do not serialize Sway container IDs, workspace names/
 outputs, titles, PIDs, cwd, or environment from the running session. The result records
 arrangement and selectors, with optional process arguments, rather than session restoration.
 
-With `--infer-commands`, attempt each leaf's Linux `/proc/PID/cmdline` only when its
-container ID and positive PID agree across both observations. Read at most 64 KiB plus
-one oversize detection byte. Require a nonempty executable, a final NUL terminator, and
+With `--infer-commands`, attempt each leaf's Linux `/proc/PID/cmdline` using its positive
+PID recorded in the saved tree. Read at most 64 KiB plus one oversize detection byte.
+Require a nonempty executable, a final NUL terminator, and
 valid UTF-8 arguments; preserve argument boundaries and empty arguments. Unavailable,
-inconsistent, inaccessible, empty, malformed, or oversized process information leaves
-`command: null` for that window without failing capture. No process-name searches,
+inaccessible, empty, malformed, or oversized process information leaves `command: null`
+for that window without failing capture. No process-name searches,
 parent traversal, command rewriting, environment capture, or application-specific recovery
 is performed. Never execute or probe inferred commands.
 
@@ -266,11 +268,18 @@ unsupported node types and malformed containers;
 nonpositive extents along a split axis; focus on anything but a window, such as a group
 after `focus parent`; and an arrangement exceeding the depth or node limits.
 
-Capture observes twice through fenced snapshots and emits a draft only if both yield the
-same arrangement: hierarchy, order, container identities, extents, selectors, and focus.
-Any workspace focus change since subscribing, even away and back, and any window event
-other than a title, urgency, or mark change, fails the capture. A failed capture writes
-no YAML.
+The single tree determines the focused workspace by container ID and ancestry, including
+when an empty workspace itself is focused. Reject absent or ambiguous focus and malformed
+container identities. The saved tree retains output ancestry, hierarchy, identities,
+geometry, focus, and PIDs. Snapshot acquisition does not require a valid nonempty layout;
+the structural restrictions above apply when rendering it as a capture.
+
+Once the tree response is obtained, subsequent focus, workspace, output, and window
+changes cannot redirect or invalidate the draft. Validation and YAML generation use only
+saved Sway state, even if a captured window has since disappeared. No compositor freeze
+is attempted. This is a snapshot of Sway state, not an atomic transaction with applications
+or Linux processes; optional command inference remains best-effort. A failed capture
+writes no YAML.
 
 ## Errors, notifications, and diagnostics
 

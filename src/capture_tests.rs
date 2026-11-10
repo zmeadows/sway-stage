@@ -1,11 +1,8 @@
 use super::*;
 use crate::config::{self, Config, LayoutNode, Matcher, NodeKind, Orientation};
-use crate::observation::fixtures::{
-    TICK, WINDOW, WORKSPACE, focus, node, pair, request, send, tree, window, workspaces,
-};
+use crate::observation::fixtures::{frame, node, pair, request, send, tree};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::sync::mpsc;
 use std::thread;
 
 /// A tiled Wayland view whose container rect is `width` by `height` pixels.
@@ -61,77 +58,21 @@ fn right() -> Value {
     view(21, Some("right"), 960, 1080)
 }
 
-/// One fenced observation: the tree Sway returns and the events it queues before the fence.
-struct Observation {
-    tree: Value,
-    events: Vec<(u32, Value)>,
-}
-
-fn quiet(tree: Value) -> Observation {
-    Observation {
-        tree,
-        events: Vec::new(),
-    }
-}
-
-/// Runs capture against recorded observations over disposable socket pairs. Query
-/// connections beyond the recorded observations are closed unanswered, as by a failed Sway.
-/// `request` asserts every request type, so a Sway command would fail the test.
-fn capture_observing(observations: Vec<Observation>) -> Result<String, String> {
-    capture_observing_commands(observations, false, &mut |_| {
-        panic!("default reads no processes")
-    })
-}
-
-fn capture_observing_commands(
-    observations: Vec<Observation>,
-    infer_commands: bool,
-    read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
-) -> Result<String, String> {
-    let (event_client, mut events) = pair();
-    let (query_server_sender, query_servers) = mpsc::channel();
-    let server = thread::spawn(move || {
-        request(&mut events, 2);
-        send(&mut events, 2, json!({"success": true}));
-        let mut observations = observations.into_iter();
-        for mut query in query_servers {
-            let Some(observation) = observations.next() else {
-                continue;
-            };
-            request(&mut query, 1);
-            send(&mut query, 1, workspaces());
-            request(&mut query, 4);
-            send(&mut query, 4, observation.tree);
-            let token = String::from_utf8(request(&mut query, 10)).unwrap();
-            for (kind, event) in observation.events {
-                send(&mut events, kind, event);
-            }
-            // Sway queues the fence event before replying to SEND_TICK.
-            send(&mut events, TICK, json!({"first": false, "payload": token}));
-            send(&mut query, 10, json!({"success": true}));
-        }
+/// The server accepts exactly one GET_TREE, then verifies that capture disconnects.
+fn saved_snapshot(tree: Value) -> Result<Snapshot, String> {
+    let (client, mut server) = pair();
+    let worker = thread::spawn(move || {
+        assert!(request(&mut server, 4).is_empty());
+        send(&mut server, 4, tree);
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
     });
-
-    let mut event_client = Some(event_client);
-    let mut connect = || {
-        if let Some(socket) = event_client.take() {
-            return Ok(socket);
-        }
-        let (client, query_server) = pair();
-        query_server_sender
-            .send(query_server)
-            .map_err(|_| "fixture disconnected".to_owned())?;
-        Ok(client)
-    };
-    let result = capture_with(&mut connect, infer_commands, read_command);
-    drop(query_server_sender);
-    server.join().unwrap();
+    let result = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT);
+    worker.join().unwrap();
     result
 }
 
-/// Captures a workspace that is idle across both observations.
-fn capture_idle(tree: Value) -> Result<String, String> {
-    capture_observing(vec![quiet(tree.clone()), quiet(tree)])
+fn capture_recorded(tree: Value) -> Result<String, String> {
+    saved_snapshot(tree)?.render_with(false, &mut |_| panic!("default reads no processes"))
 }
 
 /// The YAML after the explanatory header, which itself mentions both placeholders.
@@ -178,9 +119,9 @@ fn outline(layout: &LayoutNode) -> String {
     }
 }
 
-/// Captures an idle workspace and summarizes the filled, validated draft as (focus, outline).
+/// Captures a saved workspace and summarizes the filled, validated draft as (focus, outline).
 fn capture_outline(tree: Value) -> (String, String) {
-    let config = filled(&capture_idle(tree).unwrap());
+    let config = filled(&capture_recorded(tree).unwrap());
     (config.focus.unwrap(), outline(&config.layout.value))
 }
 
@@ -200,7 +141,7 @@ layout:
     app_id: foot
 ";
     assert_eq!(
-        capture_idle(tree).unwrap(),
+        capture_recorded(tree).unwrap(),
         format!("{DRAFT_HEADER}{expected}")
     );
 }
@@ -233,7 +174,7 @@ layout:
         class: Firefox
 ";
     assert_eq!(
-        capture_idle(horizontal).unwrap(),
+        capture_recorded(horizontal).unwrap(),
         format!("{DRAFT_HEADER}{expected}")
     );
 
@@ -411,7 +352,7 @@ fn missing_identifiers_become_explicit_match_placeholders() {
         ],
         20,
     );
-    let draft = capture_idle(tree).unwrap();
+    let draft = capture_recorded(tree).unwrap();
     assert_eq!(body(&draft).matches("command: null").count(), 4);
     assert_eq!(body(&draft).matches("match: null").count(), 2);
     assert_eq!(
@@ -502,7 +443,7 @@ fn unusual_identifiers_survive_serialization_and_strict_parsing_exactly() {
             }
         })
         .collect();
-    let draft = capture_idle(workspace("splith", windows, 100)).unwrap();
+    let draft = capture_recorded(workspace("splith", windows, 100)).unwrap();
     assert!(!body(&draft).contains("match: null"), "{draft}");
 
     let config = filled(&draft);
@@ -563,15 +504,15 @@ fn side_by_side(count: usize) -> Value {
 
 #[test]
 fn layout_format_limits_bound_captures() {
-    assert!(capture_idle(nested(MAX_LAYOUT_DEPTH)).is_ok());
-    let error = capture_idle(nested(MAX_LAYOUT_DEPTH + 1)).unwrap_err();
+    assert!(capture_recorded(nested(MAX_LAYOUT_DEPTH)).is_ok());
+    let error = capture_recorded(nested(MAX_LAYOUT_DEPTH + 1)).unwrap_err();
     assert!(
         error.contains("deeper than the layout format's 32"),
         "{error}"
     );
 
-    assert!(capture_idle(side_by_side(MAX_LAYOUT_NODES - 1)).is_ok());
-    let error = capture_idle(side_by_side(MAX_LAYOUT_NODES)).unwrap_err();
+    assert!(capture_recorded(side_by_side(MAX_LAYOUT_NODES - 1)).is_ok());
+    let error = capture_recorded(side_by_side(MAX_LAYOUT_NODES)).unwrap_err();
     assert!(
         error.contains("more than the layout format's 256"),
         "{error}"
@@ -623,7 +564,7 @@ fn unrepresentable_arrangements_fail_without_a_draft() {
         (workspace("splith", vec![left(), right()], 10), "focus is on container id=10"),
     ];
     for (tree, expected) in cases {
-        let error = capture_idle(tree).unwrap_err();
+        let error = capture_recorded(tree).unwrap_err();
         assert!(error.contains(expected), "expected {expected:?}: {error}");
     }
 }
@@ -637,89 +578,147 @@ fn scratchpad_windows_and_groups_are_refused_even_when_visible_and_tiled() {
         scratchpad_group["scratchpad_state"] = json!(state);
 
         for container in [scratchpad_window, scratchpad_group] {
-            let error = capture_idle(workspace("splith", vec![container], 20)).unwrap_err();
+            let error = capture_recorded(workspace("splith", vec![container], 20)).unwrap_err();
             assert!(error.contains("belongs to the scratchpad"), "{error}");
         }
     }
 }
 
 #[test]
-fn any_difference_between_the_two_observations_aborts() {
-    let left_with_width = |width: i32| view(20, Some("left"), width, 1080);
-    let right_with_app_id = |app_id: &str| view(21, Some(app_id), 960, 1080);
-    let both_windows = || vec![left_with_width(960), right_with_app_id("right")];
-    let initial = workspace("splith", both_windows(), 20);
+fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
+    let mut desktop = workspace(
+        "splith",
+        vec![view_with_pid(20, json!(101)), view_with_pid(21, json!(102))],
+        20,
+    );
+    desktop["nodes"][0]["name"] = json!("DP-1");
+    desktop["nodes"][0]["nodes"][0]["name"] = json!("named-workspace");
+    let saved = saved_snapshot(desktop.clone()).unwrap();
+    assert_eq!(saved.target, 10);
+    assert_eq!(saved.tree.nodes[0].name.as_deref(), Some("DP-1"));
+    let original = saved.render(false).unwrap();
 
-    #[rustfmt::skip]
-    let changes = [
-        ("geometry", workspace("splith", vec![left_with_width(1000), right_with_app_id("right")], 20)),
-        // Sway emits no event when an app ID or class arrives late.
-        ("identity", workspace("splith", vec![left_with_width(960), right_with_app_id("late")], 20)),
-        ("focus", workspace("splith", both_windows(), 21)),
-        ("order", workspace("splith", both_windows().into_iter().rev().collect(), 20)),
-        ("container", workspace("splith", vec![left_with_width(960), view(22, Some("right"), 960, 1080)], 20)),
-        ("grouping", workspace("splith", vec![group(30, "splith", 1920, 1080, both_windows())], 20)),
-        ("orientation", workspace("splitv", both_windows(), 20)),
-    ];
-    for (change, confirming) in changes {
-        let observations = vec![quiet(initial.clone()), quiet(confirming)];
-        let error = capture_observing(observations).unwrap_err();
-        assert!(
-            error.contains("changed during capture"),
-            "{change}: {error}"
-        );
-    }
+    // Simulate focus/workspace/output changes and closed, moved, or newly opened windows.
+    // Rendering has no connection to ask for this later state, even during inference.
+    desktop["nodes"] = json!([]);
+    let mut requested_pids = Vec::new();
+    let inferred = saved
+        .render_with(true, &mut |pid| {
+            requested_pids.push(pid);
+            desktop = workspace("splith", vec![view(99, Some("new"), 100, 100)], 99);
+            None
+        })
+        .unwrap();
+    assert_eq!(requested_pids, [101, 102]);
+    assert_eq!(desktop["nodes"][0]["nodes"][0]["nodes"][0]["id"], 99);
+    assert_eq!(saved.render(false).unwrap(), original);
+    assert_eq!(
+        inferred,
+        original.replacen(
+            DRAFT_HEADER,
+            &format!("{DRAFT_HEADER}{INFERENCE_HEADER}"),
+            1
+        )
+    );
+    assert!(original.contains("focus: window1"));
+    assert!(original.contains("app_id: shared-app"));
 }
 
 #[test]
-fn window_activity_and_workspace_focus_changes_abort_but_titles_do_not() {
-    let idle = workspace("splith", vec![left(), right()], 20);
-    let with_events = |events: Vec<(u32, Value)>| Observation {
-        tree: idle.clone(),
-        events,
-    };
+fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes() {
+    let mut desktop = workspace("splith", vec![left()], 999);
+    let mut second_workspace = node(77, "workspace", false);
+    second_workspace["name"] = json!("named-workspace");
+    let mut focused_window = right();
+    focused_window["focused"] = json!(true);
+    second_workspace["nodes"] = json!([focused_window]);
+    let mut second_output = node(3, "output", false);
+    second_output["name"] = json!("HDMI-A-1");
+    second_output["nodes"] = json!([second_workspace]);
+    desktop["nodes"].as_array_mut().unwrap().push(second_output);
 
-    // Shells retitle terminals when a command starts; titles, marks and urgency are not
-    // captured, so they never prevent a capture.
-    let harmless = || {
-        vec![
-            (WINDOW, window("title", 20)),
-            (WINDOW, window("mark", 21)),
-            (WINDOW, window("urgent", 21)),
-        ]
-    };
-    assert!(capture_observing(vec![with_events(harmless()), with_events(harmless())]).is_ok());
+    let saved = saved_snapshot(desktop.clone()).unwrap();
+    assert_eq!(saved.target, 77);
+    let draft = saved.render(false).unwrap();
+    assert!(draft.contains("app_id: right"));
+    assert!(!draft.contains("app_id: left"));
 
-    for change in [
-        "new",
-        "close",
-        "focus",
-        "move",
-        "floating",
-        "fullscreen_mode",
+    let workspace = &mut desktop["nodes"][1]["nodes"][0];
+    workspace["floating_nodes"] = workspace["nodes"].take();
+    workspace["nodes"] = json!([]);
+    let saved = saved_snapshot(desktop).unwrap();
+    assert_eq!(saved.target, 77);
+    assert!(saved.render(false).unwrap_err().contains("floating"));
+}
+
+#[test]
+fn acquisition_allows_empty_and_unsupported_layouts_until_rendering() {
+    for desktop in [
+        workspace("splith", vec![], 10),
+        workspace("tabbed", vec![left(), right()], 20),
     ] {
-        let activity = vec![(WINDOW, window(change, 30))];
-        for observations in [
-            vec![with_events(activity.clone()), quiet(idle.clone())],
-            vec![quiet(idle.clone()), with_events(activity.clone())],
-        ] {
-            let error = capture_observing(observations).unwrap_err();
-            assert!(error.contains("window activity"), "{change}: {error}");
-        }
+        let saved = saved_snapshot(desktop).unwrap();
+        assert_eq!(saved.target, 10);
+        assert!(saved.render(false).is_err());
     }
-
-    // Leaving the workspace and returning between observations is still a focus change.
-    let away_and_back = with_events(vec![(WORKSPACE, focus(11, 10)), (WORKSPACE, focus(10, 11))]);
-    let error = capture_observing(vec![quiet(idle.clone()), away_and_back]).unwrap_err();
-    assert!(error.contains("focus changed"), "{error}");
 }
 
 #[test]
-fn a_failed_confirming_observation_produces_no_draft() {
-    // Only one observation is recorded; the confirming query connection closes unanswered.
-    let idle = workspace("splith", vec![left(), right()], 20);
-    let error = capture_observing(vec![quiet(idle)]).unwrap_err();
-    assert!(error.contains("get workspaces"), "{error}");
+fn malformed_focus_and_container_identities_are_rejected() {
+    let mut absent = workspace("splith", vec![left()], 999);
+    let mut ambiguous = workspace("splith", vec![left(), right()], 20);
+    ambiguous["nodes"][0]["nodes"][0]["nodes"][1]["focused"] = json!(true);
+    let mut outside = workspace("splith", vec![left()], 1);
+    let mut duplicate = workspace("splith", vec![left(), right()], 20);
+    duplicate["nodes"][0]["nodes"][0]["nodes"][1]["id"] = json!(20);
+    let mut invalid_root = workspace("splith", vec![left()], 20);
+    invalid_root["type"] = json!("output");
+    for desktop in [
+        &mut absent,
+        &mut ambiguous,
+        &mut outside,
+        &mut duplicate,
+        &mut invalid_root,
+    ] {
+        assert!(saved_snapshot(desktop.clone()).is_err());
+    }
+}
+
+#[test]
+fn tree_query_deadline_cancels_stalled_and_fragmented_replies() {
+    use std::io::Write;
+    for partial in [false, true] {
+        let (client, mut server) = pair();
+        let worker = thread::spawn(move || {
+            request(&mut server, 4);
+            if partial {
+                let response = frame(4, b"{}");
+                server.write_all(&response[..15]).unwrap();
+            }
+            // Wait for cancellation instead of completing the frame.
+            assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        });
+        let started = Instant::now();
+        let error = snapshot_from_socket(client, started + Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(error.contains("deadline"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn failed_tree_read_produces_no_draft() {
+    let (client, mut server) = pair();
+    let worker = thread::spawn(move || {
+        request(&mut server, 4);
+    });
+    let error = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT)
+        .err()
+        .unwrap();
+    assert!(error.contains("get tree"), "{error}");
+    worker.join().unwrap();
 }
 
 #[test]
@@ -812,7 +811,7 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
         ],
         22,
     );
-    let default = capture_idle(tree.clone()).unwrap();
+    let default = capture_recorded(tree.clone()).unwrap();
     let commands = [
         vec![
             "foot",
@@ -828,8 +827,9 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
         vec!["other", "--app-id=two", "null", "*alias"],
     ];
     let mut requested = Vec::new();
-    let inferred =
-        capture_observing_commands(vec![quiet(tree.clone()), quiet(tree)], true, &mut |pid| {
+    let inferred = saved_snapshot(tree)
+        .unwrap()
+        .render_with(true, &mut |pid| {
             requested.push(pid);
             match pid {
                 101 | 102 => Some(
@@ -893,21 +893,12 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
 }
 
 #[test]
-fn absent_invalid_or_changed_pids_leave_null_without_reading_processes() {
-    for (initial_pid, confirming_pid) in [
-        (Value::Null, Value::Null),
-        (json!(0), json!(0)),
-        (json!(-1), json!(-1)),
-        (json!(101), json!(102)),
-        (json!(101), Value::Null),
-        (Value::Null, json!(101)),
-    ] {
-        let initial = workspace("splith", vec![view_with_pid(20, initial_pid)], 20);
-        let confirming = workspace("splith", vec![view_with_pid(20, confirming_pid)], 20);
-        let draft =
-            capture_observing_commands(vec![quiet(initial), quiet(confirming)], true, &mut |_| {
-                panic!("unreliable PID must not be read")
-            })
+fn absent_or_invalid_saved_pids_leave_null_without_reading_processes() {
+    for pid in [Value::Null, json!(0), json!(-1)] {
+        let desktop = workspace("splith", vec![view_with_pid(20, pid)], 20);
+        let draft = saved_snapshot(desktop)
+            .unwrap()
+            .render_with(true, &mut |_| panic!("invalid PID must not be read"))
             .unwrap();
         assert!(draft.contains("  command: null"));
     }

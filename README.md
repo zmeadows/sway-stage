@@ -105,7 +105,8 @@ nothing and exits 0; failures exit 1 and invalid usage exits 2.
 
 ### Capturing an arrangement
 
-`capture` reads the focused workspace and prints a layout draft to stdout. It only reads
+`capture` takes one snapshot of the focused workspace and prints a layout draft to stdout.
+Later focus or desktop changes do not invalidate it. It only reads
 Sway: nothing is launched, moved, resized, or focused, and no file is written except
 where you redirect stdout. The draft keeps the split hierarchy, window order, sizes as
 percentage weights, each window's exact app ID (or Xwayland class), and the focused
