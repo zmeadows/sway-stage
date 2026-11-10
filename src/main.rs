@@ -5,6 +5,7 @@ mod launch;
 mod observation;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use diagnostics::Diagnostics;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -40,7 +41,16 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli) {
+    // Only load logs or notifies; the other commands report solely to stdout/stderr.
+    let result = match cli.command {
+        None => help().map_err(|error| format!("help: stdout: {error}")),
+        Some(Command::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
+        Some(Command::Check { name }) => {
+            check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
+        }
+        Some(Command::Load { name }) => load(&name, cli.layouts_dir),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "sway-stage: {error}");
@@ -49,85 +59,62 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
-    if let Some(Command::Load { name }) = &cli.command {
-        let mut diagnostics = diagnostics::Diagnostics::start();
-        diagnostics.stage(format!("load {name:?}: validation"));
-        let result = load_named(name, cli.layouts_dir, &mut diagnostics);
-        return result.map_err(|error| diagnostics.failure(error));
-    }
-    let Some(command) = cli.command else {
-        let mut help = Cli::command();
-        let mut stdout = io::stdout().lock();
-        help.write_help(&mut stdout)
-            .map_err(|error| format!("help: stdout: {error}"))?;
-        writeln!(stdout).map_err(|error| format!("help: stdout: {error}"))?;
-        return Ok(());
-    };
-
-    if let Command::Check { name } = &command
-        && !discovery::valid_name(name)
-    {
-        return Err(format!(
-            "check: invalid layout name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
-        ));
-    }
-
-    let operation = match &command {
-        Command::List => "list",
-        Command::Check { .. } => "check",
-        Command::Load { .. } => unreachable!("load handled above"),
-    };
-    let directory = discovery::Directory::resolve(cli.layouts_dir)
-        .map_err(|error| format!("{operation}: {error}"))?;
-    let layouts = directory
-        .discover()
-        .map_err(|error| format!("{operation}: {error}"))?;
-
+fn help() -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    match command {
-        Command::Load { .. } => unreachable!("load handled above"),
-        Command::List => {
-            for name in layouts.keys() {
-                writeln!(stdout, "{name}").map_err(|error| format!("list: stdout: {error}"))?;
-            }
-        }
-        Command::Check { name } => {
-            let path = layouts.get(&name).ok_or_else(|| {
-                format!(
-                    "check: layout {name:?} not found in {}; use list to see available layouts",
-                    directory.path.display()
-                )
-            })?;
-            config::read(path).map_err(|error| format!("check: {error}"))?;
-            writeln!(stdout, "{name}: valid").map_err(|error| format!("check: stdout: {error}"))?;
-        }
+    Cli::command().write_help(&mut stdout)?;
+    writeln!(stdout)
+}
+
+fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
+    let layouts = discovery::Directory::resolve(layouts_dir)?.discover()?;
+    let mut stdout = io::stdout().lock();
+    for name in layouts.keys() {
+        writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
     }
     Ok(())
 }
 
+fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
+    let path = find_layout(name, layouts_dir)?;
+    config::read(&path)?;
+    writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
+}
+
+fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
+    let mut diagnostics = Diagnostics::start("load");
+    diagnostics.stage(format!("load {name:?}: validation"));
+    load_named(name, layouts_dir, &mut diagnostics).map_err(|error| diagnostics.failure(error))
+}
+
+/// Validates and constructs a named layout under launch diagnostics. This is the single
+/// loading path: the planned picker calls it only after a layout has been selected.
 fn load_named(
     name: &str,
     layouts_dir: Option<PathBuf>,
-    diagnostics: &mut diagnostics::Diagnostics,
+    diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
+    let path = find_layout(name, layouts_dir)?;
+    let config = config::read(&path)?;
+    diagnostics.record(&format!(
+        "validated layout {name:?} from {}",
+        path.display()
+    ));
+    launch::load(&config, diagnostics).map_err(|error| format!("layout {name:?}: {error}"))
+}
+
+/// Resolves a layout name to its discovered file. Parses no layout contents.
+fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     if !discovery::valid_name(name) {
         return Err(format!(
             "invalid layout name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
         ));
     }
     let directory = discovery::Directory::resolve(layouts_dir)?;
-    let layouts = directory.discover()?;
-    let path = layouts.get(name).ok_or_else(|| {
+    let mut layouts = directory.discover()?;
+    layouts.remove(name).ok_or_else(|| {
         format!(
             "layout {name:?} not found in {}; use list to see available layouts",
             directory.path.display()
         )
-    })?;
-    let config = config::read(path)?;
-    diagnostics.record(&format!(
-        "validated layout {name:?} from {}",
-        path.display()
-    ));
-    launch::load(&config, diagnostics).map_err(|error| format!("layout {name:?}: {error}"))
+    })
 }

@@ -263,9 +263,9 @@ then focuses each completed child by ID before launching the next sibling. Sway'
 singleton split optimization changes the existing parent's axis; a populated workspace
 split wraps its completed children when the first child itself is a split. This preserves
 meaningful groups even on equal axes, without placeholders, scratchpad use, moves, or
-arbitrary extra splits. When workspace wrapping is needed, select an owned direct child,
-focus its parent, verify workspace focus explicitly, and guard that focus again immediately
-before the workspace split. Other commands use numeric container criteria exclusively.
+arbitrary extra splits. When workspace wrapping is needed, select an owned direct child and
+focus its parent. The criteria-free workspace split explicitly requires workspace focus on
+its own settled pre-command fence. Other commands use numeric container criteria exclusively.
 
 Before each command/launch, fresh fenced state must match all accepted identities,
 placement, tiled/fullscreen state, and hierarchy. Every command reply is checked and its

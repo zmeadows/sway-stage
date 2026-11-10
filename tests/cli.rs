@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const WINDOW: &str =
     "version: 1\nlayout: {id: t, command: [does-not-need-to-exist], match: {app_id: t}}\n";
+// Failure advice that is appropriate only after this invocation started an application.
+const PARTIAL: &str = "inspect windows before retrying";
 
 struct Fixture {
     path: PathBuf,
@@ -235,6 +237,114 @@ fn check_validates_without_compositor_tools_or_application_probes() {
 }
 
 #[test]
+fn unsupported_window_timeout_fails_validation_before_ipc() {
+    let fixture = Fixture::new();
+    fixture.file(
+        "slow.yaml",
+        &format!("{WINDOW}window_timeout_ms: {}\n", u64::MAX),
+    );
+    let output = fixture.run(&["check", "slow", "--layouts-dir", "."], 1);
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("slow.yaml: window_timeout_ms"), "{stderr}");
+    assert!(stderr.contains("from 1 to 300000"), "{stderr}");
+
+    // Load stops at the same validation stage instead of reaching socket discovery.
+    let output = fixture.run(&["--layouts-dir", ".", "load", "slow"], 1);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("validation: "), "{stderr}");
+    assert!(stderr.contains("window_timeout_ms"), "{stderr}");
+    assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+    assert!(!stderr.contains(PARTIAL), "{stderr}");
+}
+
+#[test]
+fn invalid_and_missing_layout_names_fail_before_ipc_for_check_and_load() {
+    let fixture = Fixture::new();
+    fixture.file("good.yaml", WINDOW);
+    for command in ["check", "load"] {
+        for (name, expected) in [
+            (
+                "../good",
+                "invalid layout name \"../good\"; use [A-Za-z0-9]",
+            ),
+            ("missing", "layout \"missing\" not found in .; use list"),
+        ] {
+            let output = fixture.run(&["--layouts-dir", ".", command, name], 1);
+            assert!(output.stdout.is_empty());
+            // The primary error is the final line, after any secondary diagnostics.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let primary = stderr.lines().last().unwrap_or_default();
+            assert!(
+                primary.starts_with(&format!("sway-stage: {command}")),
+                "{stderr}"
+            );
+            assert!(primary.contains(expected), "{stderr}");
+            assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+            assert!(!stderr.contains(PARTIAL), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.file("good.yaml", WINDOW);
+    fixture.file("bad.yaml", "version: 2\n");
+    fixture.file(
+        "notify-send",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_RECORD\"\n",
+    );
+    fs::set_permissions(
+        fixture.path.join("notify-send"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    // Not a socket: any connection attempt fails, so a successful list/check never tried.
+    fixture.file("not-a-socket", "");
+    let run = |args: &[&str]| {
+        fixture
+            .command()
+            .env("SWAYSOCK", fixture.path.join("not-a-socket"))
+            .env("XDG_STATE_HOME", fixture.path.join("state"))
+            .env("PATH", &fixture.path)
+            .env("NOTIFY_RECORD", fixture.path.join("notification"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for (args, status) in [
+        (&["--layouts-dir", ".", "list"][..], 0),
+        (&["--layouts-dir", "absent", "list"], 1),
+        (&["--layouts-dir", ".", "check", "good"], 0),
+        (&["--layouts-dir", ".", "check", "bad"], 1),
+        (&["--layouts-dir", ".", "check", "missing"], 1),
+        (&["--layouts-dir", ".", "check", "../good"], 1),
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(status), "{args:?}: {output:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("SWAYSOCK"));
+    }
+    assert!(!fixture.path.join("state").exists());
+    assert!(!fixture.path.join(".local").exists());
+    assert!(!fixture.path.join("notification").exists());
+
+    // Control: in the same environment, load does reach the socket, log and notifier.
+    let output = run(&["--layouts-dir", ".", "load", "good"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("connect to SWAYSOCK"), "{stderr}");
+    assert!(!stderr.contains(PARTIAL), "{stderr}");
+    assert!(fixture.path.join("state/sway-stage/last-run.log").exists());
+    let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+    assert!(
+        notification.contains("connect to SWAYSOCK"),
+        "{notification}"
+    );
+}
+
+#[test]
 fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.path.join("layouts/work")).unwrap();
@@ -277,6 +387,8 @@ fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{stderr}");
         assert!(stderr.contains("log:"), "{stderr}");
+        // Nothing was launched, so there is no partial layout to inspect.
+        assert!(!stderr.contains(PARTIAL), "{stderr}");
         assert!(output.stdout.is_empty());
         let contents = fs::read_to_string(&log).unwrap();
         assert!(contents.contains(expected), "{contents}");
@@ -330,6 +442,10 @@ fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
     assert!(
         notification.contains("--app-name=sway-stage\n--urgency=critical\n"),
+        "{notification}"
+    );
+    assert!(
+        notification.contains("\n--\nsway-stage load failed\n"),
         "{notification}"
     );
     assert!(notification.contains("SWAYSOCK is unset"));

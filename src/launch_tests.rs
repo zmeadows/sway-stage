@@ -188,12 +188,55 @@ fn elsewhere(mut tree: Value, mut view: Value) -> Value {
         .push(other);
     tree
 }
+fn nodes(tree: &Value) -> Vec<&Value> {
+    let mut all = vec![tree];
+    for child in tree["nodes"].as_array().unwrap() {
+        all.extend(nodes(child));
+    }
+    all
+}
+// Transcripts record trees, not Sway's focus algorithm. Window events are derived from
+// each recorded focus transition: Sway 1.10.1's seat_set_workspace_focus emits
+// window::focus only when focus moves to a different view, never for workspace or
+// structural-container focus (including split wrappers and `focus parent`).
+fn focus_events(before: &Value, after: &Value) -> Vec<(u32, Value)> {
+    fn focused(tree: &Value) -> Option<&Value> {
+        nodes(tree).into_iter().find(|node| node["focused"] == true)
+    }
+    match focused(after) {
+        Some(view)
+            if view["shell"].is_string()
+                && focused(before).map(|node| &node["id"]) != Some(&view["id"]) =>
+        {
+            vec![(WINDOW, json!({"change": "focus", "container": view}))]
+        }
+        _ => Vec::new(),
+    }
+}
+// The first tree showing new windows carries Sway's map events in its fence:
+// window::new for each mapped view, then window::focus if one takes focus.
+fn launched(before: &Value, after: &Value) -> Step {
+    let old: Vec<_> = nodes(before).into_iter().map(|node| &node["id"]).collect();
+    let mut mapped = step(after.clone());
+    for view in nodes(after) {
+        if view["shell"].is_string() && !old.contains(&&view["id"]) {
+            let mut container = view.clone();
+            container["focused"] = json!(false);
+            mapped
+                .events
+                .push((WINDOW, json!({"change": "new", "container": container})));
+        }
+    }
+    mapped.events.extend(focus_events(before, after));
+    mapped
+}
 fn successful_steps() -> Vec<Step> {
+    let mapped = with_target(vec![view(20, Some("expected"))]);
     vec![
         step(tree()),
         step(tree()),
-        step(with_target(vec![view(20, Some("expected"))])),
-        step(with_target(vec![view(20, Some("expected"))])),
+        launched(&tree(), &mapped),
+        step(mapped),
     ]
 }
 fn fails(fixture: &Fixture, steps: Vec<Step>, expected: &str) {
@@ -251,18 +294,16 @@ fn empty_wrappers_tiled_and_floating_occupancy_refuse_before_spawn() {
 fn delayed_identity_without_event_and_existing_matching_window_elsewhere() {
     let fixture = Fixture::new();
     let old = view(50, Some("expected"));
+    let empty = elsewhere(tree(), old.clone());
+    let unresolved = elsewhere(with_target(vec![view(20, None)]), old.clone());
+    let resolved = elsewhere(with_target(vec![view(20, Some("expected"))]), old);
     let steps = vec![
-        step(elsewhere(tree(), old.clone())),
-        step(elsewhere(tree(), old.clone())),
-        step(elsewhere(with_target(vec![view(20, None)]), old.clone())),
-        step(elsewhere(
-            with_target(vec![view(20, Some("expected"))]),
-            old.clone(),
-        )),
-        step(elsewhere(
-            with_target(vec![view(20, Some("expected"))]),
-            old,
-        )),
+        step(empty.clone()),
+        step(empty.clone()),
+        // Map events precede the identity, which then arrives without an event.
+        launched(&empty, &unresolved),
+        step(resolved.clone()),
+        step(resolved),
     ];
     fixture.run_finished(&fixture.config(), steps).unwrap();
     assert_eq!(fixture.launches(), 1);
@@ -371,12 +412,10 @@ fn stale_tree_cannot_hide_later_close_move_or_second_match() {
 #[test]
 fn event_newer_than_tree_requires_another_snapshot_and_final_window_must_remain() {
     let fixture = Fixture::new();
-    let mut stale = step(tree());
-    stale.events.push((
-        WINDOW,
-        json!({"change": "new", "container": view(20, Some("expected"))}),
-    ));
     let mut steps = successful_steps();
+    // Map events can share a fence with a tree queried just before the window mapped.
+    let mut stale = step(tree());
+    stale.events = std::mem::take(&mut steps[2].events);
     steps.insert(2, stale);
     fixture.run_finished(&fixture.config(), steps).unwrap();
     let fixture = Fixture::new();
@@ -460,6 +499,74 @@ fn failure_leaves_application_running_and_never_relaunches() {
 }
 
 #[test]
+fn failure_reports_mention_partial_layouts_only_after_a_successful_spawn() {
+    const PARTIAL: &str = "inspect windows before retrying";
+    // Report as main does. Unit tests never reach a desktop notification service.
+    fn report(fixture: &Fixture, config: &Config, steps: Vec<Step>) -> (String, String) {
+        let error = fixture
+            .exchange(steps, |connect, diagnostics| {
+                let result = load_with(config, connect, diagnostics).map(|_| ());
+                result.map_err(|error| diagnostics.failure(error))
+            })
+            .unwrap_err();
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        (error, log)
+    }
+
+    let fixture = Fixture::new();
+    let occupied = with_target(vec![view(50, Some("other"))]);
+    let (error, log) = report(&fixture, &fixture.config(), vec![step(occupied)]);
+    assert!(error.contains("completely empty"), "{error}");
+    assert!(
+        !error.contains(PARTIAL) && !log.contains(PARTIAL),
+        "{error}"
+    );
+    assert!(!fixture.path.join("launches").exists());
+
+    // A spawn that fails to start the only application leaves nothing behind.
+    let fixture = Fixture::new();
+    let mut config = fixture.config();
+    let NodeKind::Window { command, .. } = &mut config.layout.value.kind else {
+        unreachable!()
+    };
+    command[0] = "missing-fixture-executable".into();
+    let (error, log) = report(&fixture, &config, vec![step(tree()), step(tree())]);
+    assert!(error.contains("spawn application"), "{error}");
+    assert!(
+        !error.contains(PARTIAL) && !log.contains(PARTIAL),
+        "{error}"
+    );
+
+    let fixture = Fixture::new();
+    let unexpected = with_target(vec![view(20, Some("unrelated"))]);
+    let steps = vec![step(tree()), step(tree()), step(unexpected)];
+    let (error, log) = report(&fixture, &fixture.config(), steps);
+    assert!(error.contains("unexpected target-workspace"), "{error}");
+    assert!(error.contains(PARTIAL) && log.contains(PARTIAL), "{error}");
+    assert_eq!(fixture.launches(), 1);
+
+    // A later failed spawn still follows an earlier application that was started.
+    let fixture = Fixture::new();
+    let missing = "{id: w1, command: [missing-fixture-executable], match: {app_id: expected}}";
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{split: horizontal, children: [{}, {missing}]}}",
+            leaf(&fixture, 0)
+        ),
+    );
+    let first = arranged("splith", vec![window(20)], 20);
+    let mut steps = vec![step(tree())];
+    launch_steps(&mut steps, &tree(), &first);
+    operation(&mut steps, "[con_id=20] splith", &first, &first);
+    operation(&mut steps, "[con_id=20] focus", &first, &first);
+    let (error, log) = report(&fixture, &config, steps);
+    assert!(error.contains("leaf=\"w1\"") && error.contains("spawn application"));
+    assert!(error.contains(PARTIAL) && log.contains(PARTIAL), "{error}");
+    assert_eq!(fixture.launches(), 1);
+}
+
+#[test]
 fn exact_xwayland_class_matching_and_global_floating_ancestry() {
     let fixture = Fixture::new();
     let mut config = fixture.config();
@@ -478,7 +585,7 @@ fn exact_xwayland_class_matching_and_global_floating_ancestry() {
             vec![
                 step(tree()),
                 step(tree()),
-                step(target.clone()),
+                launched(&tree(), &target),
                 step(target),
             ],
         )
@@ -551,23 +658,9 @@ fn workspace_fullscreen_metadata_does_not_mark_tiled_child_fullscreen() {
     assert_eq!(fixture.launches(), 1);
 }
 
-#[test]
-fn fullscreen_container_ancestry_still_marks_its_window_fullscreen() {
-    for (kind, expected_fullscreen) in [("workspace", false), ("con", true), ("floating_con", true)]
-    {
-        let mut parent = node(30, kind, false);
-        parent["fullscreen_mode"] = json!(1);
-        parent["nodes"] = json!([view(20, Some("expected"))]);
-        let parent: Node = serde_json::from_value(parent).unwrap();
-        let mut windows = Vec::new();
-        collect(&parent, None, false, false, false, &mut windows);
-        let window = windows.iter().find(|window| window.node.id == 20).unwrap();
-        assert_eq!(window.fullscreen, expected_fullscreen, "parent kind={kind}");
-    }
-}
-
 // A transcript supplies recorded tree shapes and exact commands. It does not execute
 // layout operations or model Sway's insertion, focus, or simplification algorithms.
+// Only window events follow from the recorded trees; see focus_events and launched.
 fn group(id: i64, layout: &str, children: Vec<Value>) -> Value {
     let mut value = node(id, "con", false);
     value["layout"] = json!(layout);
@@ -592,11 +685,15 @@ fn command_step(command: &str) -> Step {
     value
 }
 fn operation(steps: &mut Vec<Step>, command: &str, before: &Value, after: &Value) {
-    steps.extend([
-        step(before.clone()),
-        command_step(command),
-        step(after.clone()),
-    ]);
+    // Sway emits a command's events before its reply, so they fall in the next fence.
+    // That tree cannot authorize anything further until a quiet fence follows.
+    let mut command = command_step(command);
+    command.events = focus_events(before, after);
+    let resettle = !command.events.is_empty();
+    steps.extend([step(before.clone()), command, step(after.clone())]);
+    if resettle {
+        steps.push(step(after.clone()));
+    }
 }
 fn final_focus_steps(steps: &mut Vec<Step>, before: &Value, id: i64) {
     let mut after = before.clone();
@@ -606,7 +703,7 @@ fn final_focus_steps(steps: &mut Vec<Step>, before: &Value, id: i64) {
 fn launch_steps(steps: &mut Vec<Step>, before: &Value, after: &Value) {
     steps.extend([
         step(before.clone()),
-        step(after.clone()),
+        launched(before, after),
         step(after.clone()),
     ]);
 }
@@ -1176,13 +1273,109 @@ fn insertion_focus_interference_is_detected_before_spawning() {
     operation(&mut steps, "[con_id=20] focus", &a, &a);
     launch_steps(&mut steps, &a, &b);
     operation(&mut steps, "[con_id=21] focus", &b, &b);
-    steps.push(step(interfered));
+    // A click on the first window emits focus; the quiet fence after it is authoritative.
+    let mut clicked = step(interfered.clone());
+    clicked.events = focus_events(&b, &interfered);
+    steps.extend([clicked, step(interfered)]);
     let error = fixture.run(&config, steps).unwrap_err();
     assert!(error.contains("insertion focus left"), "{error}");
     let limit = deadline();
     while fixture.launches() != 2 {
         assert!(Instant::now() < limit);
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn harmless_window_events_require_another_fence_before_continuing() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{split: horizontal, children: [{}, {}]}}",
+            leaf(&fixture, 0),
+            leaf(&fixture, 1)
+        ),
+    );
+    let mut foreign = view(50, Some("editor"));
+    foreign["focused"] = json!(false);
+    let a = arranged("splith", vec![window(20)], 20);
+    let b = arranged("splith", vec![window(20), window(21)], 21);
+    let mut steps = vec![step(tree())];
+    launch_steps(&mut steps, &tree(), &a);
+    // A title change on another workspace lands in the next command's first fence.
+    let mut retitled = step(a.clone());
+    retitled
+        .events
+        .push((WINDOW, json!({"change": "title", "container": foreign})));
+    steps.push(retitled);
+    operation(&mut steps, "[con_id=20] splith", &a, &a);
+    operation(&mut steps, "[con_id=20] focus", &a, &a);
+    launch_steps(&mut steps, &a, &b);
+    for entry in &mut steps {
+        entry.tree = elsewhere(entry.tree.clone(), foreign.clone());
+    }
+    finish(&fixture, &config, steps, 2);
+
+    // Each pass is also forced by the transcript: had a fence with events authorized
+    // the next request, that command would meet a snapshot step and fail the fixture.
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    let passes: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("observing again"))
+        .collect();
+    assert_eq!(passes.len(), 2, "{log}");
+    assert!(passes[0].contains("Title id=50"), "{log}");
+    // Final focus moves from the second window to the first; Sway reports that too.
+    assert!(passes[1].contains("Focus id=20"), "{log}");
+}
+
+#[test]
+fn workspace_split_requires_workspace_focus_on_its_settled_fence() {
+    for clicked in [false, true] {
+        let fixture = Fixture::new();
+        let w = (0..3).map(|i| leaf(&fixture, i)).collect::<Vec<_>>();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{{split: vertical, children: [{}, {}]}}, {}]}}",
+                w[0], w[1], w[2]
+            ),
+        );
+        let a = arranged("splith", vec![window(20)], 20);
+        let b = arranged("splitv", vec![window(20)], 20);
+        let c = arranged("splitv", vec![window(20), window(21)], 21);
+        let c_focus = arranged("splitv", vec![window(20), window(21)], 20);
+        let c_parent = arranged("splitv", vec![window(20), window(21)], 10);
+        let mut steps = vec![step(tree())];
+        launch_steps(&mut steps, &tree(), &a);
+        operation(&mut steps, "[con_id=20] splitv", &a, &b);
+        operation(&mut steps, "[con_id=20] focus", &b, &b);
+        launch_steps(&mut steps, &b, &c);
+        operation(&mut steps, "[con_id=20] focus", &c, &c_focus);
+        if clicked {
+            // Focus parent succeeds, then a click on a window emits focus. Only the
+            // fence after that event shows the workspace has lost focus.
+            operation(&mut steps, "[con_id=20] focus parent", &c_focus, &c_parent);
+            let mut click = step(c_parent.clone());
+            click.events = focus_events(&c_parent, &c);
+            steps.extend([click, step(c)]);
+        } else {
+            // Sway accepts focus parent, but the workspace never becomes focused.
+            operation(&mut steps, "[con_id=20] focus parent", &c_focus, &c_focus);
+            steps.push(step(c_focus));
+        }
+        // A split request would meet the repeated final snapshot step and fail the fixture.
+        let error = fixture.run(&config, steps).unwrap_err();
+        assert!(
+            error.contains("\"splith\" requires focused container id=10"),
+            "clicked={clicked}: {error}"
+        );
+        let limit = deadline();
+        while fixture.launches() != 2 {
+            assert!(Instant::now() < limit);
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -1606,6 +1799,54 @@ fn sizing_interference_and_ipc_errors_are_fatal_even_when_sizes_are_nonfatal() {
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
+    }
+}
+
+#[test]
+fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
+    for scenario in 0..4 {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{split: horizontal, children: [{}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1)
+            ),
+        );
+        let a = arranged("splith", vec![window(20), window(21)], 21);
+        let mut retitled = step(a.clone());
+        retitled
+            .events
+            .push((WINDOW, json!({"change": "title", "container": window(21)})));
+        let mut next = step(a.clone());
+        let expected = match scenario {
+            0 => {
+                next.events
+                    .push((WINDOW, json!({"change": "new", "container": window(99)})));
+                "ownership is uncertain"
+            }
+            1 => {
+                next.events
+                    .push((WINDOW, json!({"change": "move", "container": window(20)})));
+                "window move"
+            }
+            2 => {
+                next.events = vec![(WORKSPACE, focus(11, 10)), (WORKSPACE, focus(10, 11))];
+                "focus changed"
+            }
+            _ => {
+                next.disconnect = true;
+                "get workspaces"
+            }
+        };
+        let steps = vec![step(a.clone()), retitled, next];
+        let error =
+            completed_session(&fixture, &config, steps, |session| session.focus(&[0])).unwrap_err();
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        assert!(log.contains("Title id=21; observing again"), "{log}");
+        assert!(!log.contains("command replies"), "{log}");
     }
 }
 

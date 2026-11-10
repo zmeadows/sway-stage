@@ -1,6 +1,6 @@
 use super::fixtures::*;
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -306,5 +306,141 @@ fn unusable_focus_events_reload_and_target_destruction_fail() {
         let (mut observer, mut events) = initialized();
         send(&mut events, WORKSPACE, event);
         assert!(observer.next_until(deadline()).is_err());
+    }
+}
+
+fn view(id: i64, app_id: &str) -> Value {
+    let mut view = node(id, "con", false);
+    view["app_id"] = json!(app_id);
+    view["shell"] = json!("xdg_shell");
+    view
+}
+
+fn parsed(value: Value) -> Node {
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn located_windows_keep_workspace_floating_fullscreen_and_scratchpad_ancestry() {
+    // Structural groups and wrappers are not windows; an empty container still counts.
+    let mut group = node(30, "con", false);
+    group["layout"] = json!("splitv");
+    group["nodes"] = json!([view(20, "tiled"), view(21, "tiled")]);
+    let mut fullscreen = node(31, "con", false);
+    fullscreen["fullscreen_mode"] = json!(1);
+    fullscreen["nodes"] = json!([view(22, "fullscreen")]);
+    let mut wrapper = node(32, "floating_con", false);
+    wrapper["nodes"] = json!([view(23, "wrapped")]);
+    // Sway reports fullscreen_mode=1 on every workspace; it is not inherited.
+    let mut target = node(10, "workspace", true);
+    target["nodes"] = json!([group, fullscreen, node(33, "con", false)]);
+    target["floating_nodes"] = json!([wrapper]);
+    let mut scratch = node(11, "workspace", false);
+    scratch["name"] = json!("__i3_scratch");
+    scratch["floating_nodes"] = json!([view(24, "hidden")]);
+    let mut marked = view(25, "marked");
+    marked["scratchpad_state"] = json!("fresh");
+    let mut flagged = view(26, "flagged");
+    flagged["floating"] = json!("user_on");
+    let mut other = node(12, "workspace", false);
+    other["nodes"] = json!([marked, flagged]);
+    let mut tree = tree();
+    tree["nodes"][0]["nodes"] = json!([target, scratch, other]);
+    let tree = parsed(tree);
+
+    let located: Vec<_> = locate_windows(&tree)
+        .iter()
+        .map(|window| {
+            (
+                window.node.id,
+                window.workspace,
+                window.floating,
+                window.fullscreen,
+                window.scratchpad,
+            )
+        })
+        .collect();
+    #[rustfmt::skip]
+    assert_eq!(located, [
+        // (id, workspace, floating, fullscreen, scratchpad), tiled before floating
+        (20, Some(10), false, false, false),
+        (21, Some(10), false, false, false),
+        (22, Some(10), false, true, false),
+        (33, Some(10), false, false, false),
+        (23, Some(10), true, false, false),
+        (24, Some(11), true, false, true),
+        (25, Some(12), false, false, true),
+        (26, Some(12), true, false, false),
+    ]);
+}
+
+#[test]
+fn fullscreen_container_ancestry_still_marks_its_window_fullscreen() {
+    for (kind, expected_fullscreen) in [("workspace", false), ("con", true), ("floating_con", true)]
+    {
+        let mut parent = node(30, kind, false);
+        parent["fullscreen_mode"] = json!(1);
+        parent["nodes"] = json!([view(20, "expected")]);
+        let parent = parsed(parent);
+        let windows = locate_windows(&parent);
+        let window = windows.iter().find(|window| window.node.id == 20).unwrap();
+        assert_eq!(window.fullscreen, expected_fullscreen, "parent kind={kind}");
+    }
+}
+
+#[test]
+fn identifiers_keep_their_kind_and_exact_value_and_reject_empty_values() {
+    let mut native = node(20, "con", false);
+    native["app_id"] = json!("Foot");
+    let mut xwayland = node(21, "con", false);
+    xwayland["window_properties"] = json!({"class": "Firefox"});
+    let mut empty = node(22, "con", false);
+    empty["app_id"] = json!("");
+    empty["window_properties"] = json!({"class": ""});
+    let [native, xwayland, empty] = [native, xwayland, empty].map(parsed);
+    assert_eq!((app_id(&native), class(&native)), (Some("Foot"), None));
+    assert_eq!(
+        (app_id(&xwayland), class(&xwayland)),
+        (None, Some("Firefox"))
+    );
+    assert_eq!((app_id(&empty), class(&empty)), (None, None));
+}
+
+#[test]
+fn sibling_dimensions_follow_the_group_axis_and_reject_unusable_geometry() {
+    fn group(layout: &str, sizes: &[(i32, i32)]) -> Node {
+        let mut group = node(30, "con", false);
+        group["layout"] = json!(layout);
+        // Neither the group's own extent nor parent-area percent enters the shares.
+        group["rect"]["width"] = json!(5000);
+        let children: Vec<_> = sizes
+            .iter()
+            .enumerate()
+            .map(|(index, (width, height))| {
+                let mut child = node(20 + index as i64, "con", false);
+                child["rect"]["width"] = json!(width);
+                child["rect"]["height"] = json!(height);
+                child["percent"] = json!(0.9);
+                child
+            })
+            .collect();
+        group["nodes"] = json!(children);
+        parsed(group)
+    }
+
+    let widths = sibling_dimensions(&group("splith", &[(300, 10), (700, 20)])).unwrap();
+    assert_eq!(widths, [300.0, 700.0]);
+    assert_eq!(proportions(&widths), [0.3, 0.7]);
+    let heights = sibling_dimensions(&group("splitv", &[(300, 10), (700, 30)])).unwrap();
+    assert_eq!(proportions(&heights), [0.25, 0.75]);
+    for (layout, sizes, expected) in [
+        ("tabbed", &[(300, 10), (700, 20)][..], "no split axis"),
+        ("stacked", &[(300, 10), (700, 20)], "no split axis"),
+        ("splith", &[(300, 10)], "missing"),
+        ("splith", &[(0, 10), (700, 10)], "nonpositive"),
+        ("splitv", &[(300, -1), (700, 10)], "nonpositive"),
+    ] {
+        let error = sibling_dimensions(&group(layout, sizes)).unwrap_err();
+        assert!(error.contains(expected), "{layout} {sizes:?}: {error}");
     }
 }

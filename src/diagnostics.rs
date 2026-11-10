@@ -1,4 +1,8 @@
-//! Last-run diagnostics and bounded, best-effort error notifications for `load` only.
+//! Launch diagnostics and bounded, best-effort notifications.
+//!
+//! `last-run.log` is reserved for layout launches: only `Diagnostics::start` creates or
+//! replaces it. Operations that never load a selected layout report through
+//! `notify_failure`, which leaves the previous launch's log in place.
 
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -10,10 +14,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Diagnostics {
+    /// The invoked command, which names failure notifications.
+    operation: &'static str,
     file: Option<File>,
     path: Option<PathBuf>,
     started: Instant,
     stage: String,
+    /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
+    launched: bool,
 }
 
 impl Diagnostics {
@@ -21,19 +29,25 @@ impl Diagnostics {
     pub(crate) fn for_test(path: PathBuf) -> Self {
         let (file, path) = open_log(path).unwrap();
         Self {
+            operation: "load",
             file: Some(file),
             path: Some(path),
             started: Instant::now(),
             stage: "test".into(),
+            launched: false,
         }
     }
 
-    pub fn start() -> Self {
+    /// Replaces the last-run log. Call only for an invocation that loads a selected layout:
+    /// `load`, or the picker once a layout is selected.
+    pub fn start(operation: &'static str) -> Self {
         let mut diagnostics = Self {
+            operation,
             file: None,
             path: None,
             started: Instant::now(),
             stage: "validation".into(),
+            launched: false,
         };
         match state_path().and_then(open_log) {
             Ok((file, path)) => {
@@ -76,16 +90,26 @@ impl Diagnostics {
         let _ = io::stderr().lock().write_all(line.as_bytes());
     }
 
+    /// Records a successful `Command::spawn`. A spawn that failed started nothing.
+    pub fn spawned(&mut self, pid: u32) {
+        self.launched = true;
+        self.record(&format!("spawned pid={pid}"));
+    }
+
+    /// Logs and notifies a fatal error, returning the primary message for stderr.
     pub fn failure(&mut self, error: String) -> String {
         let mut message = format!("{}: {error}", self.stage);
-        message.push_str("; stopped without cleanup or relaunch; inspect windows before retrying");
+        // Validation, connection, prelaunch and failed-spawn errors leave nothing behind.
+        if self.launched {
+            message
+                .push_str("; stopped without cleanup or relaunch; inspect windows before retrying");
+        }
         self.record(&message);
         if let Some(path) = &self.path {
             message.push_str(&format!("; log: {}", path.display()));
         }
-        if let Err(error) = notify("critical", "sway-stage load failed", &message) {
+        if let Err(error) = notify_failure(self.operation, &message) {
             self.record(&format!("secondary notification failure: {error}"));
-            stderr(&format!("sway-stage: notification unavailable: {error}"));
         }
         message
     }
@@ -100,6 +124,18 @@ impl Diagnostics {
             self.record(&format!("secondary warning notification failure: {error}"));
         }
     }
+}
+
+/// Attempts a critical notification for any operation's fatal error without touching the
+/// last-run log. A notification failure is secondary: it is reported to stderr and
+/// returned, and the caller still reports `message` as the primary error.
+pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
+    notify(
+        "critical",
+        &format!("sway-stage {operation} failed"),
+        message,
+    )
+    .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")))
 }
 
 fn stderr(message: &str) {
@@ -151,6 +187,11 @@ fn open_log(path: PathBuf) -> Result<(File, PathBuf), String> {
 }
 
 fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
+    // Unit tests exercise failure reporting but must never reach the user's desktop.
+    // Integration tests run the executable with a fake notify-send on a controlled PATH.
+    if cfg!(test) {
+        return Ok(());
+    }
     let mut child = Command::new("notify-send")
         .args([
             "--app-name=sway-stage",
@@ -181,5 +222,29 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_launch_failures_notify_without_replacing_the_launch_log() {
+        let directory =
+            env::temp_dir().join(format!("sway-stage-diagnostics-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("last-run.log");
+        let mut diagnostics = Diagnostics::for_test(path.clone());
+        diagnostics.stage("launch");
+        diagnostics.spawned(42);
+        let launch_log = fs::read_to_string(&path).unwrap();
+        assert!(launch_log.contains("spawned pid=42"), "{launch_log}");
+
+        // Capture, or a picker before its selection, reports without any log access.
+        notify_failure("capture", "capture: get tree: connection closed").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), launch_log);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

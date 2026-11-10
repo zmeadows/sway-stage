@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 256;
+// Each wait is interactive: the user must keep the target workspace focused throughout.
+// Five minutes covers slow cold starts; larger values are not interactive waits.
+const MAX_WINDOW_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,8 +273,10 @@ fn parse(input: &str, path: &Path) -> Result<Config, String> {
     if config.version != 1 {
         return Err("version: expected format version 1".into());
     }
-    if config.window_timeout_ms == 0 {
-        return Err("window_timeout_ms: expected a positive integer in milliseconds".into());
+    if !(1..=MAX_WINDOW_TIMEOUT_MS).contains(&config.window_timeout_ms) {
+        return Err(format!(
+            "window_timeout_ms: expected milliseconds from 1 to {MAX_WINDOW_TIMEOUT_MS} (five minutes)"
+        ));
     }
 
     let parent = path.parent().unwrap_or(Path::new("."));
@@ -478,13 +483,6 @@ mod tests {
         );
         assert_eq!(env["1"], "");
         assert_eq!(env["PATH"], "literal:$PATH");
-        assert!(
-            parse_test(&format!(
-                "version: 1\nlayout: {WINDOW}\nwindow_timeout_ms: {}",
-                u64::MAX
-            ))
-            .is_ok()
-        );
     }
 
     #[test]
@@ -652,6 +650,16 @@ mod tests {
                 &format!("version: 1\nlayout: {WINDOW}\nwindow_timeout_ms: {timeout}"),
                 "window_timeout_ms",
             );
+        }
+        for timeout in ["0", "300001", "18446744073709551615"] {
+            rejects(
+                &format!("version: 1\nlayout: {WINDOW}\nwindow_timeout_ms: {timeout}"),
+                "from 1 to 300000",
+            );
+        }
+        for timeout in [1, MAX_WINDOW_TIMEOUT_MS] {
+            let input = format!("version: 1\nlayout: {WINDOW}\nwindow_timeout_ms: {timeout}");
+            assert_eq!(parse_test(&input).unwrap().window_timeout_ms, timeout);
         }
     }
 

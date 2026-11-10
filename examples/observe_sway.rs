@@ -1,8 +1,10 @@
 #[path = "../src/observation.rs"]
+#[allow(
+    dead_code,
+    reason = "the example uses only the observer and SWAYSOCK helpers"
+)]
 mod observation;
 
-use std::env;
-use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -20,11 +22,8 @@ fn main() -> ExitCode {
 }
 
 fn observe() -> Result<(), String> {
-    let socket = env::var_os("SWAYSOCK")
-        .filter(|path| !path.is_empty())
-        .ok_or("connect: SWAYSOCK is unset or empty")?;
-    let connect =
-        || UnixStream::connect(&socket).map_err(|error| format!("connect to SWAYSOCK: {error}"));
+    let socket = observation::sway_socket()?;
+    let connect = || observation::connect(&socket);
 
     let mut observer = Observer::subscribe(connect()?, Instant::now() + Duration::from_secs(2))?;
     let deadline = Instant::now() + Duration::from_secs(10);

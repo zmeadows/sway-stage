@@ -2,7 +2,9 @@
 
 use crate::config::{Config, Matcher, NodeKind, Orientation};
 use crate::diagnostics::Diagnostics;
-use crate::observation::{Observer, Snapshot};
+use crate::observation::{
+    self, Observer, Snapshot, app_id, class, locate_windows, proportions, sibling_dimensions,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::io::{Read, Write};
@@ -28,11 +30,8 @@ const SIZE_PASSES: usize = 3;
 const SIZE_PROGRESS: f64 = 0.001;
 
 pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String> {
-    let socket = env::var_os("SWAYSOCK")
-        .filter(|path| !path.is_empty())
-        .ok_or("connect: SWAYSOCK is unset or empty; run inside Sway")?;
-    let mut connect =
-        || UnixStream::connect(&socket).map_err(|error| format!("connect to SWAYSOCK: {error}"));
+    let socket = observation::sway_socket()?;
+    let mut connect = || observation::connect(&socket);
     let warnings = load_with(config, &mut connect, diagnostics)?;
     diagnostics.sizing_warnings(&warnings);
     Ok(())
@@ -215,26 +214,44 @@ impl<'a> Construction<'a> {
                     self.existing.insert(window.container.id);
                 }
             }
-            if !snapshot
+
+            // Harmless events (focus, title, ...) may still be newer than this tree.
+            let activity: Vec<_> = snapshot
                 .events
                 .iter()
-                .any(|e| matches!(e, Event::Window(_)))
-            {
+                .filter_map(|event| match event {
+                    Event::Window(window) => {
+                        Some(format!("{:?} id={}", window.change, window.container.id))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if activity.is_empty() {
                 return Ok(snapshot);
             }
+            self.diagnostics.record(&format!(
+                "window activity during fence: {}; observing again",
+                activity.join(", ")
+            ));
         }
     }
 
-    fn command(&mut self, command: String, expected: Hierarchy) -> Result<Snapshot, String> {
+    /// `require_focused` names the container a command's effect depends on being focused,
+    /// such as a criteria-free split. Commands with exact con_id criteria pass `None`.
+    fn command(
+        &mut self,
+        command: String,
+        require_focused: Option<i64>,
+        expected: Hierarchy,
+    ) -> Result<Snapshot, String> {
         self.diagnostics.stage(format!("command {command}"));
         let before = self.settled()?;
-        if matches!(command.as_str(), "splith" | "splitv")
-            && !before
-                .tree
-                .find_as_ref(|n| n.id == self.target)
-                .is_some_and(|n| n.focused)
+        if let Some(id) = require_focused
+            && !is_focused(&before.tree, id)
         {
-            return Err("workspace wrapping requires explicit target parent focus".into());
+            return Err(format!(
+                "command {command:?} requires focused container id={id}; observed focus is elsewhere, refusing to run it"
+            ));
         }
         let replies = run_command((self.connect)()?, command, Instant::now() + IPC_TIMEOUT)?;
         self.diagnostics
@@ -253,12 +270,8 @@ impl<'a> Construction<'a> {
 
     fn focus(&mut self, path: &[usize]) -> Result<(), String> {
         let id = self.expected.at_mut(path).id();
-        let snapshot = self.command(format!("[con_id={id}] focus"), self.expected.clone())?;
-        if !snapshot
-            .tree
-            .find_as_ref(|n| n.id == id)
-            .is_some_and(|n| n.focused)
-        {
+        let snapshot = self.command(format!("[con_id={id}] focus"), None, self.expected.clone())?;
+        if !is_focused(&snapshot.tree, id) {
             return Err(format!("explicit focus id={id} was not observed"));
         }
         Ok(())
@@ -289,7 +302,7 @@ impl<'a> Construction<'a> {
         let mut snapshot = self.settled()?;
         let mut limitation = None;
         for pass in 0..SIZE_PASSES {
-            let geometry = sibling_geometry(&snapshot.tree, id, split);
+            let geometry = sibling_geometry(&snapshot.tree, id);
             let (dimensions, observed) = match geometry {
                 Ok(geometry) => geometry,
                 Err(reason) => {
@@ -310,7 +323,7 @@ impl<'a> Construction<'a> {
             // resize set changes every other sibling as well. Recalculate each next
             // target from the resulting tree, never from a stale percent property.
             for index in 0..children.len() {
-                let (dimensions, observed) = match sibling_geometry(&snapshot.tree, id, split) {
+                let (dimensions, observed) = match sibling_geometry(&snapshot.tree, id) {
                     Ok(geometry) => geometry,
                     Err(reason) => {
                         limitation = Some(reason);
@@ -334,9 +347,10 @@ impl<'a> Construction<'a> {
                 let child_id = self.expected.at_mut(&child_path).id();
                 snapshot = self.command(
                     format!("[con_id={child_id}] resize set {axis} {pixels:.0} px"),
+                    None,
                     self.expected.clone(),
                 )?;
-                match sibling_geometry(&snapshot.tree, id, split) {
+                match sibling_geometry(&snapshot.tree, id) {
                     Ok((_, observed)) => self.diagnostics.record(&format!(
                         "pass={} after child={child_id}; observed={}",
                         pass + 1,
@@ -351,7 +365,7 @@ impl<'a> Construction<'a> {
             if limitation.is_some() {
                 break;
             }
-            let (_, observed) = sibling_geometry(&snapshot.tree, id, split)?;
+            let (_, observed) = sibling_geometry(&snapshot.tree, id)?;
             let after_error = sizing_error(&targets, &observed);
             if after_error <= SIZE_TOLERANCE {
                 break;
@@ -367,7 +381,7 @@ impl<'a> Construction<'a> {
         let residual = if let Some(reason) = limitation {
             Some(format!("observed=unavailable ({reason})"))
         } else {
-            let (_, observed) = sibling_geometry(&snapshot.tree, id, split)?;
+            let (_, observed) = sibling_geometry(&snapshot.tree, id)?;
             (sizing_error(&targets, &observed) > SIZE_TOLERANCE)
                 .then(|| format!("observed={}", shares(&observed)))
         };
@@ -408,22 +422,21 @@ impl<'a> Construction<'a> {
         let mut expected = self.expected.clone();
         let group;
         let command;
+        let require_focused;
         if first.is_empty() {
             // The first completed child occupies the workspace. workspace_split wraps
             // its populated children, preserving even equal-axis meaningful groups.
-            // Select its direct owned child and explicitly focus its known parent.
+            // Select its direct owned child and explicitly focus its known parent. The
+            // split has no criteria and acts on the focused node, so it requires the
+            // workspace to be focused on its own settled fence.
             let direct = vec![0];
             self.focus(&direct)?;
             let id = self.expected.at_mut(&direct).id();
-            let snapshot =
-                self.command(format!("[con_id={id}] focus parent"), self.expected.clone())?;
-            if !snapshot
-                .tree
-                .find_as_ref(|n| n.id == self.target)
-                .is_some_and(|n| n.focused)
-            {
-                return Err("expected explicit workspace parent focus before wrapping".into());
-            }
+            self.command(
+                format!("[con_id={id}] focus parent"),
+                None,
+                self.expected.clone(),
+            )?;
             let Hierarchy::Split(_, old_layout, old_children) = expected else {
                 unreachable!()
             };
@@ -433,6 +446,7 @@ impl<'a> Construction<'a> {
                 vec![Hierarchy::Split(None, old_layout, old_children)],
             );
             command = split_command.to_owned();
+            require_focused = Some(self.target);
             group = Vec::new();
         } else {
             let id = self.expected.at_mut(&first).id();
@@ -459,12 +473,14 @@ impl<'a> Construction<'a> {
             } else {
                 format!("[con_id={id}] {split_command}")
             };
+            // con_id criteria select the container regardless of focus.
+            require_focused = None;
         }
         self.diagnostics.record(&format!(
             "expected split/reparent transition {:?} -> {expected:?}",
             self.expected
         ));
-        self.command(command, expected)?;
+        self.command(command, require_focused, expected)?;
         for (index, child) in children.iter().enumerate().skip(1) {
             let mut previous = group.clone();
             previous.push(index - 1);
@@ -496,11 +512,7 @@ impl<'a> Construction<'a> {
         let before = self.settled()?;
         if let Some(path) = &after {
             let previous = self.expected.at_mut(path).id();
-            if !before
-                .tree
-                .find_as_ref(|n| n.id == previous)
-                .is_some_and(|n| n.focused)
-            {
+            if !is_focused(&before.tree, previous) {
                 return Err(format!(
                     "insertion focus left explicitly selected container id={previous} before launch"
                 ));
@@ -529,8 +541,8 @@ impl<'a> Construction<'a> {
             "expected {matcher:?}; launching once (argv/env omitted)"
         ));
         let mut child = spawn(command, cwd.as_ref(), env)?;
-        self.diagnostics
-            .record(&format!("spawned pid={}", child.id()));
+        // From here on, a failure may leave this application and a partial layout behind.
+        self.diagnostics.spawned(child.id());
         let mut exited = false;
         let mut accepted = None;
         let mut expected = self.expected.clone();
@@ -617,11 +629,6 @@ impl<'a> Construction<'a> {
     }
 }
 
-fn proportions(weights: &[f64]) -> Vec<f64> {
-    let total: f64 = weights.iter().sum();
-    weights.iter().map(|weight| weight / total).collect()
-}
-
 fn sizing_error(targets: &[f64], observed: &[f64]) -> f64 {
     targets
         .iter()
@@ -641,31 +648,13 @@ fn shares(values: &[f64]) -> String {
     )
 }
 
-// Call only after verifying the complete owned hierarchy. Use container rects,
-// which include decorations, rather than content geometry or parent-area percent.
-fn sibling_geometry(
-    tree: &Node,
-    id: i64,
-    split: &Orientation,
-) -> Result<(Vec<f64>, Vec<f64>), String> {
+// Call only after verifying the complete owned hierarchy. Verification also fixes the
+// group's observed layout, and therefore its measured axis, to the configured split.
+fn sibling_geometry(tree: &Node, id: i64) -> Result<(Vec<f64>, Vec<f64>), String> {
     let group = tree
         .find_as_ref(|node| node.id == id)
         .ok_or("sizing group missing")?;
-    let dimensions: Vec<_> = group
-        .nodes
-        .iter()
-        .map(|child| {
-            f64::from(match split {
-                Orientation::Horizontal => child.rect.width,
-                Orientation::Vertical => child.rect.height,
-            })
-        })
-        .collect();
-    if dimensions.len() < 2 || dimensions.iter().any(|dimension| *dimension <= 0.0) {
-        return Err(format!(
-            "nonpositive or missing sibling dimensions: {dimensions:?}"
-        ));
-    }
+    let dimensions = sibling_dimensions(group)?;
     if dimensions.iter().sum::<f64>() > f64::from(i32::MAX) {
         return Err("sibling dimensions exceed Sway's integer resize range".into());
     }
@@ -770,6 +759,11 @@ fn run_command(
     }
 }
 
+fn is_focused(tree: &Node, id: i64) -> bool {
+    tree.find_as_ref(|node| node.id == id)
+        .is_some_and(|node| node.focused)
+}
+
 fn describe(node: &Node) -> String {
     if node.nodes.is_empty() {
         return node.id.to_string();
@@ -795,8 +789,7 @@ fn validate_accepted(
     for event in &snapshot.events {
         accepted_event(event, accepted, diagnostics)?;
     }
-    let mut windows = Vec::new();
-    collect(&snapshot.tree, None, false, false, false, &mut windows);
+    let windows = locate_windows(&snapshot.tree);
     for (id, matcher) in accepted {
         let located = windows
             .iter()
@@ -817,16 +810,21 @@ fn validate_accepted(
     Ok(())
 }
 
-fn matches_window(matcher: &Matcher, node: &Node) -> bool {
+/// The node's identifier of the selector's own kind: an app ID never satisfies a class
+/// selector, nor a class an app ID selector.
+fn identity<'a>(matcher: &Matcher, node: &'a Node) -> Option<&'a str> {
     match matcher {
-        Matcher::AppId(value) => node.app_id.as_ref() == Some(value),
-        Matcher::Class(value) => {
-            node.window_properties
-                .as_ref()
-                .and_then(|p| p.class.as_ref())
-                == Some(value)
-        }
+        Matcher::AppId(_) => app_id(node),
+        Matcher::Class(_) => class(node),
     }
+}
+
+/// Exact, case-sensitive equality. Validated selectors are never empty.
+fn matches_window(matcher: &Matcher, node: &Node) -> bool {
+    let expected = match matcher {
+        Matcher::AppId(value) | Matcher::Class(value) => value,
+    };
+    identity(matcher, node) == Some(expected.as_str())
 }
 
 fn accepted_event(
@@ -964,63 +962,6 @@ fn prelaunch_history(snapshot: &Snapshot, existing: &mut HashSet<i64>) -> Result
     Ok(())
 }
 
-struct Located<'a> {
-    node: &'a Node,
-    workspace: Option<i64>,
-    floating: bool,
-    fullscreen: bool,
-    scratchpad: bool,
-}
-
-fn collect<'a>(
-    node: &'a Node,
-    workspace: Option<i64>,
-    floating: bool,
-    fullscreen: bool,
-    scratchpad: bool,
-    windows: &mut Vec<Located<'a>>,
-) {
-    let workspace = if node.node_type == NodeType::Workspace {
-        Some(node.id)
-    } else {
-        workspace
-    };
-    let floating = floating
-        || node.node_type == NodeType::FloatingCon
-        || matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn));
-    // Sway sets fullscreen_mode=1 on every workspace for i3 compatibility.
-    // Only container values describe fullscreen state that applies to descendants.
-    let fullscreen = fullscreen
-        || (matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
-            && node.fullscreen_mode.is_some_and(|mode| mode != 0));
-    let scratchpad = scratchpad
-        || matches!(
-            node.scratchpad_state,
-            Some(ScratchpadState::Fresh | ScratchpadState::Changed)
-        )
-        || (node.node_type == NodeType::Workspace && node.name.as_deref() == Some("__i3_scratch"));
-    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
-        && (node.nodes.is_empty() && node.floating_nodes.is_empty()
-            || node.app_id.is_some()
-            || node.window.is_some()
-            || node.shell.is_some())
-    {
-        windows.push(Located {
-            node,
-            workspace,
-            floating,
-            fullscreen,
-            scratchpad,
-        });
-    }
-    for child in &node.nodes {
-        collect(child, workspace, floating, fullscreen, scratchpad, windows);
-    }
-    for child in &node.floating_nodes {
-        collect(child, workspace, true, fullscreen, scratchpad, windows);
-    }
-}
-
 struct Windows<'a> {
     target: i64,
     existing: HashSet<i64>,
@@ -1032,24 +973,6 @@ struct Windows<'a> {
 }
 
 impl Windows<'_> {
-    fn identity<'a>(&self, node: &'a Node) -> Option<&'a str> {
-        match self.matcher {
-            Matcher::AppId(_) => node.app_id.as_deref(),
-            Matcher::Class(_) => node
-                .window_properties
-                .as_ref()
-                .and_then(|p| p.class.as_deref()),
-        }
-        .filter(|value| !value.is_empty())
-    }
-
-    fn matches(&self, node: &Node) -> bool {
-        let expected = match self.matcher {
-            Matcher::AppId(value) | Matcher::Class(value) => value,
-        };
-        self.identity(node) == Some(expected.as_str())
-    }
-
     fn remember(
         &mut self,
         node: &Node,
@@ -1076,7 +999,7 @@ impl Windows<'_> {
             ));
             self.observed.insert(node.id, description);
         }
-        if self.matches(node) {
+        if matches_window(self.matcher, node) {
             if let Some(previous) = self.matched
                 && previous != node.id
             {
@@ -1092,7 +1015,7 @@ impl Windows<'_> {
                     node.id,
                 ));
             }
-        } else if self.identity(node).is_some() {
+        } else if identity(self.matcher, node).is_some() {
             self.invalid
                 .insert(node.id, "changed identity after a nonmatching identity");
             if self.matched == Some(node.id) {
@@ -1143,8 +1066,7 @@ impl Windows<'_> {
         for event in &snapshot.events {
             self.event(event, diagnostics)?;
         }
-        let mut windows = Vec::new();
-        collect(&snapshot.tree, None, false, false, false, &mut windows);
+        let windows = locate_windows(&snapshot.tree);
         let mut candidate = None;
         let mut unresolved = false;
         for located in &windows {
@@ -1177,7 +1099,7 @@ impl Windows<'_> {
                     node.id
                 ));
             }
-            if self.matches(node) {
+            if matches_window(self.matcher, node) {
                 if located.workspace != Some(self.target) || located.scratchpad {
                     return Err(format!(
                         "placement failure: matching window id={} on wrong workspace or scratchpad ({location}); expected workspace={}; check Sway assignment rules and activation context",
@@ -1192,7 +1114,7 @@ impl Windows<'_> {
                 }
                 candidate = Some(node.id);
             } else if located.workspace == Some(self.target) {
-                if self.identity(node).is_some() {
+                if identity(self.matcher, node).is_some() {
                     return Err(format!(
                         "unexpected target-workspace window id={}: expected {:?}, observed {}; refusing adoption",
                         node.id, self.matcher, self.observed[&node.id]
@@ -1212,7 +1134,7 @@ impl Windows<'_> {
         }
         if let Some(matched) = self.matched {
             if let Some(located) = windows.iter().find(|w| w.node.id == matched) {
-                if !self.matches(located.node) {
+                if !matches_window(self.matcher, located.node) {
                     return Err(format!("matched window id={matched} changed identity"));
                 }
             } else if !snapshot

@@ -1,18 +1,38 @@
-//! Bounded, ordered Sway observation. No desktop mutations.
+//! Bounded, ordered Sway observation and read-only tree inspection. No desktop mutations:
+//! nothing here sends commands, changes focus, or decides window ownership.
 
 use std::collections::HashSet;
+use std::env;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use swayipc::{Connection, Event, EventType, Node, NodeType, WorkspaceChange};
+use swayipc::{
+    Connection, Event, EventType, Floating, Node, NodeLayout, NodeType, ScratchpadState,
+    WorkspaceChange,
+};
 
 // Overflow is fatal rather than silently dropping events or allowing unbounded retention.
 const EVENT_CAPACITY: usize = 256;
 static NEXT_FENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Sway's own IPC socket. Never use `Connection::new()`: it prefers `I3SOCK` and can spawn
+/// socket-discovery processes, so it could reach another compositor or launch a process.
+pub fn sway_socket() -> Result<PathBuf, String> {
+    env::var_os("SWAYSOCK")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "connect: SWAYSOCK is unset or empty; run inside Sway".to_owned())
+}
+
+/// The observer needs a fresh connection for its subscription and for every snapshot.
+pub fn connect(socket: &Path) -> Result<UnixStream, String> {
+    UnixStream::connect(socket).map_err(|error| format!("connect to SWAYSOCK: {error}"))
+}
 
 enum Message {
     Subscribed,
@@ -299,6 +319,126 @@ impl Drop for Observer {
             let _ = reader.join();
         }
     }
+}
+
+/// A window-like container with the ancestry that determines its placement. Location
+/// alone never establishes ownership.
+pub struct Located<'a> {
+    pub node: &'a Node,
+    pub workspace: Option<i64>,
+    pub floating: bool,
+    pub fullscreen: bool,
+    pub scratchpad: bool,
+}
+
+/// Every `con`/`floating_con` that has view properties or no children, across the whole
+/// tree in pre-order with tiled children before floating ones. Structural split wrappers
+/// are excluded; an empty container counts, since it may still become a window.
+pub fn locate_windows(tree: &Node) -> Vec<Located<'_>> {
+    let mut windows = Vec::new();
+    collect(tree, None, false, false, false, &mut windows);
+    windows
+}
+
+fn collect<'a>(
+    node: &'a Node,
+    workspace: Option<i64>,
+    floating: bool,
+    fullscreen: bool,
+    scratchpad: bool,
+    windows: &mut Vec<Located<'a>>,
+) {
+    let workspace = if node.node_type == NodeType::Workspace {
+        Some(node.id)
+    } else {
+        workspace
+    };
+    let floating = floating
+        || node.node_type == NodeType::FloatingCon
+        || matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn));
+    // Sway sets fullscreen_mode=1 on every workspace for i3 compatibility.
+    // Only container values describe fullscreen state that applies to descendants.
+    let fullscreen = fullscreen
+        || (matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+            && node.fullscreen_mode.is_some_and(|mode| mode != 0));
+    let scratchpad = scratchpad
+        || matches!(
+            node.scratchpad_state,
+            Some(ScratchpadState::Fresh | ScratchpadState::Changed)
+        )
+        || (node.node_type == NodeType::Workspace && node.name.as_deref() == Some("__i3_scratch"));
+    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+        && (node.nodes.is_empty() && node.floating_nodes.is_empty()
+            || node.app_id.is_some()
+            || node.window.is_some()
+            || node.shell.is_some())
+    {
+        windows.push(Located {
+            node,
+            workspace,
+            floating,
+            fullscreen,
+            scratchpad,
+        });
+    }
+    for child in &node.nodes {
+        collect(child, workspace, floating, fullscreen, scratchpad, windows);
+    }
+    for child in &node.floating_nodes {
+        collect(child, workspace, true, fullscreen, scratchpad, windows);
+    }
+}
+
+/// A native Wayland app ID. Empty values cannot identify a window.
+pub fn app_id(node: &Node) -> Option<&str> {
+    node.app_id.as_deref().filter(|value| !value.is_empty())
+}
+
+/// An Xwayland `window_properties.class`. Empty values cannot identify a window.
+pub fn class(node: &Node) -> Option<&str> {
+    node.window_properties
+        .as_ref()
+        .and_then(|properties| properties.class.as_deref())
+        .filter(|value| !value.is_empty())
+}
+
+/// Child extents along a split's own axis: widths for `splith`, heights for `splitv`.
+/// Container rects include decorations; content geometry and Sway's parent-area `percent`
+/// are never used, so space between siblings is excluded from their sum.
+pub fn sibling_dimensions(group: &Node) -> Result<Vec<f64>, String> {
+    let horizontal = match group.layout {
+        NodeLayout::SplitH => true,
+        NodeLayout::SplitV => false,
+        layout => {
+            return Err(format!(
+                "group id={} has no split axis: {layout:?}",
+                group.id
+            ));
+        }
+    };
+    let dimensions: Vec<_> = group
+        .nodes
+        .iter()
+        .map(|child| {
+            f64::from(if horizontal {
+                child.rect.width
+            } else {
+                child.rect.height
+            })
+        })
+        .collect();
+    if dimensions.len() < 2 || dimensions.iter().any(|dimension| *dimension <= 0.0) {
+        return Err(format!(
+            "nonpositive or missing sibling dimensions: {dimensions:?}"
+        ));
+    }
+    Ok(dimensions)
+}
+
+/// Each value's share of their sum.
+pub fn proportions(values: &[f64]) -> Vec<f64> {
+    let total: f64 = values.iter().sum();
+    values.iter().map(|value| value / total).collect()
 }
 
 #[cfg(test)]

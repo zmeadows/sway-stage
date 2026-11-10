@@ -75,7 +75,7 @@ top-level keys:
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a split or a window. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
-| `window_timeout_ms` | Optional positive integer, default `20000`, for each window wait. |
+| `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. The user must keep the target focused while waiting, so longer waits are rejected. |
 
 A split node has `split: horizontal` (left to right, Sway `splith`) or `split: vertical`
 (top to bottom, `splitv`), and an ordered `children` sequence with at least two nodes.
@@ -243,13 +243,20 @@ IDs, app IDs/classes, workspace locations, and floating states; it must distingu
 new window from new windows that failed to match. Log stages, elapsed waits, accepted
 container IDs, IPC commands/replies, hierarchy checks, and requested/observed sizing.
 
-`load`, `pick`, and `capture` attempt a desktop notification for fatal errors, using
-`notify-send` with a bounded wait. Missing notification tools or delivery failures are
-secondary diagnostics; stderr remains sufficient and the original failure remains primary.
-Send a warning notification for substantial sizing deviations so keybinding launches can
-surface them. `list` and `check` are side-effect-free apart from stdout/stderr.
+`load`, `pick`, and `capture` attempt a desktop notification for fatal errors, titled for
+the invoked operation (`sway-stage load failed`, `sway-stage pick failed`, or
+`sway-stage capture failed`), using `notify-send` with a bounded wait. Missing notification
+tools or delivery failures are secondary diagnostics; stderr remains sufficient and the
+original failure remains primary. Advise that a partial layout or applications may remain,
+and to inspect windows before retrying, only after this invocation has successfully
+spawned an application; a spawn that fails to start does not count. Send a warning
+notification for substantial sizing deviations so keybinding launches can surface them.
+`list`, `check`, help, and version are side-effect-free apart from stdout/stderr.
 
-For Sway operations, write diagnostics to
+`last-run.log` is reserved for layout launches. Each `load`, and each `pick` once a layout
+has been selected, replaces it. Picker cancellation or failure before a selection and
+every `capture` leave the previous log untouched; their errors go only to stderr and a
+best-effort notification. Write the log to
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to
 `$HOME/.local/state/sway-stage/last-run.log`. Require absolute state bases. Keep only this
 last-run log, create it with private permissions, and include its path in failure output
