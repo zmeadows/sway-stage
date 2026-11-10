@@ -481,7 +481,7 @@ fn restoration_requires_exact_original_identity_and_trusted_disposable_focus() {
 }
 
 #[test]
-fn operation_deadlines_keep_the_reference_limits() {
+fn operation_deadlines_keep_their_established_limits() {
     assert_eq!(CAPTURE_TIMEOUT, Duration::from_secs(15));
     assert_eq!(
         load_timeout(&standard_scenario("single-window")),

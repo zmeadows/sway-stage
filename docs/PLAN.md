@@ -22,14 +22,11 @@ Implemented through milestone 3C (combined menu awaits manual desktop verificati
 - Development tools in `tools/`, run as Cargo examples: `inspect_sway` prints a read-only
   snapshot of the focused workspace, and `observe_sway` runs the production observer for
   ten seconds.
-- Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
-  scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
-  workspace restoration.
-- The development-only Rust replacement in `tools/integration/` (the `integration` Cargo
-  example) implements the complete lifecycle: CLI, two preflights, ten scenarios,
-  independent verification, guarded cleanup, restoration, SIGINT handling, and reporting.
-  It is verified offline by `integration_harness` but awaits manual desktop acceptance;
-  the Python script remains the behavioral reference. See [the Rust port](#rust-port).
+- Development-only integration harness in `tools/integration/` (the `integration` Cargo
+  example): six Foot scenarios plus four optional extended scenarios, with independent
+  raw-tree verification, capture checks, guarded cleanup, workspace restoration, and
+  SIGINT handling. Its offline tests are the separate `integration_harness` test target.
+  See [3B](#3b-self-contained-sway-integration-harness).
 
 Next remaining milestone: public release preparation (4).
 
@@ -40,11 +37,12 @@ applications. They never use the user's `SWAYSOCK` and do not simulate Sway's wi
 manager. CLI capture/menu tests use fake Fuzzel and Sway sockets bound in temporary
 directories; sandboxes that forbid binding Unix sockets require an outside-sandbox run.
 
-The user has manually verified all six original Foot integration scenarios, including
-raw-tree sizing/focus and read-only capture checks, as well as construction of the
-single-Foot, two-Foot, and four-window Firefox/Foot examples. All four extended scenarios
-also passed the user's manual runs, including command inference coverage. Still unverified
-live: the combined menu, abort behavior under real interference, keybinding launch contexts,
+The user has manually verified all ten integration scenarios, including raw-tree
+sizing/focus, read-only capture, and command inference checks, as well as construction of
+the single-Foot, two-Foot, and four-window Firefox/Foot examples. Manual interference runs
+(SIGINT during cleanup, a workspace focus change, and an unexpected window) showed the
+harness's own guards stopping conservatively. Still unverified live: the combined menu,
+the loader's abort behavior under real interference, keybinding launch contexts,
 multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
@@ -63,8 +61,8 @@ multi-seat behavior, and a supported Sway version.
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
   one retained `GET_TREE` response and refuses unrepresentable arrangements when rendered.
-- **3B. Integration harness.** All six standard and four extended Python scenarios passed
-  the user's manual runs. The complete Rust port awaits separate manual acceptance.
+- **3B. Integration harness.** All six standard and four extended scenarios passed the
+  user's manual runs, along with the harness's manual interference checks.
 - **3A.1. Optional command inference and integration coverage.** Implemented
   `capture --infer-commands` with bounded Linux process-argument reads and per-window
   null fallback. Offline fixtures cover malformed data, argument preservation, PID
@@ -79,10 +77,15 @@ multi-seat behavior, and a supported Sway version.
 
 ## 3B. Self-contained Sway integration harness
 
-Implemented as development-only `scripts/integration.py`, using Python's standard library
-and `swaymsg`. It generates temporary YAML outside normal layout discovery and exercises
-single-window, horizontal-pair, vertical-pair, uneven-sibling, mixed-nesting, and deep-nesting
-layouts, including a meaningful horizontal group inside another horizontal group. Each Foot
+Implemented as the development-only `integration` Cargo example in `tools/integration/`.
+It deliberately shares no code with the loader: it drives Sway through bounded `swaymsg`
+subprocesses, decodes their output with its own types rather than `swayipc`, and describes
+scenarios with its own layout types, so a defect in the production parser, IPC decoding,
+observer, or construction cannot also hide itself in the verification.
+
+It generates temporary YAML outside normal layout discovery and exercises single-window,
+horizontal-pair, vertical-pair, uneven-sibling, mixed-nesting, and deep-nesting layouts,
+including a meaningful horizontal group inside another horizontal group. Each Foot
 gets a random run/scenario/window app ID and runs `sleep 300`, with no shell or hold option.
 
 `--extended` appends Firefox with two Foot windows, Xterm with Foot, nested Firefox with
@@ -105,24 +108,23 @@ Ignoring commands and comments, both captures must agree exactly. Recovered argu
 are kept in memory, never printed in reports or saved to the temporary configurations.
 The ordinary capture checks and independent ownership guards still run unchanged.
 
-The harness uses bounded `subprocess.run` calls for commands and queries. Its sole `Popen`
-is the persistent `swaymsg` workspace/window/tick subscription, with bounded reads and
-shutdown, needed to retain away-and-back focus history. Snapshot tick fences and fresh
-guards reduce races; they cannot provide transactional isolation. Any focus switch,
-unexpected structural activity, IPC failure, or uncertainty aborts. No scenario follows a
-failure. Ordered `window::new` events associate sequential launches with layout IDs;
-selectors alone never establish cleanup ownership. Cleanup requires globally new container
-IDs, exact app IDs or Xwayland classes, the designated workspace, safe tiled state, and
-the verified arrangement. Firefox and repeated-ID Foot windows additionally require
-Sway's PID to expose the expected literal launch arguments through `/proc/PID/cmdline`:
-the private browser profile or a distinct per-leaf Foot `--title` argument. Titles from
-the tree are not ownership evidence. Existing Firefox windows elsewhere are ignored;
-extra new matches anywhere, missing events, or uncertain process evidence abort without
-closing anything. Each exact-ID close is guarded by a new snapshot; disappearance and
-the remaining hierarchy are checked afterwards.
-Failure paths never attempt further closes, moves, process termination, repairs, or
-relaunches, and report observed test IDs/app IDs for manual inspection. Only the harness's
-own `swaymsg` subscription process is terminated on exit.
+Commands and queries are bounded `swaymsg` subprocesses. The only persistent child is the
+`swaymsg` workspace/window/tick subscription, with bounded reads and shutdown, needed to
+retain away-and-back focus history. Snapshot tick fences and fresh guards reduce races;
+they cannot provide transactional isolation. Any focus switch, unexpected structural
+activity, IPC failure, or uncertainty aborts. No scenario follows a failure. Ordered
+`window::new` events associate sequential launches with layout IDs; selectors alone never
+establish cleanup ownership. Cleanup requires globally new container IDs, exact app IDs or
+Xwayland classes, the designated workspace, safe tiled state, and the verified arrangement.
+Firefox and repeated-ID Foot windows additionally require Sway's PID to expose the expected
+literal launch arguments through `/proc/PID/cmdline`: the private browser profile or a
+distinct per-leaf Foot `--title` argument. Titles from the tree are not ownership evidence.
+Existing Firefox windows elsewhere are ignored; extra new matches anywhere, missing events,
+or uncertain process evidence abort without closing anything. Each exact-ID close is
+guarded by a new snapshot; disappearance and the remaining hierarchy are checked
+afterwards. Failure paths never attempt further closes, moves, process termination,
+repairs, or relaunches, and report observed test IDs/app IDs for manual inspection. The
+harness terminates only its own direct children (see the process decisions below).
 
 Firefox uses a fresh private profile, HOME, and XDG directories per scenario, with local
 first-run preferences, `--no-remote --new-instance --profile`, and
@@ -151,29 +153,29 @@ present. Otherwise it is skipped; an empty original workspace destroyed by Sway 
 recreated. A concurrent user action can still occur after the last guard and before a
 command, so run only in a disposable session and leave input idle.
 
-The six standard and four extended Python scenarios, including inference checks, have passed
-manual acceptance. Verification that interference stops safely with useful diagnostics
-remains outstanding. No live execution by an agent is permitted,
-including help, partial runs, or trial runs.
+All ten scenarios, including inference checks, have passed the user's manual runs. The
+user's manual interference runs (SIGINT during cleanup, a workspace focus change, and an
+unexpected window) each stopped conservatively. Those runs exercised the harness's own
+interruption, focus-history, and ownership guards; they do not establish how
+`sway-stage load` itself handles interference, and no single run proves the absence of
+races. No live execution by an agent is permitted, including help, partial runs, or trial
+runs.
 
-### Rust port
-
-`tools/integration/` ports the script with the same scenarios and safety model; the
-script remains the behavioral reference until the port passes the same manual runs.
-The executable lifecycle is complete but has not been manually accepted. Decisions:
+### Implementation decisions
 
 - Scenarios use harness-owned layout types, independent of `LayoutNode` and the
-  production parser. Expected YAML keeps the script's fixed format, including JSON flow
-  commands and environments, and capture is still compared line by line.
-- The script's `require`/`require_control` split is `Failure::Check`/`Failure::Uncertain`.
-  `Failure::report` distrusts focus history for uncertain failures, after which every
-  fence is refused, so neither cleanup nor restoration can follow. In layout verification,
-  unusable geometry and sizing beyond 5 points are ordinary failures; hierarchy, identity,
-  order, focus, history, and ownership failures are uncertain.
-- Firefox and Xterm keep their unresolved `PATH` names, like `shutil.which`, so wrapper or
-  multi-call links still work; Foot and `sleep` are canonicalized. A Firefox root is
-  `sway-stage-firefox-RUN_ID-SCENARIO` in the temporary directory, created exclusively
-  with mode 0700, rather than a random `mkdtemp` name.
+  production parser. Expected YAML has a fixed format, including JSON flow commands and
+  environments, and capture is compared line by line.
+- Failures are `Failure::Check` (an expectation failed while ownership and control remain
+  established) or `Failure::Uncertain` (ownership, placement, identity, or control is
+  uncertain). `Failure::report` distrusts focus history for uncertain failures, after
+  which every fence is refused, so neither cleanup nor restoration can follow. In layout
+  verification, unusable geometry and sizing beyond 5 points are ordinary failures;
+  hierarchy, identity, order, focus, history, and ownership failures are uncertain.
+- Firefox and Xterm keep their unresolved `PATH` names so wrapper or multi-call links still
+  work; Foot and `sleep` are canonicalized. A Firefox root is
+  `sway-stage-firefox-RUN_ID-SCENARIO` in the temporary directory, with a random run ID,
+  created exclusively with mode 0700.
 - `lifecycle.rs` keeps preparation, observation, load/capture verification, cleanup, and
   restoration in synchronous execution order. The initial preflight precedes six standard
   configuration checks; a second preflight immediately precedes the designated switch.
@@ -200,25 +202,19 @@ The executable lifecycle is complete but has not been manually accepted. Decisio
   `CommandExt::process_group(0)` to isolate terminal Ctrl-C. Timeout, interruption, and
   capture failures kill and reap only the direct child by PID, never its descendants or
   process group. The subscription helper is stopped on every exit, including readiness
-  failure. Unlike Python's helper shutdown, Rust uses direct SIGKILL with a two-second
-  reap bound rather than SIGTERM followed by SIGKILL.
+  failure. Stopping uses direct SIGKILL with a two-second reap bound.
 - Failure diagnostics retain the last associated IDs and query the tree read-only, even
   after interruption; candidate IDs, selectors, PIDs, workspaces, and unsafe state do not
   imply ownership. Inferred arguments stay in memory. Layout failure context omits launch
   arguments and environment values, including Firefox details. Counts and retained browser
   roots are reported on success and failure. Typed JSON decoding, bounded child output,
-  and ignoring relative `PATH` entries can reject inputs Python accepts.
+  and ignoring relative `PATH` entries deliberately fail closed on unusual input.
 - `integration_harness` is a separate crate root over the harness modules without
   `main.rs`. Its tests use constructed Sway trees and events, temporary files, and the
   test process's own `/proc/PID/cmdline` for process evidence. CLI parsing, preflight,
   exact command construction/replies, cleanup transitions/refusals, restoration eligibility,
   permanent history invalidation, interruption decisions, and private temporary YAML are
   covered without reading `SWAYSOCK`, connecting to Sway, or starting processes.
-
-Remaining acceptance is user-only: all ten scenarios and inference checks, unavailable
-optional application SKIPs, and conservative failures under interference and Ctrl-C.
-Keep the Python implementation and its manual instructions until the user accepts Rust.
-Agents must never execute either harness, including help or partial runs.
 
 ## 3C. Combined Fuzzel menu — complete
 
@@ -530,7 +526,8 @@ environment values.
 - `swayipc` decoding and socket establishment limits are listed under the findings above.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
-- Combined-menu desktop behavior and live abort behavior await manual verification.
+- Combined-menu desktop behavior and the loader's live abort behavior await manual
+  verification.
 - Capture fixes Sway state at one tree response and ignores subsequent desktop activity.
   Process arguments may already have changed by inference time; there is no second PID
   consistency check. Inference is opt-in and best-effort. Capture refuses structural
@@ -590,35 +587,42 @@ Agents must never run these desktop checks.
 
 ### Integration harness (user only)
 
-Prerequisites: Python 3.9 or newer, `swaymsg`, Foot, and `sleep` on `PATH`; a built
-`target/release/sway-stage`; and a valid `SWAYSOCK` for the isolated disposable Sway
-session. Only one Sway seat is supported. Start on an existing workspace other than the
-explicit target, keep input idle until the harness exits, and choose a disposable positive
-numeric workspace that is absent or completely empty (including floating windows and
-empty containers). An existing workspace with that number but a different name is refused.
-The starting name must contain only ASCII letters/digits, spaces, or `_ . : + -`, beginning
-with a letter/digit, so restoration needs no command escaping. Agents must never execute
-this script, even with `--help`; only syntax parsing and static review are allowed.
+Prerequisites: `swaymsg`, Foot, and `sleep` on `PATH`; built `target/release/sway-stage`
+and `target/release/examples/integration`; and a valid `SWAYSOCK` for the isolated
+disposable Sway session. Only one Sway seat is supported. Start on an existing workspace
+other than the explicit target, keep input idle until the harness exits, and choose a
+disposable positive numeric workspace that is absent or completely empty (including
+floating windows and empty containers). An existing workspace with that number but a
+different name is refused. The starting name must contain only ASCII letters/digits,
+spaces, or `_ . : + -`, beginning with a letter/digit, so restoration needs no command
+escaping. Agents must never execute the harness, even with `--help`; only compilation,
+static review, and the offline `integration_harness` tests are allowed.
 
-From the repository root, the original six-scenario invocation remains:
+From the repository root, build both executables, then run the six standard scenarios:
 
 ```sh
-python3 scripts/integration.py --workspace 9
+cargo build --release --locked
+cargo build --release --locked --example integration
+./target/release/examples/integration --workspace 9
 ```
 
-Use `--binary /absolute/path/to/sway-stage` to select another build. The script preflights
+Use `--binary /absolute/path/to/sway-stage` to select another build. The harness preflights
 and switches to the requested empty workspace, runs all six scenarios with guarded cleanup
 between them, and restores the original workspace when safe. It never chooses an alternate
-target. A failure stops the run and leaves remaining windows alone; their bounded commands
-normally expire within five minutes of launch. Read the reported container IDs, app IDs,
+target. A successful run reports six passes, each with verified capture and cleanup. A
+failure stops the run and leaves remaining windows alone; their bounded commands normally
+expire within five minutes of launch. Read the reported container IDs, app IDs,
 classes, and PIDs before any manual intervention. Workspace/window rules, minimum sizes,
 gaps, activity, or version differences may cause a conservative failure.
 
 The optional extended run, after those six scenarios, is:
 
 ```sh
-python3 scripts/integration.py --workspace 9 --extended
+./target/release/examples/integration --workspace 9 --extended
 ```
+
+A successful extended run reports ten passes when all optional prerequisites below are
+available, or explicit SKIPs for unavailable applications/subsystems.
 
 Additional prerequisites: native `firefox-esr` (preferred) or `firefox` on `PATH`, a valid
 `WAYLAND_DISPLAY`, and readable `/proc/PID/cmdline` for browser and repeated-ID Foot
@@ -633,37 +637,20 @@ Xterm coverage additionally requires `xterm`, `Xwayland`, and `xdpyinfo` on `PAT
 `DISPLAY` pointing to the disposable session's reachable Xwayland server advertising the
 `XWAYLAND` extension. The bounded read-only `xdpyinfo -queryExtensions` probe skips an
 unavailable server (or missing probe); a later Xterm launch or class mismatch fails.
-Keep the disposable session idle throughout. All four extended scenarios passed the
-user's manual verification, including the later inference checks.
+Keep the disposable session idle throughout.
 
-For the complete Rust port's separate acceptance, build both executables, then run each
-invocation separately from an existing workspace other than disposable workspace 9:
-
-```sh
-cargo build --release --locked
-cargo build --release --locked --example integration
-./target/release/examples/integration --workspace 9
-./target/release/examples/integration --workspace 9 --extended
-```
-
-The same prerequisites, idle-input requirement, target restrictions, and retained-profile
-rules apply; Python itself is unnecessary for Rust. A successful standard run reports six
-passes; an extended run reports ten when all optional prerequisites are available, or
-explicit SKIPs for unavailable applications/subsystems. Both must verify capture and
-guarded cleanup and restore the recorded original workspace if it still exists. The
-`--binary` and `--firefox-app-id` overrides have the same meanings as in Python.
-
-In additional, separate disposable-session runs, interrupt during a load or capture and
-during cleanup, using Ctrl-C in the invoking terminal or SIGINT directed only to the
-harness PID from another terminal. Expect a failure, remaining-window diagnostics,
-retained-profile paths, no further closes or scenarios, and no restoration after the
-interrupt is observed. If a close was already dispatched, it may still complete. Check
-that the harness's direct child is reaped and that interruption did not signal application
-processes. Separately switch away and back, introduce a foreign window, or change an owned
-window's state: expect conservative failure without further cleanup or automatic focus
-restoration. These manual checks do not imply transactional protection against races.
-Do not remove the Python script until this acceptance is complete. Agents must never
-execute any of these harness commands.
+To check the harness's own safety mechanisms after changing them, in additional, separate
+disposable-session runs, interrupt during a load or capture and during cleanup, using
+Ctrl-C in the invoking terminal or SIGINT directed only to the harness PID from another
+terminal. Expect a failure, remaining-window diagnostics, retained-profile paths, no
+further closes or scenarios, and no restoration after the interrupt is observed. If a
+close was already dispatched, it may still complete. Check that the harness's direct child
+is reaped and that interruption did not signal application processes. Separately switch
+away and back, introduce a foreign window, or change an owned window's state: expect
+conservative failure without further cleanup or automatic focus restoration. These checks
+exercise the harness's guards, not the loader's interference handling, and do not imply
+transactional protection against races. Agents must never execute any of these harness
+commands.
 
 ### Individual examples
 

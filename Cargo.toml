@@ -41,7 +41,7 @@ path = "tools/observe_sway.rs"
 test = false
 bench = false
 
-# Development-only integration harness, replacing scripts/integration.py; user-run only.
+# Development-only integration harness; user-run only.
 [[example]]
 name = "integration"
 path = "tools/integration/main.rs"

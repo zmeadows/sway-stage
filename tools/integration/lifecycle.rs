@@ -267,8 +267,8 @@ impl Harness {
         self.stage = format!("{name}: scenario preparation");
         interruption_check()?;
         if scenario.extension.is_some() {
-            // Match Python's lazy extended generator: optional executable discovery also
-            // waits until the standard scenarios have finished.
+            // Optional executable discovery waits until every standard scenario has passed,
+            // so a failed or standard-only run never probes for Firefox or Xterm.
             let applications = applications.get_or_insert_with(|| {
                 OptionalApplications::find(self.arguments.firefox_app_id.clone())
             });
@@ -648,8 +648,8 @@ fn cleanup(
     mut baseline: Signature,
 ) -> Result<(), Failure> {
     let mut remaining = accepted.clone();
-    // Python's mapping keeps launch order; Rust's is sorted by ID. Derive close order
-    // from configured leaves so it stays launch order even for unordered container IDs.
+    // Accepted windows are sorted by container ID, which need not follow launch order.
+    // Derive close order from configured leaves so windows always close in launch order.
     for leaf in context.layout.leaves() {
         let closing_id = accepted
             .iter()

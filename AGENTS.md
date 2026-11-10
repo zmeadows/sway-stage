@@ -128,24 +128,23 @@ or resizing windows. Never run `sway-stage load` against the real compositor. Al
 live-desktop behavioral verification must be performed manually by the user in an
 isolated disposable Sway session.
 
-Both integration harnesses, `scripts/integration.py` and its Rust replacement, the
-`integration` Cargo example in `tools/integration/`, are exclusively for the user's manual
-execution. The Rust lifecycle is implemented but awaits the user's manual acceptance;
-keep the Python reference until that acceptance. Agents must never execute either one,
-including `--help`, partial runs, or trial runs: never run the script,
-`cargo run --example integration`, or the built example binary.
-Validate them only by syntax parsing, compilation, static inspection, and the offline
+The integration harness, the `integration` Cargo example in `tools/integration/`, is
+exclusively for the user's manual execution in a disposable Sway session. Agents must never
+execute it, including `--help`, partial runs, or trial runs: never run
+`cargo run --example integration` or the built example binary, and never connect it to a
+live compositor. Validate it only by compilation, static inspection, and the offline
 `integration_harness` tests. That test target is a separate crate root without the harness
 entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
-processes. Never connect either harness to a live compositor. Their explicit workspace
-switching and owned-window cleanup are development-harness exceptions to the CLI's
-no-switch/no-close policy, not permission for agents to perform desktop operations.
+processes. The harness's explicit switch to a disposable workspace and its owned-window
+cleanup are development-harness exceptions to the CLI's no-switch/no-close policy, not
+permission for agents to perform desktop operations.
 
-Window cleanup must remain an explicit verified success phase, never a destructor or
-failure handler. SIGINT only records a request; ordinary control flow invalidates focus
-history, stops further mutations, and skips restoration. Child process groups isolate
-terminal interrupts, but termination must target only a harness-owned direct child by PID,
-never a process group, descendant application, or process discovered through `/proc`.
+Window cleanup must remain an explicit verified success phase that closes only windows
+independently proven to belong to the run, never a destructor or failure handler. SIGINT
+only records a request; ordinary control flow invalidates focus history, stops further
+mutations, and skips restoration. Child process groups isolate terminal interrupts, but
+termination must target only a harness-owned direct child by PID, never a process group,
+descendant application, or process discovered through `/proc`.
 
 **Human readability review.** After every source change, reread the modified code in full
 as a maintainer meeting it for the first time, not only as a diff. Check that names are

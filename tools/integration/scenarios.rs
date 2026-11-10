@@ -560,8 +560,8 @@ fn installed_remoting_name(firefox: &Path) -> Result<String, String> {
         .ok_or_else(|| undetermined(""))
 }
 
-/// Reads `RemotingName` from the `[App]` section of `application.ini` text. As in Python's
-/// configparser, keys are case-insensitive and full-line `#` or `;` comments are ignored.
+/// Reads `RemotingName` from the `[App]` section of `application.ini` text. Keys are
+/// case-insensitive, and full-line `#` or `;` comments are ignored.
 /// A malformed line or repeated key in that section is an error rather than a guess.
 fn remoting_name(application_ini: &str) -> Result<Option<String>, String> {
     let mut in_app_section = false;
@@ -767,13 +767,13 @@ pub fn describe_path(path: &[usize]) -> String {
     description
 }
 
-/// A JSON array, which is also a YAML flow sequence, spaced like Python's `json.dumps`.
+/// A JSON array, which is also a YAML flow sequence, with `", "` between items.
 fn json_sequence(items: &[String]) -> String {
     let items: Vec<String> = items.iter().map(|item| json_string(item)).collect();
     format!("[{}]", items.join(", "))
 }
 
-/// A JSON object, which is also a YAML flow mapping, spaced like Python's `json.dumps`.
+/// A JSON object, which is also a YAML flow mapping, with `", "` between entries.
 fn json_mapping(entries: &[(String, String)]) -> String {
     let entries: Vec<String> = entries
         .iter()
