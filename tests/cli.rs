@@ -1,8 +1,13 @@
+use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 const WINDOW: &str =
     "version: 1\nlayout: {id: t, command: [does-not-need-to-exist], match: {app_id: t}}\n";
@@ -63,6 +68,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["--help"],
         vec!["check", "--help"],
         vec!["load", "--help"],
+        vec!["capture", "--help"],
         vec!["--version"],
     ] {
         let output = fixture
@@ -79,7 +85,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["check"],
         vec!["load"],
         vec!["pick"],
-        vec!["capture"],
+        vec!["capture", "extra"],
         vec!["--bogus"],
         vec!["list", "extra"],
     ] {
@@ -488,4 +494,193 @@ fn notification_helper_has_a_bounded_wait() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("two-second deadline"), "{stderr}");
     assert!(stderr.contains("SWAYSOCK is unset"), "{stderr}");
+}
+
+fn read_ipc_message(stream: &mut UnixStream) -> (u32, Vec<u8>) {
+    let mut header = [0; 14];
+    stream.read_exact(&mut header).unwrap();
+    assert_eq!(&header[..6], b"i3-ipc");
+    let length = u32::from_ne_bytes(header[6..10].try_into().unwrap());
+    let kind = u32::from_ne_bytes(header[10..].try_into().unwrap());
+    let mut payload = vec![0; length as usize];
+    stream.read_exact(&mut payload).unwrap();
+    (kind, payload)
+}
+
+fn write_ipc_message(stream: &mut UnixStream, kind: u32, payload: &Value) {
+    let payload = serde_json::to_vec(payload).unwrap();
+    let mut message = b"i3-ipc".to_vec();
+    message.extend((payload.len() as u32).to_ne_bytes());
+    message.extend(kind.to_ne_bytes());
+    message.extend(payload);
+    stream.write_all(&message).unwrap();
+}
+
+/// A container as Sway's GET_TREE describes it, with every field swayipc requires.
+fn sway_node(id: i64, kind: &str, width: i32, nodes: Vec<Value>) -> Value {
+    let rect = json!({"x": 0, "y": 0, "width": width, "height": 1080});
+    json!({
+        "id": id, "type": kind, "name": "1", "border": "none", "current_border_width": 0,
+        "layout": "splith", "orientation": "horizontal",
+        "rect": rect, "window_rect": rect, "deco_rect": rect, "geometry": rect,
+        "urgent": false, "focused": false, "focus": [],
+        "nodes": nodes, "floating_nodes": [], "sticky": false,
+        // Sway reports 1 on every workspace, independently of window fullscreen state.
+        "fullscreen_mode": if kind == "workspace" { 1 } else { 0 }
+    })
+}
+
+/// Answers one capture as Sway would: it acknowledges the event subscription, then serves
+/// two fenced observations of `tree`. Every request type is asserted, so a Sway command
+/// fails the test.
+fn serve_capture(listener: UnixListener, tree: Value) -> thread::JoinHandle<()> {
+    const TICK_EVENT: u32 = (1 << 31) | 7;
+    thread::spawn(move || {
+        let accept = || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+        };
+        let mut events = accept();
+        assert_eq!(read_ipc_message(&mut events).0, 2);
+        write_ipc_message(&mut events, 2, &json!({"success": true}));
+
+        let workspaces = json!([{
+            "id": 10, "num": 1, "name": "1", "visible": true, "focused": true, "urgent": false,
+            "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080}, "output": "fixture"
+        }]);
+        for _ in 0..2 {
+            let mut query = accept();
+            assert_eq!(read_ipc_message(&mut query).0, 1);
+            write_ipc_message(&mut query, 1, &workspaces);
+            assert_eq!(read_ipc_message(&mut query).0, 4);
+            write_ipc_message(&mut query, 4, &tree);
+            let (kind, token) = read_ipc_message(&mut query);
+            assert_eq!(kind, 10);
+            // Sway queues the fence event before replying to SEND_TICK.
+            let fence = json!({"first": false, "payload": String::from_utf8(token).unwrap()});
+            write_ipc_message(&mut events, TICK_EVENT, &fence);
+            write_ipc_message(&mut query, 10, &json!({"success": true}));
+        }
+        // Like Sway, keep the subscription open until sway-stage disconnects; closing it
+        // first would be a lost event stream.
+        assert_eq!(events.read(&mut [0]).unwrap(), 0);
+    })
+}
+
+#[test]
+fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
+    let fixture = Fixture::new();
+    let socket = fixture.path.join("sway.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut editor = sway_node(20, "con", 1280, vec![]);
+    editor["shell"] = json!("xdg_shell");
+    editor["app_id"] = json!("dev:editor");
+    editor["focused"] = json!(true);
+    // A view without an app ID or class gets a `match: null` placeholder.
+    let mut unidentified = sway_node(21, "con", 640, vec![]);
+    unidentified["shell"] = json!("xdg_shell");
+    let workspace = sway_node(10, "workspace", 1920, vec![editor, unidentified]);
+    let output = sway_node(2, "output", 1920, vec![workspace]);
+    let server = serve_capture(listener, sway_node(1, "root", 1920, vec![output]));
+
+    let output = fixture
+        .command()
+        .env("SWAYSOCK", &socket)
+        .arg("capture")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    server.join().unwrap();
+    assert!(output.stderr.is_empty(), "{output:?}");
+    // Capture writes no launch log and needs no layout directory.
+    assert!(!fixture.path.join(".local").exists());
+    assert!(!fixture.path.join(".config").exists());
+
+    let draft = String::from_utf8(output.stdout).unwrap();
+    assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
+    assert!(
+        draft.contains("version: 1\nfocus: window1\nlayout:\n  split: horizontal\n"),
+        "{draft}"
+    );
+    let placeholders = |placeholder: &str| {
+        draft
+            .lines()
+            .filter(|line| line.trim() == placeholder)
+            .count()
+    };
+    assert_eq!(placeholders("command: null"), 2);
+    assert_eq!(placeholders("match: null"), 1);
+
+    fixture.file("draft.yaml", &draft);
+    let output = fixture.run(&["--layouts-dir", ".", "check", "draft"], 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("capture placeholder"));
+    let edited = draft
+        .replace("command: null", "command: [foot]")
+        .replace("match: null", "match: {app_id: unidentified}");
+    fixture.file("draft.yaml", &edited);
+    let output = fixture.run(&["--layouts-dir", ".", "check", "draft"], 0);
+    assert_eq!(output.stdout, b"draft: valid\n");
+}
+
+#[test]
+fn capture_failures_notify_without_touching_the_launch_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    fixture.file(
+        "notify-send",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_RECORD\"\n",
+    );
+    fs::set_permissions(
+        fixture.path.join("notify-send"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.path.join("state/sway-stage")).unwrap();
+    let log = fixture.path.join("state/sway-stage/last-run.log");
+    fs::write(&log, "previous launch\n").unwrap();
+    // Not a socket: connecting fails.
+    fixture.file("not-a-socket", "");
+
+    for (sway_socket, expected) in [
+        (None, "SWAYSOCK is unset"),
+        (Some("not-a-socket"), "connect to SWAYSOCK"),
+    ] {
+        let mut command = fixture.command();
+        command
+            .env("XDG_STATE_HOME", fixture.path.join("state"))
+            // Capture never resolves layouts, so unusable discovery bases are irrelevant.
+            .env("XDG_CONFIG_HOME", "relative")
+            .env_remove("HOME")
+            .env("PATH", &fixture.path)
+            .env("NOTIFY_RECORD", fixture.path.join("notification"))
+            .arg("capture");
+        if let Some(path) = sway_socket {
+            command.env("SWAYSOCK", fixture.path.join(path));
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let primary = stderr.lines().last().unwrap_or_default();
+        assert!(primary.starts_with("sway-stage: capture: "), "{stderr}");
+        assert!(primary.contains(expected), "{stderr}");
+        assert!(!stderr.contains("log:"), "{stderr}");
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(
+            notification.contains("\n--\nsway-stage capture failed\n"),
+            "{notification}"
+        );
+        assert!(notification.contains(expected), "{notification}");
+        assert_eq!(fs::read_to_string(&log).unwrap(), "previous launch\n");
+        assert_eq!(
+            fs::read_dir(fixture.path.join("state/sway-stage"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
 }

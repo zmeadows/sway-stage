@@ -1,7 +1,7 @@
 # sway-stage specification
 
-This is the authoritative behavioral contract. It specifies `capture` and `pick` before they
-are implemented; current status, design decisions, and the manual verification procedure
+This is the authoritative behavioral contract. It specifies `pick` before it is
+implemented; current status, design decisions, and the manual verification procedure
 are in the [roadmap](PLAN.md). The YAML format may be revised before its first release,
 with this document and the examples updated together.
 
@@ -23,13 +23,13 @@ or monitor assignment, and management of application lifetimes after launch.
 
 ## Commands and discovery
 
-The command surface (`capture` and `pick` are not yet implemented):
+The command surface (`pick` is not yet implemented):
 
 | Command | Behavior |
 | --- | --- |
 | `load NAME` | Validate the named layout, then construct it on the focused empty workspace. |
 | `check NAME` | Validate a layout's syntax and semantics without IPC or launching anything. |
-| `capture` | Read the focused workspace and write an editable YAML draft to stdout. |
+| `capture` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
 | `pick` | Offer named layouts through `fuzzel --dmenu`, then perform `load` for the selection. |
 | `list` | Print available layout names, one per line in lexical order. No IPC. |
 
@@ -205,8 +205,9 @@ fresh guards and stop on observed interference; do not promise transaction-like 
 Compute desired proportions independently for each sibling set using its weights. Compare
 observed sibling dimensions on that axis, normalized by their sum, with desired shares.
 Borders, gaps, rounding, and application minimum sizes can prevent exact proportions.
-An absolute difference of at most **5 percentage points** is accepted. A larger difference
-after bounded adjustment produces a warning identifying the split, requested share, and
+Adjustment aims for an absolute difference of at most **1 percentage point** per child,
+and an absolute difference of at most **5 percentage points** is accepted. A larger
+difference after bounded adjustment produces a warning identifying the split, requested share, and
 observed share; it does not turn an otherwise correct hierarchy into failure. Structural
 or ownership errors are always fatal. Do not disable user gaps, borders, or application
 constraints to force a result.
@@ -219,20 +220,37 @@ of percentage commands.
 
 ## Capture
 
-`capture` is read-only IPC. Preserve the focused workspace's ordered tiled hierarchy,
-orientations, and relative sibling proportions. Generate unique leaf IDs in traversal
-order and set `focus` to the observed focused leaf. Prefer each window's nonempty Wayland
-app ID, otherwise its Xwayland class. Use observed geometry to compute positive sibling
-weights with enough precision to preserve proportions within the sizing tolerance.
-Do not serialize Sway container IDs, workspace names/numbers, outputs, titles, PIDs,
-commands, cwd, or environment from the running session.
+`capture` takes no arguments and is read-only IPC: workspace and tree queries and tick
+fences only. It never sends commands, changes focus, launches applications, or writes
+files. On success, stdout holds exactly one draft document.
 
-Refuse an empty workspace, any floating node, tabbed/stacked layout, fullscreen window,
-unsupported node type, or unrepresentable geometry. A single-window workspace is a root
-leaf; collapse redundant single-child wrappers, retaining all meaningful split boundaries.
-Emit comments explaining null placeholders. The result records arrangement and selectors,
-not a runnable session restoration. If focus/workspace identity or tree structure changes
-during capture, fail without YAML output. Reading the tree must not focus or mutate windows.
+The draft follows the version 1 format. It preserves the focused workspace's ordered tiled
+hierarchy and orientations. Each split child's `weight` is its percentage of its siblings'
+summed extent along the split axis, rounded to hundredths with a minimum of `0.01`, which
+reconstructs proportions well within the sizing tolerance; the root has no weight. Leaf
+IDs are `window1`, `window2`, ... in depth-first order, and `focus` names the focused
+window. `match` uses the window's nonempty Wayland app ID, otherwise its nonempty Xwayland
+class, otherwise `null`. `command` is always `null`. A leading comment explains the
+placeholders. Do not serialize Sway container IDs, workspace names/numbers, outputs,
+titles, PIDs, commands, cwd, or environment from the running session. The result records
+arrangement and selectors, not a runnable session restoration.
+
+A single-window workspace is a root leaf. A container with one tiled child, including the
+workspace itself, is replaced by that child, which takes the container's extent among its
+siblings. Every container with two or more children remains a split, even when it shares
+its parent's orientation.
+
+Refuse an empty workspace; any floating container; a tabbed or stacked container, even
+with a single child; a fullscreen window or container (the workspace's own
+`fullscreen_mode` is ignored); unsupported node types and malformed containers;
+nonpositive extents along a split axis; focus on anything but a window, such as a group
+after `focus parent`; and an arrangement exceeding the depth or node limits.
+
+Capture observes twice through fenced snapshots and emits a draft only if both yield the
+same arrangement: hierarchy, order, container identities, extents, selectors, and focus.
+Any workspace focus change since subscribing, even away and back, and any window event
+other than a title, urgency, or mark change, fails the capture. A failed capture writes
+no YAML.
 
 ## Errors, notifications, and diagnostics
 

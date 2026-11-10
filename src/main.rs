@@ -1,3 +1,4 @@
+mod capture;
 mod config;
 mod diagnostics;
 mod discovery;
@@ -11,9 +12,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(version, about = "Validate and construct nested Sway layouts")]
 #[command(
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing tolerates 5 percentage points after at most three passes per split. Capture and the picker are not implemented yet."
+    version,
+    about = "Validate, construct, and capture nested Sway layouts",
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture only reads Sway; fill in its null command and match placeholders before checking or loading a draft. The picker is not implemented yet."
 )]
 struct Cli {
     /// Read layouts from PATH instead of the XDG configuration directory
@@ -37,11 +39,14 @@ enum Command {
         /// Layout name (the YAML filename without its extension)
         name: String,
     },
+    /// Print an editable YAML draft of the focused workspace's tiled layout, read-only
+    Capture,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Only load logs or notifies; the other commands report solely to stdout/stderr.
+    // Only load writes the launch log; load and capture also notify on failure. The other
+    // commands report solely to stdout/stderr.
     let result = match cli.command {
         None => help().map_err(|error| format!("help: stdout: {error}")),
         Some(Command::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
@@ -49,6 +54,7 @@ fn main() -> ExitCode {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
         Some(Command::Load { name }) => load(&name, cli.layouts_dir),
+        Some(Command::Capture) => capture(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -118,4 +124,24 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
             directory.path.display()
         )
     })
+}
+
+/// Reports failure with a notification, like load, but never touches `last-run.log`, which
+/// records layout launches only. Capture does not use layout discovery.
+fn capture() -> Result<(), String> {
+    print_draft().map_err(|error| {
+        // notify_failure reports its own failure to stderr; the capture error stays primary.
+        let _ = diagnostics::notify_failure("capture", &error);
+        format!("capture: {error}")
+    })
+}
+
+/// Writes the draft only once it is complete. Flushing surfaces a write error before exit.
+fn print_draft() -> Result<(), String> {
+    let draft = capture::capture()?;
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(draft.as_bytes())
+        .and_then(|()| stdout.flush())
+        .map_err(|error| format!("stdout: {error}"))
 }

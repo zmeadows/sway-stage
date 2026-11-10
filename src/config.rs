@@ -7,8 +7,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
-const MAX_LAYOUT_DEPTH: usize = 32;
-const MAX_LAYOUT_NODES: usize = 256;
+// Capture enforces the same structural limits, so a filled-in draft remains loadable.
+pub const MAX_LAYOUT_DEPTH: usize = 32;
+pub const MAX_LAYOUT_NODES: usize = 256;
 // Each wait is interactive: the user must keep the target workspace focused throughout.
 // Five minutes covers slow cold starts; larger values are not interactive waits.
 const MAX_WINDOW_TIMEOUT_MS: u64 = 5 * 60 * 1000;
@@ -235,7 +236,7 @@ pub fn read(path: &Path) -> Result<Config, String> {
 
 /// Parses and validates one layout document. `path` locates the file only for resolving
 /// relative `cwd` values; it is not read here.
-fn parse(input: &str, path: &Path) -> Result<Config, String> {
+pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
     if input.len() > MAX_INPUT_BYTES {
         return Err("input exceeds the 1 MiB limit".into());
     }

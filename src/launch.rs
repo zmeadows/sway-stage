@@ -24,8 +24,10 @@ const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_NEW_WINDOW_HISTORY: usize = 256;
 const MAX_COMMAND_REPLY_BYTES: usize = 1024 * 1024;
-// Shares are fractions of the sibling sum. Include floating-point rounding at the exact
-// five-percentage-point boundary.
+// Shares are fractions of the sibling sum; each bound includes floating-point rounding at
+// its exact boundary. Sizing keeps adjusting until every child is within the target, but
+// only a residual beyond the tolerance (gaps, borders, minimum sizes) is a warning.
+const SIZING_TARGET: f64 = 0.01 + f64::EPSILON;
 const SIZING_TOLERANCE: f64 = 0.05 + f64::EPSILON;
 const MAX_SIZING_PASSES: usize = 3;
 // Less than a tenth of a percentage point of improvement is not worth another pass.
@@ -343,7 +345,7 @@ impl<'a> Construction<'a> {
         self.diagnostics
             .stage(format!("sizing group={group_id} path={path:?} axis={axis}"));
         self.diagnostics.record(&format!(
-            "weights={weights:?}; targets={}; tolerance=5 percentage points",
+            "weights={weights:?}; targets={}; aim within 1 percentage point, warn beyond 5",
             format_shares(&target_shares)
         ));
 
@@ -364,7 +366,7 @@ impl<'a> Construction<'a> {
                 pass + 1,
                 format_shares(&observed_shares)
             ));
-            if error_before_pass <= SIZING_TOLERANCE {
+            if error_before_pass <= SIZING_TARGET {
                 break;
             }
 
@@ -379,11 +381,11 @@ impl<'a> Construction<'a> {
                         break;
                     }
                 };
-                if max_share_error(&target_shares, &observed_shares) <= SIZING_TOLERANCE {
+                if max_share_error(&target_shares, &observed_shares) <= SIZING_TARGET {
                     break;
                 }
                 let child_error = (target_shares[child_index] - observed_shares[child_index]).abs();
-                if child_error <= SIZING_TOLERANCE {
+                if child_error <= SIZING_TARGET {
                     continue;
                 }
 
@@ -421,7 +423,7 @@ impl<'a> Construction<'a> {
 
             let (_, observed_shares) = sibling_geometry(&snapshot.tree, group_id)?;
             let error_after_pass = max_share_error(&target_shares, &observed_shares);
-            if error_after_pass <= SIZING_TOLERANCE {
+            if error_after_pass <= SIZING_TARGET {
                 break;
             }
             // Includes unchanged geometry at minimum sizes and cycles that return

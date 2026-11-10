@@ -12,9 +12,8 @@ It is deliberately cautious. It never touches windows it did not launch, and it 
 instead of guessing when something unexpected happens: the workspace is occupied, focus
 moves away, or a window appears in the wrong place.
 
-**Status:** early development; there is no release yet. `load`, `list`, and `check` are
-implemented. `capture` (draft a layout from the focused workspace) and `pick` (choose a
-layout through Fuzzel) are planned. Automated tests run offline against recorded Sway IPC
+**Status:** early development; there is no release yet. `load`, `list`, `check`, and
+`capture` are implemented. `pick` (choose a layout through Fuzzel) is planned. Automated tests run offline against recorded Sway IPC
 traffic, and the included examples have been loaded manually on Sway; no minimum Sway
 version is established yet.
 
@@ -86,6 +85,7 @@ and the [specification](docs/SPECIFICATION.md) defines the complete format.
 sway-stage list          # print layout names; does not read their contents
 sway-stage check dev     # validate without contacting Sway or launching anything
 sway-stage load dev      # build the layout on the focused, empty workspace
+sway-stage capture > draft.yaml  # draft a layout from the focused workspace
 ```
 
 `load` needs the focused workspace to be completely empty, so run it from a Sway
@@ -102,6 +102,32 @@ swaymsg workspace 9 && sway-stage load dev
 
 Keep the target workspace focused until `sway-stage` exits. A successful `load` prints
 nothing and exits 0; failures exit 1 and invalid usage exits 2.
+
+### Capturing an arrangement
+
+`capture` reads the focused workspace and prints a layout draft to stdout. It only reads
+Sway: nothing is launched, moved, resized, or focused, and no file is written except
+where you redirect stdout. The draft keeps the split hierarchy, window order, sizes as
+percentage weights, each window's exact app ID (or Xwayland class), and the focused
+window. Windows are named `window1`, `window2`, ... in layout order.
+
+Capture cannot know how a window was started, so every window has `command: null`, and
+a window without an identifier has `match: null`. `check` and `load` reject these
+placeholders until you replace them, for example with `command: [foot, --app-id=notes]`
+and `match: {app_id: notes}`. Run `capture` from a keybinding, from a terminal that is
+part of the arrangement, or from elsewhere with a delay:
+
+```sh
+sleep 5; sway-stage capture > notes.yaml  # meanwhile, switch to the arranged workspace
+sway-stage --layouts-dir . check notes    # after replacing the placeholders
+```
+
+Then move the file into your layouts directory.
+
+Capture refuses an empty workspace and anything the format cannot express: floating,
+fullscreen, tabbed, or stacked windows, or focus on a container rather than a window. It
+also stops if windows open, close, move, or change focus while it reads. On failure it
+prints nothing to stdout.
 
 ## Restrictions and limitations
 
@@ -122,20 +148,20 @@ nothing and exits 0; failures exit 1 and invalid usage exits 2.
 - Applications are started directly rather than through Sway's `exec`. Sway places each
   window by its normal rules, so assignment rules, inherited activation or launch context,
   and single-instance applications can put a window elsewhere; `sway-stage` then stops.
-- Sizes are approximate. Each child should land within 5 percentage points of its share,
-  after at most three adjustment passes per split. Gaps, borders, and minimum sizes can
-  prevent that; larger deviations produce a warning, not a failure.
+- Sizes are approximate. Each child is adjusted to within about 1 percentage point of its
+  share, in at most three passes per split. Gaps, borders, and minimum sizes can prevent
+  that; deviations beyond 5 points produce a warning, not a failure.
 - Only horizontal and vertical splits are supported; there are no tabbed, stacked, or
   floating layouts, no session restoration, and no reuse of existing windows.
 
 ## Diagnostics
 
-Errors go to stderr and, when `notify-send` is available, to a desktop notification. Each
-`load` replaces a private log at `$XDG_STATE_HOME/sway-stage/last-run.log` (by default
+Errors from `load` and `capture` go to stderr and, when `notify-send` is available, to a
+desktop notification. Each `load` replaces a private log at `$XDG_STATE_HOME/sway-stage/last-run.log` (by default
 `~/.local/state/sway-stage/last-run.log`) recording stages, container IDs, Sway commands
 and replies, and sizing results. It omits window titles, full command arguments, and
-environment values. `list`, `check`, `--help`, and `--version` never contact Sway, write
-logs, or send notifications.
+environment values. `capture` never writes or replaces the log. `list`, `check`, `--help`,
+and `--version` never contact Sway, write logs, or send notifications.
 
 ## Documentation
 

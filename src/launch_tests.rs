@@ -1168,16 +1168,25 @@ fn four_window_reference_transcript_uses_three_root_children() {
     operation(&mut steps, "[con_id=22] focus", &d, &d);
     launch_steps(&mut steps, &d, &e);
     steps.push(step(e.clone())); // root sizing inspection
-    let mut sized_root = e.clone();
-    set_dimension(&mut sized_root, 20, "width", 528);
-    set_dimension(&mut sized_root, 21, "width", 336);
-    set_dimension(&mut sized_root, 100, "width", 336);
-    set_dimension(&mut sized_root, 22, "width", 336);
-    set_dimension(&mut sized_root, 23, "width", 336);
+    // As observed on Sway, a resize takes its whole delta from the following sibling.
+    let mut first_sized = e.clone();
+    set_dimension(&mut first_sized, 20, "width", 528);
+    set_dimension(&mut first_sized, 21, "width", 272);
     operation(
         &mut steps,
         "[con_id=20] resize set width 528 px",
         &e,
+        &first_sized,
+    );
+    let mut sized_root = first_sized.clone();
+    set_dimension(&mut sized_root, 21, "width", 384);
+    for id in [100, 22, 23] {
+        set_dimension(&mut sized_root, id, "width", 288);
+    }
+    operation(
+        &mut steps,
+        "[con_id=21] resize set width 384 px",
+        &first_sized,
         &sized_root,
     );
     steps.push(step(sized_root.clone())); // nested sizing inspection
@@ -1195,7 +1204,9 @@ fn four_window_reference_transcript_uses_three_root_children() {
     let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
     assert!(log.contains("weights=[44.0, 32.0, 24.0]"));
     assert!(log.contains("targets=[44.00%, 32.00%, 24.00%]"));
-    assert!(log.contains("observed=[44.00%, 28.00%, 28.00%]"));
+    // The first resize leaves the middle window short; resizing it fixes the column too.
+    assert!(log.contains("observed=[44.00%, 22.67%, 33.33%]"));
+    assert!(log.contains("observed=[44.00%, 32.00%, 24.00%]"));
     assert!(log.contains("targets=[77.00%, 23.00%]"));
     assert!(log.contains("final focus verified leaf=\\\"browser\\\" id=20"));
     let limit = deadline();
@@ -1516,10 +1527,11 @@ fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
             weighted(&fixture, 2, 50.0)
         ),
     );
+    // As observed on Sway, each resize takes its delta from the following sibling, so
+    // resizing children in order reaches every target in one pass.
     let a = sizes("splith", &[600, 200, 200]);
-    let b = sizes("splith", &[200, 400, 400]);
-    let c = sizes("splith", &[250, 300, 450]);
-    // Exactly 5 percentage points is acceptable for both affected children.
+    let b = sizes("splith", &[200, 600, 200]);
+    let c = sizes("splith", &[200, 300, 500]);
     let mut steps = vec![step(a.clone()), step(a.clone())];
     operation(&mut steps, "[con_id=20] resize set width 200 px", &a, &b);
     operation(&mut steps, "[con_id=21] resize set width 300 px", &b, &c);
@@ -1533,18 +1545,23 @@ fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
 
     // Recorded responses may make only partial progress (constraints/rounding).
     // Never assume an accepted resize achieved its requested pixel dimension.
+    // Three passes end within the 1-point target: 20.5%, 30%, 49.5%.
     let a = sizes("splith", &[600, 200, 200]);
-    let b = sizes("splith", &[480, 260, 260]);
-    let c = sizes("splith", &[400, 260, 340]);
-    let d = sizes("splith", &[320, 300, 380]);
-    let e = sizes("splith", &[260, 280, 460]);
-    let f = sizes("splith", &[220, 300, 480]);
+    let b = sizes("splith", &[400, 350, 250]);
+    let c = sizes("splith", &[400, 300, 300]);
+    let d = sizes("splith", &[350, 300, 350]);
+    let e = sizes("splith", &[250, 330, 420]);
+    let f = sizes("splith", &[250, 300, 450]);
+    let g = sizes("splith", &[215, 300, 485]);
+    let h = sizes("splith", &[205, 300, 495]);
     let mut steps = vec![step(a.clone()), step(a.clone())];
     operation(&mut steps, "[con_id=20] resize set width 200 px", &a, &b);
-    operation(&mut steps, "[con_id=22] resize set width 500 px", &b, &c);
-    operation(&mut steps, "[con_id=20] resize set width 200 px", &c, &d);
-    operation(&mut steps, "[con_id=22] resize set width 500 px", &d, &e);
-    operation(&mut steps, "[con_id=20] resize set width 200 px", &e, &f);
+    operation(&mut steps, "[con_id=21] resize set width 300 px", &b, &c);
+    operation(&mut steps, "[con_id=22] resize set width 500 px", &c, &d);
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &d, &e);
+    operation(&mut steps, "[con_id=21] resize set width 300 px", &e, &f);
+    operation(&mut steps, "[con_id=22] resize set width 500 px", &f, &g);
+    operation(&mut steps, "[con_id=20] resize set width 200 px", &g, &h);
     completed_session(&fixture, &config, steps, |session| {
         let mut warnings = Vec::new();
         session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
@@ -1606,7 +1623,8 @@ fn minimum_constraints_stagnation_and_three_pass_limit_warn_without_failing() {
 fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
     for (dimensions, warning) in [
         ([750, 250], false),
-        ([700, 300], false),
+        // Half a percentage point is inside the 1-point sizing target.
+        ([745, 255], false),
         ([0, 1000], true),
         ([-1, 1000], true),
     ] {
@@ -1636,6 +1654,47 @@ fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn residuals_between_the_target_and_tolerance_are_adjusted_without_a_warning() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{split: horizontal, children: [{}, {}]}}",
+            weighted(&fixture, 0, 3.0),
+            weighted(&fixture, 1, 1.0)
+        ),
+    );
+    // Three points off: within the warning tolerance, so formerly left alone, but beyond
+    // the target. Minimum sizes then stall both resizes; the stall ends sizing quietly.
+    let stalled = sizes("splith", &[720, 280]);
+    let mut steps = vec![step(stalled.clone()), step(stalled.clone())];
+    operation(
+        &mut steps,
+        "[con_id=20] resize set width 750 px",
+        &stalled,
+        &stalled,
+    );
+    operation(
+        &mut steps,
+        "[con_id=21] resize set width 250 px",
+        &stalled,
+        &stalled,
+    );
+    completed_session(&fixture, &config, steps, |session| {
+        let mut warnings = Vec::new();
+        session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Ok(())
+    })
+    .unwrap();
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    assert!(
+        log.contains("stopping sizing: no meaningful progress"),
+        "{log}"
+    );
 }
 
 #[test]

@@ -8,28 +8,33 @@ justify them.
 
 ## Status
 
-Implemented through milestone 2:
+Implemented through milestone 3A:
 
 - Layout discovery, `list`, and `check` with strict YAML validation.
 - `load` for a root window and arbitrarily nested splits, with relative weights applied by
   bounded sizing and verified final focus.
 - Launch diagnostics: a private `last-run.log`, stderr errors, and bounded `notify-send`
   notifications for fatal errors and sizing warnings.
+- Read-only `capture`, printing an editable draft with `command: null` (and, without an
+  identifier, `match: null`) placeholders.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
 
-Remaining: `capture` and `pick` (milestone 3), then the first Linux release (milestone 4).
+Remaining: the integration harness (3B), the Fuzzel picker (3C), then public release
+preparation (4).
 
 Automated tests are offline. Configuration and CLI tests use temporary directories and a
 fake `notify-send`; IPC tests replay recorded trees and the window events Sway emits for
 them over disposable `UnixStream::pair` sockets, with harmless child scripts as
-applications. They never use `SWAYSOCK` and do not simulate Sway's window manager.
+applications. They never use the user's `SWAYSOCK` and do not simulate Sway's window
+manager. One CLI test runs `capture` end to end against a fake Sway socket bound in its
+temporary directory; sandboxes that forbid binding Unix sockets fail it.
 
 The user has manually verified, on Sway, construction of the single-Foot, two-Foot, and
 four-window Firefox/Foot examples, and Firefox focus after the four-window load with
-parent-area values consistent with the sizing tolerance. Still unverified live: precise
-normalized axis shares, abort behavior under real interference, keybinding launch contexts,
-multi-seat behavior, and a supported Sway version.
+parent-area values consistent with the sizing tolerance. Still unverified live: `capture`,
+precise normalized axis shares, abort behavior under real interference, keybinding launch
+contexts, multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
 
@@ -45,32 +50,51 @@ multi-seat behavior, and a supported Sway version.
 - **2C.1. Nested construction.** Recursive guarded construction of arbitrary split trees.
 - **2C.2. Sizing and focus.** Weighted sizing from outer splits inward, then verified final
   focus.
+- **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
+  two agreeing fenced observations and refuses unrepresentable arrangements.
 
-## 3. Capture and optional picker
+## 3B. Self-contained Sway integration harness (next)
 
-Implement read-only `capture`, preserving nested hierarchy and proportions while emitting
-missing-command placeholders. Reuse the observer's snapshot validation, `locate_windows`,
-`sibling_dimensions`, and `proportions`; capture sends no commands. Report capture errors
-through `diagnostics::notify_failure`, never `Diagnostics::start`, so `last-run.log` is
-untouched. Decide whether to enable serde-saphyr serialization or emit the small document
-by hand; placeholder comments may favor a hand-written emitter.
+A development-only `scripts/integration.py` that the user runs manually inside a Sway
+session to exercise `load` and `capture` end to end. When the user runs it, it may
+manipulate its designated workspace; agents must never run it against a live desktop.
 
-Add `pick` through an optional `fuzzel --dmenu` subprocess (`std::process::Command`, no
-shell). Only after an exact selection may it start launch diagnostics and call the same
-path as `load` (`load_named` in `src/main.rs`); cancellation and preselection errors leave
-the log alone.
+- Start from an existing workspace and use one designated, disposable workspace that must
+  be empty at the start; refuse to run otherwise.
+- Load predefined layouts there sequentially: single window, horizontal pair, vertical
+  pair, uneven siblings, mixed-orientation nesting, and deeper and same-axis nesting.
+  Prefer Foot with a distinct app ID per window; Firefox may be an optional compatibility
+  scenario.
+- After each load, inspect raw Sway IPC trees independently of `sway-stage` to verify
+  hierarchy, child order, app IDs, axis shares within the sizing tolerance, and final
+  focus. Then run `capture` and compare its draft with the scenario as an additional
+  check, never the sole oracle.
+- Between scenarios, close only windows positively identified as the current scenario's:
+  containers that appeared during it, with its expected app IDs, on the designated
+  workspace. Whenever ownership is uncertain, abort without destructive cleanup and
+  report what remains.
+- Return to the original workspace and print a concise pass/fail summary per scenario.
 
-Complete when fixture-based captures preserve order, focus, and proportions; unsupported
-floating/tabbed/stacked/fullscreen layouts fail before output; missing match metadata
-remains an explicit draft; and filling placeholders yields a checkable layout. Fake picker
-tests cover exact selection, cancellation, missing executable, and invalid output. Confirm
-neither tool is required by unrelated commands and capture never issues mutations.
+Complete when the scenarios run unattended in an isolated session, each failure names its
+scenario and check, and cleanup never touches a window it cannot attribute.
 
-## 4. First Linux release
+## 3C. Fuzzel picker
 
-Review actual behavior against the specification, update the README with working usage,
-and document demonstrated limitations. The MIT license and repository URL are set. Add a
-small tagged-release workflow after the behavior is validated, reusing the CI checks.
+Add an optional `pick` command through a `fuzzel --dmenu` subprocess
+(`std::process::Command`, no shell), reusing configuration discovery and the `load` path.
+Only after an exact selection may it start launch diagnostics and call `load_named` in
+`src/main.rs`; cancellation and preselection errors leave the log alone and report through
+`diagnostics::notify_failure`.
+
+Complete when fake picker tests cover exact selection, cancellation, missing executable,
+and invalid output, and Fuzzel is not required by unrelated commands.
+
+## 4. Public release preparation
+
+Packaging, distribution, documentation, and release readiness. Review actual behavior
+against the specification, update the README with working usage, and document
+demonstrated limitations. The MIT license and repository URL are set. Add a small
+tagged-release workflow after the behavior is validated, reusing the CI checks.
 
 Complete when precompiled Linux archives and checksums can be reproduced from a tag,
 installation is documented and smoke-tested, the supported Sway version and Linux
@@ -87,6 +111,7 @@ static linking, other platforms, or untested compositor versions.
 | `config.rs` | Strict YAML parsing into `LayoutNode` trees and semantic validation. |
 | `observation.rs` | Event reader, fenced snapshots, and read-only tree inspection. |
 | `launch.rs` | Launching, window acceptance, guarded construction, sizing, and focus. |
+| `capture.rs` | Read-only conversion of the focused workspace into a YAML draft. |
 | `diagnostics.rs` | `last-run.log`, stderr reporting, and bounded notifications. |
 
 **Observation.** One reader thread owns the blocking `swayipc` event stream and forwards
@@ -134,11 +159,31 @@ are used; equal-axis groups stay separate.
 
 **Sizing.** For each split, outer before inner, compute `weight / sibling sum` and compare
 it with sibling container dimensions along the split axis, normalized by their sum. Set
-each out-of-tolerance child with `resize set <width|height> N px`, remeasuring after every
-command. Stop within 5 percentage points per child, after three passes, or when a pass
-improves the maximum error by less than 0.1 percentage point. Residual deviation or
-unusable geometry becomes a warning, logged, printed, and sent as one normal-urgency
-notification after final focus succeeds.
+each child more than 1 percentage point off with `resize set <width|height> N px`,
+remeasuring after every command. Stop within 1 percentage point per child, after three
+passes, or when a pass improves the maximum error by less than 0.1 percentage point.
+Stopping at 5 points instead left results near that edge, and capture round trips drifted
+by almost 5 points per load; the extra commands cost a few milliseconds each. Residual
+deviation beyond 5 percentage points or unusable geometry becomes a warning, logged,
+printed, and sent as one normal-urgency notification after final focus succeeds.
+
+**Capture.** `capture` subscribes like `load` and takes two fenced snapshots through one
+`Observer`, so a workspace focus change at any point fails it. Each snapshot becomes a
+comparison value of container IDs, split axes, child extents, selectors, and the focused
+container; the two must be equal, and neither history may hold a window event other than
+a title, urgency, or mark change. Window payloads lack workspace ancestry and identity
+updates emit no event, hence both rules. One recursive pass validates and converts the
+target subtree directly, since it needs the structure that `locate_windows` flattens:
+windows are `con` nodes with `shell`, `app_id`, or `window`; a one-child container,
+including the workspace, is replaced by its child after its layout is checked; extents
+come from `sibling_dimensions`. Weights are `proportions` as percentages rounded to
+hundredths with a 0.01 floor, which shifts reconstructed shares by under 3 percentage
+points even across 255 siblings. Capture-specific Serde types serialize through
+serde-saphyr with single-line scalars and indented sequences, so ambiguous scalars are
+quoted and control characters escaped; a fixed comment header is prepended. The strict
+`config` types are not reused, and `config` exports its depth and node limits so filled
+drafts stay loadable. Failures report through `diagnostics::notify_failure`, never
+`Diagnostics::start`, so `last-run.log` is untouched.
 
 **Diagnostics.** Each launch replaces `last-run.log` by unlinking it and creating a new
 0600 file with `create_new` (0700 directories), so an existing symlink or hard link is never
@@ -195,8 +240,11 @@ Sway version.
   [`layout`](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c).
 - **Resizing.** In [`resize.c`](https://github.com/swaywm/sway/blob/master/sway/commands/resize.c),
   tiled `resize set ... ppt` converts against the nearest ancestor with the requested axis,
-  or the workspace, and width/height changes redistribute the delta equally among the other
-  siblings. A resize can succeed without changing geometry at minimum sizes. Setting each
+  or the workspace. On the user's Sway (2026-11-09 log), `resize set width` on a first child
+  took the whole delta from the following sibling rather than spreading it over all
+  siblings; resizing children in order therefore converges in one pass. The loop does not
+  depend on either behavior because it remeasures after every command. A resize can
+  succeed without changing geometry at minimum sizes. Setting each
   child's percentage once therefore cannot establish a multi-child ratio; use pixel targets
   from fresh rectangles. [`arrange.c`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c)
   accounts for gaps and integer rounding.
@@ -230,18 +278,20 @@ Reviewed against upstream documentation on 2026-11-09:
 | Need | Decision |
 | --- | --- |
 | CLI | [Clap 4.6.7](https://docs.rs/clap/4.6.7/clap/) with derive, std, help, usage, and error-context; default features disabled. |
-| Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with only `deserialize`; the parser declares Rust 1.89. |
+| Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with `deserialize` and `serialize` (for capture drafts); it declares Rust 1.89. |
 | Field diagnostics | [serde_path_to_error 0.1.20](https://docs.rs/serde_path_to_error/0.1.20/serde_path_to_error/) for nested field paths. |
 | Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html) and swayipc-types 2.0.3 (Serde, serde_json, thiserror 2); no async runtime. |
 | Processes | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, Fuzzel crate, or supervision system. |
 | Errors and logging | Standard-library I/O and contextual `String` errors; add a logging or error crate only for a concrete need. |
 | Tests | `serde_json` as a development dependency, already locked through `swayipc`. |
 
-serde-saphyr brings granit-parser, encoding_rs/encoding_rs_io, smallvec, and
-annotate-snippets; Clap adds its builder, lexer, and derive crates. No declared compiler
-baseline exceeds 1.89, and the locked graph compiles on Rust 1.89.0. Licenses are
-permissive: MIT/Apache-2.0, with Unlicense/MIT for memchr, Unicode-3.0 for unicode-ident,
-and BSD-3-Clause for encoding_rs. A manual review of the RustSec advisory index found no
+serde-saphyr brings granit-parser, encoding_rs/encoding_rs_io, smallvec, num-traits, and
+annotate-snippets for parsing, and base64 0.23, nohash-hasher 0.2, and zmij (already locked
+through serde_json) for serialization; none of those three has further dependencies. Clap
+adds its builder, lexer, and derive crates. No declared compiler baseline exceeds 1.89,
+and the locked graph compiles on Rust 1.89.0. Licenses are permissive: MIT/Apache-2.0,
+with Unlicense/MIT for memchr, Unicode-3.0 for unicode-ident, BSD-3-Clause for
+encoding_rs, and MIT for zmij. A manual review of the RustSec advisory index found no
 applicable advisory; this is not a security guarantee. Do not use the archived
 `serde_yaml`. Before adding a dependency, inspect releases, advisories, license, needed
 features, the transitive graph, and actual MSRV compilation; keep the lockfile committed
@@ -270,9 +320,13 @@ environment values.
 - `swayipc` decoding and socket establishment limits are listed under the findings above.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
-- Precise axis-share measurement and live abort behavior await manual verification.
-- Milestone 3 must settle the capture serialization approach and how `fuzzel --dmenu`
-  reports cancellation (exit status and output) as distinct from failure.
+- Precise axis-share measurement, live abort behavior, and live capture await manual
+  verification.
+- Capture is deliberately sensitive to activity: any window event other than a title,
+  urgency, or mark change fails it, as does focus on a container. It never infers
+  commands or approximates tabbed, stacked, floating, or fullscreen state.
+- Milestone 3C must settle how `fuzzel --dmenu` reports cancellation (exit status and
+  output) as distinct from failure.
 
 ## Manual verification
 
@@ -302,8 +356,8 @@ sleep 5; ./target/release/sway-stage --layouts-dir examples load four-windows
 - `two-foot`: two Foot windows of equal width, left then right; the left one focused.
 - `four-windows`: Firefox at 44% width, middle Foot at 32%, and the right column at 24%;
   inside the column, the upper Foot at 77% height and the lower at 23%; Firefox focused.
-  Shares are sibling dimensions normalized by their sum, excluding gaps, and may differ by
-  up to 5 percentage points.
+  Shares are sibling dimensions normalized by their sum, excluding gaps, and should be
+  within about 1 percentage point; up to 5 is accepted without a warning.
 
 Success exits 0 without stdout. Inspect `last-run.log` after failures. To inspect the
 loaded workspace, run either read-only command below from the terminal and switch back to
@@ -332,3 +386,37 @@ sleep 5; swaymsg -t get_tree | jq '
 `cargo run --locked --example observe_sway` prints ten seconds of events through the
 production observer. It sends only workspace/tree queries and tick fences, which other
 tick subscribers can see.
+
+### Capture
+
+Capture only reads Sway. In the same isolated session, load `four-windows` on an empty
+workspace as above. From the repository root in a terminal on another workspace, run each
+`sleep 5` command and switch to the loaded workspace during its delay:
+
+```sh
+mkdir -p /tmp/sway-stage-capture
+sleep 5; ./target/release/sway-stage capture > /tmp/sway-stage-capture/draft.yaml
+cp /tmp/sway-stage-capture/draft.yaml /tmp/sway-stage-capture/original.yml
+./target/release/sway-stage --layouts-dir /tmp/sway-stage-capture check draft
+```
+
+Expect a horizontal root of `window1`, `window2`, and a vertical split of `window3` and
+`window4`; root weights near 44/32/24 and column weights near 77/23; `focus: window1`; the
+example's app IDs; `command: null` on every window; and an unchanged workspace. `check`
+fails with placeholder instructions. Replace each `command: null` in `draft.yaml` with the
+corresponding command from `examples/four-windows.yaml`, then check, load the draft on a
+new empty workspace, and capture that workspace:
+
+```sh
+./target/release/sway-stage --layouts-dir /tmp/sway-stage-capture check draft
+sleep 5; ./target/release/sway-stage --layouts-dir /tmp/sway-stage-capture load draft
+sleep 5; ./target/release/sway-stage capture > /tmp/sway-stage-capture/recaptured.yml
+diff /tmp/sway-stage-capture/original.yml /tmp/sway-stage-capture/recaptured.yml
+```
+
+The two captures should differ at most in weights, by about 1 percentage point. Then, on
+an arranged workspace, try each refusal in turn, restoring the arrangement between
+attempts: one window floating (`floating toggle`), one fullscreen, `layout tabbed`, and
+`focus parent`. Each capture exits 1 with an explanation on stderr and a notification,
+and leaves its output file empty, since the shell creates it before capture runs.
+`last-run.log` is unchanged throughout (compare `sha256sum` before and after).
