@@ -466,27 +466,34 @@ mod tests {
         assert_eq!(config.focus.as_deref(), Some("browser"));
         assert_eq!(config.window_timeout_ms, 20_000);
         let NodeKind::Split {
-            orientation,
-            children,
+            orientation: root_orientation,
+            children: root_children,
         } = config.layout.value.kind
         else {
             panic!("expected root split");
         };
-        assert!(matches!(orientation, Orientation::Horizontal));
-        assert_eq!(children.len(), 3);
-        assert_eq!(children[0].value.weight, 44.0);
-        assert_eq!(children[1].value.weight, 32.0);
-        assert_eq!(children[2].value.weight, 24.0);
-        let NodeKind::Split {
-            orientation,
-            children,
-        } = &children[2].value.kind
-        else {
-            panic!("expected nested split");
+        assert!(matches!(root_orientation, Orientation::Horizontal));
+        assert_eq!(root_children.len(), 3);
+        assert_eq!(root_children[0].value.weight, 44.0);
+        assert_eq!(root_children[1].value.weight, 32.0);
+        assert_eq!(root_children[2].value.weight, 24.0);
+
+        let NodeKind::Window { id, matcher, .. } = &root_children[0].value.kind else {
+            panic!("expected browser window");
         };
-        assert!(matches!(orientation, Orientation::Vertical));
-        let NodeKind::Window { id, matcher, .. } = &children[0].value.kind else {
-            panic!("expected window");
+        assert_eq!(id, "browser");
+        assert!(matches!(matcher, Matcher::AppId(value) if value == "firefox-esr"));
+
+        let NodeKind::Split {
+            orientation: column_orientation,
+            children: column_children,
+        } = &root_children[2].value.kind
+        else {
+            panic!("expected nested right column split");
+        };
+        assert!(matches!(column_orientation, Orientation::Vertical));
+        let NodeKind::Window { id, matcher, .. } = &column_children[0].value.kind else {
+            panic!("expected upper-right window");
         };
         assert_eq!(id, "upper-right");
         assert!(matches!(matcher, Matcher::AppId(value) if value == "sway-stage-top"));
