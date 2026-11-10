@@ -2,10 +2,14 @@
 """Manual, development-only load/capture checks. Agents must NEVER execute this script.
 
 Run from another workspace: python3 scripts/integration.py --workspace 9
+Add --extended for optional Firefox/Xterm scenarios and repeated Foot app IDs.
 Only the user may run it, in a disposable Sway session. No cleanup follows a failure.
 """
 
 import argparse
+import configparser
+from dataclasses import dataclass
+import itertools
 import json
 import math
 import os
@@ -23,6 +27,7 @@ import time
 
 IPC_TIMEOUT = 4
 WINDOW_TIMEOUT_MS = 20000
+FIREFOX_TIMEOUT_MS = 60000
 TERMINAL_LIFETIME = 300
 HARMLESS_EVENTS = {"title", "urgent", "mark"}
 
@@ -31,16 +36,25 @@ class Failure(Exception):
     pass
 
 
+@dataclass
+class Scenario:
+    name: str
+    layout: dict
+    focus: str
+    window_timeout_ms: int = WINDOW_TIMEOUT_MS
+    skip: str = ""
+
+
 def require(condition, message):
     if not condition:
         raise Failure(message)
 
 
-def run(arguments, operation, timeout=IPC_TIMEOUT):
+def run(arguments, operation, timeout=IPC_TIMEOUT, env=None):
     try:
         result = subprocess.run(
             arguments, stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, encoding="utf-8", timeout=timeout, check=False,
+            text=True, encoding="utf-8", timeout=timeout, check=False, env=env,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
         raise Failure(f"{operation}: {error}") from error
@@ -279,20 +293,133 @@ def scenarios(run_id, foot_binary, sleep_binary):
     ]
     for name, layout, focus in layouts:
         for leaf in leaves(layout):
-            leaf["app_id"] = f"sway-stage-it-{run_id}-{name}-{leaf['id']}"
+            app_id = f"sway-stage-it-{run_id}-{name}-{leaf['id']}"
+            leaf["match"] = {"app_id": app_id}
             # Foot's documented syntax is foot [OPTIONS] command [ARGUMENTS].
             # The bounded child avoids leaving an interactive shell after an aborted run.
-            leaf["command"] = [foot_binary, f"--app-id={leaf['app_id']}", sleep_binary,
+            leaf["command"] = [foot_binary, f"--app-id={app_id}", sleep_binary,
                                str(TERMINAL_LIFETIME)]
-        yield name, layout, focus
+        yield Scenario(name, layout, focus)
 
 
-def yaml_document(layout, focus, shares=None):
+def firefox_window(leaf, firefox_binary, app_id_override, retained_profiles):
+    # Keep profiles outside TemporaryDirectory: a disappearing window or exited launcher
+    # cannot prove that Firefox's other processes have finished using the directory.
+    root = Path(tempfile.mkdtemp(prefix="sway-stage-firefox-"))
+    retained_profiles.append(root)
+    print(f"      Firefox files retained at {root} (remove manually after all its processes exit)",
+          flush=True)
+    profile = root / "profile"
+    profile.mkdir()
+    profile.joinpath("user.js").write_text(
+        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+        'user_pref("browser.aboutwelcome.enabled", false);\n'
+        'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+        'user_pref("startup.homepage_welcome_url", "");\n'
+        'user_pref("startup.homepage_welcome_url.additional", "");\n', encoding="utf-8")
+    child_env = {
+        "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"), "XDG_DATA_HOME": str(root / "data"),
+        "XDG_STATE_HOME": str(root / "state"), "MOZ_ENABLE_WAYLAND": "1",
+        "GDK_BACKEND": "wayland", "XDG_ACTIVATION_TOKEN": "", "DESKTOP_STARTUP_ID": "",
+        # Inherited Firefox restart paths must not override our explicit private profile.
+        "XRE_PROFILE_PATH": "", "XRE_PROFILE_LOCAL_PATH": "", "XRE_PROFILE_NAME": "",
+    }
+
+    app_id = app_id_override
+    if app_id is None:
+        metadata = Path(firefox_binary).resolve().parent / "application.ini"
+        settings = configparser.ConfigParser(interpolation=None)
+        settings.read(metadata, encoding="utf-8")
+        app_id = settings.get("App", "RemotingName", fallback=None)
+        require(app_id, f"cannot determine Firefox Wayland app ID from {metadata}; "
+                "supply --firefox-app-id for this installation")
+    require(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", app_id),
+            "Firefox app ID must be a simple literal identifier")
+    print(f"      Firefox executable={firefox_binary} expected app_id={app_id}", flush=True)
+    # --new-instance is also needed: newer Firefox versions ignore --no-remote.
+    leaf.update({"match": {"app_id": app_id}, "env": child_env, "check_process": True,
+                 "command": [firefox_binary, "--no-remote", "--new-instance", "--profile",
+                             str(profile), "--new-window", "about:blank"]})
+
+
+def xwayland_unavailable():
+    if shutil.which("Xwayland") is None or not os.environ.get("DISPLAY"):
+        return "Xwayland executable or DISPLAY unavailable"
+    # A read-only X query distinguishes a disabled/unreachable X server from an Xterm
+    # launch failure. Do not turn a failed application launch into a skip.
+    query = shutil.which("xdpyinfo")
+    if query is None:
+        return "xdpyinfo unavailable (needed for the read-only Xwayland probe)"
+    try:
+        details = run([query, "-queryExtensions"], "Xwayland availability probe")
+    except Failure as error:
+        return str(error)
+    if "XWAYLAND" not in details:
+        return "DISPLAY does not advertise the XWAYLAND extension"
+    return ""
+
+
+def extended_scenarios(run_id, foot_binary, sleep_binary, app_id_override, retained_profiles):
+    layouts = [
+        Scenario("firefox-two-foot", split("horizontal", [
+            window(1, 44), window(2, 32), window(3, 24),
+        ]), "window2", FIREFOX_TIMEOUT_MS),
+        Scenario("xterm-foot", split("horizontal", [window(1, 3), window(2, 2)]), "window2"),
+        Scenario("nested-firefox-foot", split("horizontal", [
+            window(1, 44), window(2, 32),
+            split("vertical", [window(3, 77), window(4, 23)], 24),
+        ]), "window4", FIREFOX_TIMEOUT_MS),
+        Scenario("duplicate-foot-ids", split("horizontal", [window(1, 3), window(2, 2)]),
+                 "window2"),
+    ]
+    firefox_binary = shutil.which("firefox-esr") or shutil.which("firefox")
+    xterm_binary = shutil.which("xterm")
+    for scenario in layouts:
+        configured_leaves = list(leaves(scenario.layout))
+        for leaf in configured_leaves:
+            app_id = f"sway-stage-it-{run_id}-{scenario.name}-{leaf['id']}"
+            leaf["match"] = {"app_id": app_id}
+            leaf["command"] = [foot_binary, f"--app-id={app_id}", sleep_binary,
+                               str(TERMINAL_LIFETIME)]
+
+        if scenario.name != "xterm-foot" and not os.access("/proc/self/cmdline", os.R_OK):
+            scenario.skip = "Linux /proc process arguments unavailable for ownership checks"
+        elif "firefox" in scenario.name:
+            if firefox_binary is None:
+                scenario.skip = "neither firefox-esr nor firefox is installed"
+            elif not os.environ.get("WAYLAND_DISPLAY"):
+                scenario.skip = "native Wayland display unavailable"
+            else:
+                firefox_window(configured_leaves[0], firefox_binary, app_id_override,
+                               retained_profiles)
+        elif scenario.name == "xterm-foot":
+            scenario.skip = "xterm is not installed" if xterm_binary is None else xwayland_unavailable()
+            if not scenario.skip:
+                leaf = configured_leaves[0]
+                window_class = f"sway-stage-it-{run_id}-xterm"
+                # Xterm -class sets WM_CLASS's class, not its instance. -e must be last.
+                leaf.update({"match": {"class": window_class},
+                             "command": [xterm_binary, "-class", window_class, "+hold", "-e",
+                                         sleep_binary, str(TERMINAL_LIFETIME)]})
+        else:
+            shared_app_id = f"sway-stage-it-{run_id}-duplicate-foot"
+            for leaf in configured_leaves:
+                # Distinct literal argv supplies independent launch evidence even though
+                # both selectors are identical. The title itself is never an ownership key.
+                title = f"{shared_app_id}-{leaf['id']}"
+                leaf.update({"match": {"app_id": shared_app_id}, "check_process": True,
+                             "command": [foot_binary, f"--app-id={shared_app_id}",
+                                         f"--title={title}", sleep_binary, str(TERMINAL_LIFETIME)]})
+        yield scenario
+
+
+def yaml_document(layout, focus, shares=None, window_timeout_ms=WINDOW_TIMEOUT_MS):
     """Emit our fixed schema, also serving as the capture format's expected skeleton."""
     draft = shares is not None
     lines = ["version: 1", f"focus: {focus}"]
     if not draft:
-        lines.append(f"window_timeout_ms: {WINDOW_TIMEOUT_MS}")
+        lines.append(f"window_timeout_ms: {window_timeout_ms}")
     lines.append("layout:")
 
     def emit(configured, indent, path, sequence=False):
@@ -306,8 +433,11 @@ def yaml_document(layout, focus, shares=None):
             fields.append(f"weight: {weight}")
         if "id" in configured:
             command_value = "null" if draft else json.dumps(configured["command"])
+            match_kind, expected_identifier = next(iter(configured["match"].items()))
             fields += [f"command: {command_value}", "match:",
-                       f"  app_id: {configured['app_id']}"]
+                       f"  {match_kind}: {expected_identifier}"]
+            if not draft and "env" in configured:
+                fields.append(f"env: {json.dumps(configured['env'])}")
         else:
             fields.append("children:")
 
@@ -329,9 +459,16 @@ def is_window(container):
     return any(container.get(key) is not None for key in ("app_id", "shell", "window"))
 
 
+def identifier(container, match_kind):
+    if match_kind == "class":
+        return (container.get("window_properties") or {}).get("class")
+    return container.get("app_id")
+
+
 def outline(container):
     children = container.get("nodes", []) + container.get("floating_nodes", [])
-    label = f"{container.get('id')}:{container.get('app_id') or container.get('layout')}"
+    label = (f"{container.get('id')}:"
+             f"{container.get('app_id') or identifier(container, 'class') or container.get('layout')}")
     if children:
         label += "(" + ", ".join(outline(child) for child in children) + ")"
     return label
@@ -349,7 +486,8 @@ def shape(container, events):
     if is_window(container):
         events.require_control(container["type"] == "con" and not container["nodes"],
                 f"malformed window: {outline(container)}")
-        return (container["id"], container.get("app_id"))
+        return (container["id"], (container.get("app_id"), identifier(container, "class"),
+                                  container.get("pid")))
     events.require_control(container["layout"] in {"splith", "splitv"},
             f"unsupported group: {outline(container)}")
     children = tuple(shape(child, events) for child in container["nodes"])
@@ -361,33 +499,103 @@ def shape(container, events):
 def signature(workspace):
     # Ignore titles/urgency/marks and focus history, but include all geometry, identities,
     # state flags, actual wrappers, and current focus. Capture must not change any of it.
-    fields = ("id", "type", "layout", "app_id", "window", "shell", "rect", "focused",
+    fields = ("id", "type", "layout", "app_id", "pid", "window", "shell", "rect", "focused",
               "floating", "fullscreen_mode", "scratchpad_state")
-    return ({key: workspace.get(key) for key in fields},
+    return ({key: workspace.get(key) for key in fields}, identifier(workspace, "class"),
             [signature(child) for child in workspace["nodes"]],
             [signature(child) for child in workspace["floating_nodes"]])
 
 
-def ownership(tree, target, layout, preexisting_ids, events, accepted=None):
-    expected_apps = {leaf["app_id"] for leaf in leaves(layout)}
-    found = {}
-    for container, workspace, unsafe in walk(tree):
-        app_id = container.get("app_id")
-        if app_id not in expected_apps:
+def bind_launches(history, layout, preexisting_ids, events):
+    """Associate sequential launches by new-event order, never by selector uniqueness.
+
+    load launches one leaf at a time and snapshots global identities before each spawn.
+    We independently require one new event per leaf, then check its eventual tree identity
+    and (for Firefox/repeated IDs) private launch argv before accepting cleanup ownership.
+    """
+    new_ids = []
+    for event in history:
+        if event.get("change") == "new":
+            container_id = event["container"]["id"]
+            events.require_control(container_id not in preexisting_ids and container_id not in new_ids,
+                    f"preexisting or repeated new event: id={container_id}")
+            new_ids.append(container_id)
+    configured_leaves = list(leaves(layout))
+    events.require_control(len(new_ids) == len(configured_leaves),
+            f"expected {len(configured_leaves)} sequential new windows, observed IDs {new_ids}")
+    accepted = {container_id: leaf["id"] for container_id, leaf in zip(new_ids, configured_leaves)}
+    leaves_by_id = {leaf["id"]: leaf for leaf in configured_leaves}
+    for event in history:
+        change = event.get("change")
+        container = event["container"]
+        if change in HARMLESS_EVENTS:
             continue
         container_id = container["id"]
-        events.require_control(container_id not in preexisting_ids and workspace is not None
-                and workspace["id"] == target and not unsafe and is_window(container),
-                f"ownership/placement uncertain: id={container_id} app_id={app_id} "
+        events.require_control(change in {"new", "focus"} and container_id in accepted,
+                f"unexpected activity during load: {change} id={container_id}")
+        leaf = leaves_by_id[accepted[container_id]]
+        match_kind, expected_identifier = next(iter(leaf["match"].items()))
+        observed_identifier = identifier(container, match_kind)
+        events.require_control(observed_identifier in (None, expected_identifier),
+                f"event identity differs: id={container_id} {match_kind}={observed_identifier!r}, "
+                f"expected {expected_identifier!r}")
+    return accepted
+
+
+def require_process_command(container, leaf, events):
+    pid = container.get("pid")
+    events.require_control(type(pid) is int and pid > 0,
+            f"no usable Sway process identity: container={container['id']} leaf={leaf['id']}")
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError as error:
+        events.require_control(False, f"cannot verify process argv: pid={pid}: {error}")
+    # argv[0] may differ after an exec through a distribution wrapper. Every other
+    # literal argument must agree, including the private profile or per-leaf Foot title.
+    events.require_control(arguments[-1:] == [b""]
+            and arguments[1:-1] == [os.fsencode(argument) for argument in leaf["command"][1:]],
+            f"process argv does not prove this launch: container={container['id']} "
+            f"pid={pid} leaf={leaf['id']}; refusing cleanup")
+
+
+def ownership(tree, target, layout, preexisting_ids, events, accepted):
+    configured_leaves = list(leaves(layout))
+    leaves_by_id = {leaf["id"]: leaf for leaf in configured_leaves}
+    found = {}
+    for container, workspace, unsafe in walk(tree):
+        container_id = container["id"]
+        on_target = workspace is not None and workspace["id"] == target
+        # Existing Firefox windows elsewhere are expected and must remain untouched.
+        if container_id in preexisting_ids and not on_target:
+            continue
+        matches = any(identifier(container, kind) == expected_identifier
+                      for leaf in configured_leaves
+                      for kind, expected_identifier in leaf["match"].items())
+        if container_id not in accepted and not matches and not (on_target and is_window(container)):
+            continue
+        events.require_control(container_id in accepted and container_id not in preexisting_ids
+                and on_target and not unsafe and is_window(container),
+                f"ownership/placement uncertain: id={container_id} "
+                f"app_id={container.get('app_id')!r} class={identifier(container, 'class')!r} "
                 f"workspace={None if workspace is None else workspace['name']!r}")
-        events.require_control(app_id not in found.values(), f"ambiguous app ID: {app_id}")
-        found[container_id] = app_id
-    if accepted is None:
-        events.require_control(set(found.values()) == expected_apps,
-                f"window identities: expected {sorted(expected_apps)!r}, observed {found!r}")
-    else:
-        events.require_control(found == accepted,
-                f"owned windows changed: expected {accepted!r}, observed {found!r}")
+        leaf = leaves_by_id[accepted[container_id]]
+        match_kind, expected_identifier = next(iter(leaf["match"].items()))
+        events.require_control(identifier(container, match_kind) == expected_identifier,
+                f"owned identity changed: id={container_id} expected {leaf['match']!r}")
+        if match_kind == "class":
+            events.require_control(container.get("app_id") is None
+                    and container.get("window") is not None
+                    and container.get("shell") == "xwayland",
+                    f"expected an Xwayland window with class: {outline(container)}")
+        else:
+            events.require_control(container.get("shell") == "xdg_shell"
+                    and container.get("window") is None,
+                    f"expected a native Wayland window: {outline(container)}")
+        if leaf.get("check_process"):
+            require_process_command(container, leaf, events)
+        found[container_id] = leaf["id"]
+    events.require_control(found == accepted,
+            f"owned windows changed: expected {accepted!r}, observed {found!r}")
     return found
 
 
@@ -396,13 +604,14 @@ def verify_layout(workspace, layout, focus, accepted, events):
     observed_leaves = [container for container, _, _ in walk(workspace) if is_window(container)]
     events.require_control({container["id"] for container in observed_leaves} == set(accepted),
             f"unexpected windows: {outline(workspace)}")
-    events.require_control([container["app_id"] for container in observed_leaves]
-            == [leaf["app_id"] for leaf in leaves(layout)],
+    container_ids = {leaf_id: container_id for container_id, leaf_id in accepted.items()}
+    events.require_control([container["id"] for container in observed_leaves]
+            == [container_ids[leaf["id"]] for leaf in leaves(layout)],
             f"window order differs: {outline(workspace)}")
     focused = [container for container, _, _ in walk(workspace) if container.get("focused")]
-    focus_app = next(leaf["app_id"] for leaf in leaves(layout) if leaf["id"] == focus)
-    events.require_control(len(focused) == 1 and focused[0].get("app_id") == focus_app,
-            f"final focus differs: expected {focus_app}, observed {outline(workspace)}")
+    events.require_control(len(focused) == 1 and focused[0]["id"] == container_ids[focus],
+            f"final focus differs: expected {focus} id={container_ids[focus]}, "
+            f"observed {outline(workspace)}")
     shares = {}
     diagnostics = []
 
@@ -410,7 +619,8 @@ def verify_layout(workspace, layout, focus, accepted, events):
         while not is_window(observed) and len(observed["nodes"]) == 1:
             observed = observed["nodes"][0]
         if "id" in configured:
-            events.require_control(is_window(observed) and observed["app_id"] == configured["app_id"],
+            expected_id = container_ids[configured["id"]]
+            events.require_control(is_window(observed) and observed["id"] == expected_id,
                     f"{path}: expected {configured['id']}, observed {outline(observed)}")
             return
         axis = "splith" if configured["split"] == "horizontal" else "splitv"
@@ -436,7 +646,8 @@ def verify_layout(workspace, layout, focus, accepted, events):
         detail = (f"{path or 'root'} {axis}: expected [{requested_text}], "
                   f"observed [{measured_text}] percent; "
                   f"container={observed['id']}")
-        require(max(deviations) <= 5 + 1e-9, f"sizing exceeds 5 percentage points: {detail}")
+        require(max(deviations) <= 5 + 1e-9,
+                f"sizing exceeds 5 percentage points (check application minimum sizes): {detail}")
         if max(deviations) > 1 + 1e-9:
             diagnostics.append(detail)
         for child_index, (expected_child, observed_child) in enumerate(
@@ -483,7 +694,7 @@ def verify_capture(draft, layout, focus, shares, directory, binary):
             require(math.isfinite(weight) and abs(weight - float(expected_scalar)) <= 0.02,
                     f"capture sizing: {actual_line!r}, expected {expected_line!r}")
         else:
-            if key in {"id", "focus", "app_id", "split"}:
+            if key in {"id", "focus", "app_id", "class", "split"}:
                 # Our generated identifiers contain no YAML punctuation or escapes.
                 scalar = scalar.removeprefix('"').removesuffix('"')
                 scalar = scalar.removeprefix("'").removesuffix("'")
@@ -518,7 +729,7 @@ def cleanup(sway, events, layout, preexisting_ids, accepted, baseline):
         events.require_control(signature(workspace) == signature(baseline),
                 "workspace changed before cleanup; ownership/state uncertain")
         expected_after = remove_from_shape(shape(workspace, events), closing_id)
-        expected_remaining = {container_id: app_id for container_id, app_id in remaining.items()
+        expected_remaining = {container_id: leaf_id for container_id, leaf_id in remaining.items()
                               if container_id != closing_id}
 
         # The only destructive command in the harness. All evidence above is refreshed
@@ -588,16 +799,28 @@ def restore(sway, events, original, disposable_name):
     return "Original workspace restored."
 
 
-def report_remaining(sway, run_id, known):
-    print("No further cleanup attempted. Test terminals expire after 300 seconds.", file=sys.stderr)
+def report_remaining(sway, run_id, known, layout, preexisting_ids):
+    print("No further cleanup attempted. Test terminals expire after 300 seconds; "
+          "Firefox has no lifetime limit.", file=sys.stderr)
+    print(f"  Last associated container IDs -> layout IDs: {known!r}", file=sys.stderr)
+    expected_selectors = [leaf["match"] for leaf in leaves(layout)] if layout else []
     try:
         tree = ipc(sway, "get_tree")
         for container, workspace, unsafe in walk(tree):
             app_id = container.get("app_id") or ""
-            if app_id.startswith(f"sway-stage-it-{run_id}-"):
+            window_class = identifier(container, "class") or ""
+            matches = any(identifier(container, kind) == expected_identifier
+                          for matcher in expected_selectors
+                          for kind, expected_identifier in matcher.items())
+            if (container["id"] in known or matches
+                    or (preexisting_ids is not None and container["id"] not in preexisting_ids
+                        and is_window(container))
+                    or any(value.startswith(f"sway-stage-it-{run_id}-")
+                           for value in (app_id, window_class))):
                 print(f"  observed id={container['id']} app_id={app_id} "
+                      f"class={window_class!r} pid={container.get('pid')} "
                       f"workspace={None if workspace is None else workspace['name']!r} "
-                      f"unsafe_state={unsafe}", file=sys.stderr)
+                      f"unsafe_state={unsafe} (candidate only; ownership not implied)", file=sys.stderr)
     except (Failure, OSError, ValueError, KeyError, TypeError) as error:
         print(f"  Remaining windows could not be queried: {error}; last accepted={known!r}",
               file=sys.stderr)
@@ -612,6 +835,10 @@ def workspace_argument(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", required=True, type=workspace_argument)
+    parser.add_argument("--extended", action="store_true",
+                        help="also test Firefox, Xterm/Xwayland, and duplicate Foot app IDs")
+    parser.add_argument("--firefox-app-id",
+                        help="exact native Firefox app ID, overriding application.ini RemotingName")
     parser.add_argument("--binary", default=str(
         Path(__file__).resolve().parents[1] / "target/release/sway-stage"))
     arguments = parser.parse_args()
@@ -620,8 +847,12 @@ def main():
     switch_attempted = False
     passed = 0
     failed = 0
+    skipped = 0
     stage = "preflight"
     known = {}
+    layout = None
+    preexisting_ids = None
+    retained_profiles = []
     run_id = secrets.token_hex(12)
     sway = None
     restoration = None
@@ -648,10 +879,15 @@ def main():
         with tempfile.TemporaryDirectory(prefix="sway-stage-integration-") as temporary:
             directory = Path(temporary)
             prepared = list(scenarios(run_id, executables["foot"], executables["sleep"]))
-            for name, layout, focus in prepared:
-                (directory / f"{name}.yaml").write_text(
-                    yaml_document(layout, focus), encoding="utf-8")
-                run([binary, "--layouts-dir", temporary, "check", name], f"check {name}")
+            for scenario in prepared:
+                (directory / f"{scenario.name}.yaml").write_text(
+                    yaml_document(scenario.layout, scenario.focus), encoding="utf-8")
+                run([binary, "--layouts-dir", temporary, "check", scenario.name],
+                    f"check {scenario.name}")
+            if arguments.extended:
+                prepared = itertools.chain(prepared, extended_scenarios(
+                    run_id, executables["foot"], executables["sleep"],
+                    arguments.firefox_app_id, retained_profiles))
 
             # Recheck all preconditions after preparation, immediately before switching.
             original, designated_id = preflight(sway, events, arguments.workspace)
@@ -665,47 +901,37 @@ def main():
                     "disposable workspace identity changed during the switch")
             empty(workspace)
 
-            for name, layout, focus in prepared:
+            for scenario in prepared:
+                name, layout, focus = scenario.name, scenario.layout, scenario.focus
                 stage = f"{name}: empty-workspace precondition"
                 known = {}
                 tree, _, workspace, history = snapshot(sway, events)
                 require_quiet(history, events)
                 empty(workspace)
+                if scenario.skip:
+                    skipped += 1
+                    print(f"SKIP  {name:19} {scenario.skip}", flush=True)
+                    stage = "scenario preparation"
+                    continue
                 preexisting_ids = {container["id"] for container, _, _ in walk(tree)}
 
+                layout_path = directory / f"{name}.yaml"
+                if not layout_path.exists():
+                    stage = f"{name}: check"
+                    layout_path.write_text(
+                        yaml_document(layout, focus, window_timeout_ms=scenario.window_timeout_ms),
+                        encoding="utf-8")
+                    run([binary, "--layouts-dir", temporary, "check", name], stage)
+
                 stage = f"{name}: load"
-                timeout = len(list(leaves(layout))) * WINDOW_TIMEOUT_MS / 1000 + 30
+                timeout = len(list(leaves(layout))) * scenario.window_timeout_ms / 1000 + 30
                 load_output = run([binary, "--layouts-dir", temporary, "load", name], stage, timeout)
                 require(not load_output.strip(), "load produced unexpected stdout")
 
                 stage = f"{name}: raw-tree verification"
                 tree, _, workspace, history = snapshot(sway, events)
-                expected_apps = {leaf["app_id"] for leaf in leaves(layout)}
-                observed_windows = {}
-                for event in history:
-                    change = event.get("change")
-                    container = event["container"]
-                    if change in HARMLESS_EVENTS:
-                        continue
-                    app_id = container.get("app_id")
-                    events.require_control(change in {"new", "focus"}
-                            and container["id"] not in preexisting_ids
-                            and (app_id is None or app_id in expected_apps),
-                            f"unexpected activity during load: {change} id={container['id']}")
-                    previous_app = observed_windows.get(container["id"])
-                    events.require_control(previous_app is None or app_id in (None, previous_app),
-                            f"event identity changed during load: id={container['id']} "
-                            f"app_id={previous_app!r} -> {app_id!r}")
-                    # Keep null identities provisional, and retain any known identity so
-                    # a later event or tree cannot silently substitute another window.
-                    if container["id"] not in observed_windows or app_id is not None:
-                        observed_windows[container["id"]] = app_id
-                known = ownership(tree, workspace["id"], layout, preexisting_ids, events)
-                for container_id, observed_app in observed_windows.items():
-                    events.require_control(container_id in known
-                            and (observed_app is None or observed_app == known[container_id]),
-                            f"event window did not resolve to an accepted window: "
-                            f"id={container_id} event_app_id={observed_app!r}")
+                known = bind_launches(history, layout, preexisting_ids, events)
+                ownership(tree, workspace["id"], layout, preexisting_ids, events, known)
                 shares, sizing_notes = verify_layout(workspace, layout, focus, known, events)
                 before_capture = signature(workspace)
 
@@ -727,16 +953,18 @@ def main():
                 print(f"PASS  {name:19} hierarchy, sizing, focus, identity, capture", flush=True)
                 for note in sizing_notes:
                     print(f"      above 1-point sizing target: {note}", flush=True)
+                stage = "scenario preparation"
             stage = "final restoration"
             restoration = restore(sway, events, original, arguments.workspace)
             require(restoration == "Original workspace restored.", restoration)
-    except (Failure, OSError, ValueError, KeyError, TypeError, StopIteration, KeyboardInterrupt) as error:
+    except (Failure, OSError, ValueError, KeyError, TypeError, StopIteration,
+            configparser.Error, KeyboardInterrupt) as error:
         failed = 1
         if isinstance(error, KeyboardInterrupt) and events is not None:
             events.focus_safe = False
         print(f"FAIL  {stage}: {error or 'interrupted'}", file=sys.stderr, flush=True)
         if switch_attempted and sway is not None:
-            report_remaining(sway, run_id, known)
+            report_remaining(sway, run_id, known, layout, preexisting_ids)
         if switch_attempted and original is not None and stage != "final restoration":
             try:
                 restoration = restore(sway, events, original, arguments.workspace)
@@ -749,7 +977,10 @@ def main():
             except (OSError, subprocess.TimeoutExpired) as error:
                 failed = 1
                 print(f"FAIL  event helper shutdown: {error}", file=sys.stderr)
-    print(f"\n{passed} passed, {failed} failed")
+    print(f"\n{passed} passed, {failed} failed, {skipped} skipped")
+    for profile_root in retained_profiles:
+        print(f"Retained Firefox files: {profile_root}; "
+              "remove only after all associated processes exit.")
     if restoration:
         print(restoration)
     return 1 if failed else 0

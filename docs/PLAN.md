@@ -8,7 +8,7 @@ justify them.
 
 ## Status
 
-Implemented through milestone 3B (harness execution awaits the user):
+Implemented through milestone 3B (extended harness execution awaits the user):
 
 - Layout discovery, `list`, and `check` with strict YAML validation.
 - `load` for a root window and arbitrarily nested splits, with relative weights applied by
@@ -19,8 +19,9 @@ Implemented through milestone 3B (harness execution awaits the user):
   identifier, `match: null`) placeholders.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
-- Development-only `scripts/integration.py`: six Foot scenarios with independent raw-tree
-  verification, capture checks, guarded cleanup, and workspace restoration.
+- Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
+  scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
+  workspace restoration.
 
 Remaining: the Fuzzel picker (3C), then public release preparation (4).
 
@@ -31,11 +32,11 @@ applications. They never use the user's `SWAYSOCK` and do not simulate Sway's wi
 manager. One CLI test runs `capture` end to end against a fake Sway socket bound in its
 temporary directory; sandboxes that forbid binding Unix sockets fail it.
 
-The user has manually verified, on Sway, construction of the single-Foot, two-Foot, and
-four-window Firefox/Foot examples, and Firefox focus after the four-window load with
-parent-area values consistent with the sizing tolerance. Still unverified live: `capture`,
-precise normalized axis shares, abort behavior under real interference, keybinding launch
-contexts, multi-seat behavior, and a supported Sway version.
+The user has manually verified all six original Foot integration scenarios, including
+raw-tree sizing/focus and read-only capture checks, as well as construction of the
+single-Foot, two-Foot, and four-window Firefox/Foot examples. Still unverified live: the
+extended scenarios, abort behavior under real interference, keybinding launch contexts,
+multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
 
@@ -53,8 +54,9 @@ contexts, multi-seat behavior, and a supported Sway version.
   focus.
 - **3A. Read-only capture.** `capture` (`src/capture.rs`) drafts the focused workspace from
   two agreeing fenced observations and refuses unrepresentable arrangements.
-- **3B. Integration harness implementation.** `scripts/integration.py`; static review and
-  syntax validation only. The user's first live run remains outstanding.
+- **3B. Integration harness.** The six original Foot scenarios passed the user's manual
+  runs. Four optional extended scenarios have received static review and syntax validation;
+  their live acceptance remains with the user.
 
 ## 3B. Self-contained Sway integration harness
 
@@ -63,6 +65,12 @@ and `swaymsg`. It generates temporary YAML outside normal layout discovery and e
 single-window, horizontal-pair, vertical-pair, uneven-sibling, mixed-nesting, and deep-nesting
 layouts, including a meaningful horizontal group inside another horizontal group. Each Foot
 gets a random run/scenario/window app ID and runs `sleep 300`, with no shell or hold option.
+
+`--extended` appends Firefox with two Foot windows, Xterm with Foot, nested Firefox with
+three Foot windows (44:32:24 widths and 77:23 right-column heights), and two Foot windows
+sharing an app ID. All select an explicit non-first Foot focus target. Unavailable optional
+applications/subsystems produce `SKIP`; option, launch, identity, geometry, or capture
+failures with available applications produce `FAIL` and stop the suite.
 
 The independent verifier checks exact identities and leaf count, visual order, split axes,
 meaningful hierarchy, final focus, and rectangle-based normalized sibling shares at every
@@ -78,12 +86,41 @@ is the persistent `swaymsg` workspace/window/tick subscription, with bounded rea
 shutdown, needed to retain away-and-back focus history. Snapshot tick fences and fresh
 guards reduce races; they cannot provide transactional isolation. Any focus switch,
 unexpected structural activity, IPC failure, or uncertainty aborts. No scenario follows a
-failure. Cleanup requires globally new container IDs, exact app IDs, the designated
-workspace, safe tiled state, and the verified arrangement. Each exact-ID close is guarded
-by a new snapshot; disappearance and the remaining hierarchy are checked afterwards.
+failure. Ordered `window::new` events associate sequential launches with layout IDs;
+selectors alone never establish cleanup ownership. Cleanup requires globally new container
+IDs, exact app IDs or Xwayland classes, the designated workspace, safe tiled state, and
+the verified arrangement. Firefox and repeated-ID Foot windows additionally require
+Sway's PID to expose the expected literal launch arguments through `/proc/PID/cmdline`:
+the private browser profile or a distinct per-leaf Foot `--title` argument. Titles from
+the tree are not ownership evidence. Existing Firefox windows elsewhere are ignored;
+extra new matches anywhere, missing events, or uncertain process evidence abort without
+closing anything. Each exact-ID close is guarded by a new snapshot; disappearance and
+the remaining hierarchy are checked afterwards.
 Failure paths never attempt further closes, moves, process termination, repairs, or
 relaunches, and report observed test IDs/app IDs for manual inspection. Only the harness's
 own `swaymsg` subscription process is terminated on exit.
+
+Firefox uses a fresh private profile, HOME, and XDG directories per scenario, with local
+first-run preferences, `--no-remote --new-instance --profile`, and
+`about:blank`. Native Wayland is required via child-only environment settings. A bounded,
+display-disconnected help probe checks the installed variant's profile, new-instance, and
+new-window options. The expected app ID comes from its adjacent `application.ini`
+`App.RemotingName` (including `firefox-esr`), or an explicit `--firefox-app-id` override;
+the observed native identity must agree. Both remoting flags are deliberate: newer
+[Mozilla startup code](https://github.com/mozilla/gecko-dev/blob/master/toolkit/xre/nsAppRunner.cpp)
+ignores `--no-remote`, whereas `--new-instance` disables remote-client delegation.
+Browser layouts allow 60 seconds per window; other layouts retain 20 seconds. The
+configuration has one timeout shared by all leaves, so the Foot waits in browser layouts
+also receive that bound. Sizing tolerances are unchanged; minimum-size violations fail.
+
+Browser files are deliberately retained outside the automatically removed YAML directory,
+on success and failure, and their paths are printed. Closing a window cannot prove that
+all Firefox processes have exited; no process scanning, killing, or profile deletion is
+attempted. The user must remove these directories only after all associated processes
+exit. Firefox has no automatic lifetime limit. Xterm uses a unique `-class`, verified as
+`window_properties.class` with no native app ID, and `+hold -e sleep 300` (the final
+`-e` consumes the remaining command arguments). See the
+[Xterm manual](https://invisible-island.net/xterm/manpage/xterm.html).
 
 Restoration is independent of cleanup: it requires reliable focus history, the disposable
 workspace still focused, and the original workspace's recorded identity and name still
@@ -91,9 +128,9 @@ present. Otherwise it is skipped; an empty original workspace destroyed by Sway 
 recreated. A concurrent user action can still occur after the last guard and before a
 command, so run only in a disposable session and leave input idle.
 
-Manual acceptance remains outstanding: the user must confirm that all six scenarios run
-unattended in an isolated session and that failures stop safely with useful diagnostics.
-No live execution by an agent is permitted, including help, partial runs, or trial runs.
+Extended manual acceptance remains outstanding, as does verification that interference
+stops safely with useful diagnostics. No live execution by an agent is permitted,
+including help, partial runs, or trial runs.
 
 ## 3C. Fuzzel picker
 
@@ -337,8 +374,7 @@ environment values.
 - `swayipc` decoding and socket establishment limits are listed under the findings above.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
-- Precise axis-share measurement, live abort behavior, and live capture await manual
-  verification.
+- Extended application coverage and live abort behavior await manual verification.
 - Capture is deliberately sensitive to activity: any window event other than a title,
   urgency, or mark change fails it, as does focus on a container. It never infers
   commands or approximates tabbed, stacked, floating, or fullscreen state.
@@ -362,7 +398,7 @@ The starting name must contain only ASCII letters/digits, spaces, or `_ . : + -`
 with a letter/digit, so restoration needs no command escaping. Agents must never execute
 this script, even with `--help`; only syntax parsing and static review are allowed.
 
-From the repository root, the user's first run is:
+From the repository root, the original six-scenario invocation remains:
 
 ```sh
 python3 scripts/integration.py --workspace 9
@@ -372,9 +408,30 @@ Use `--binary /absolute/path/to/sway-stage` to select another build. The script 
 and switches to the requested empty workspace, runs all six scenarios with guarded cleanup
 between them, and restores the original workspace when safe. It never chooses an alternate
 target. A failure stops the run and leaves remaining windows alone; their bounded commands
-normally expire within five minutes of launch. Read the reported IDs/app IDs before any
-manual intervention. Workspace/window rules, minimum sizes, gaps, activity, or version
-differences may cause a conservative failure; no live compatibility claim is made yet.
+normally expire within five minutes of launch. Read the reported container IDs, app IDs,
+classes, and PIDs before any manual intervention. Workspace/window rules, minimum sizes,
+gaps, activity, or version differences may cause a conservative failure.
+
+The optional extended run, after those six scenarios, is:
+
+```sh
+python3 scripts/integration.py --workspace 9 --extended
+```
+
+Additional prerequisites: native `firefox-esr` (preferred) or `firefox` on `PATH`, a valid
+`WAYLAND_DISPLAY`, and readable `/proc/PID/cmdline` for browser and repeated-ID Foot
+ownership checks. Firefox must support the probed options and keep its literal launch
+arguments visible; packaging wrappers or sandboxed builds that obscure this evidence fail
+conservatively. If adjacent application metadata is unavailable or the distribution uses
+another app ID, add `--firefox-app-id EXACT_ID` after verifying it for that installation.
+No normal Firefox profile is used. Retained temporary browser directories need manual
+removal after all associated processes exit, including after successful runs.
+
+Xterm coverage additionally requires `xterm`, `Xwayland`, and `xdpyinfo` on `PATH`, with
+`DISPLAY` pointing to the disposable session's reachable Xwayland server advertising the
+`XWAYLAND` extension. The bounded read-only `xdpyinfo -queryExtensions` probe skips an
+unavailable server (or missing probe); a later Xterm launch or class mismatch fails.
+Keep the disposable session idle throughout. Extended scenarios have not yet been run live.
 
 ### Individual examples
 
