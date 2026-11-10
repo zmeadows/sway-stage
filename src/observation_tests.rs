@@ -61,6 +61,82 @@ fn focus_during_initial_snapshot_is_not_discarded() {
 }
 
 #[test]
+fn target_workspace_move_away_and_back_is_a_sticky_failure() {
+    let (mut observer, mut events) = initialized();
+    // The final tree retains both the original focus and output; event history still wins.
+    send(&mut events, WORKSPACE, workspace_move(10));
+    send(&mut events, WORKSPACE, workspace_move(10));
+    let error = snapshot(&mut observer, &mut events, workspaces(), tree())
+        .err()
+        .unwrap();
+    assert!(error.contains("moved to another output"), "{error}");
+    assert!(observer.next_until(deadline()).is_err());
+}
+
+#[test]
+fn target_move_during_initial_fence_is_rejected() {
+    let (mut observer, mut events) = subscribed();
+    send(&mut events, WORKSPACE, workspace_move(10));
+    let error = snapshot(&mut observer, &mut events, workspaces(), tree())
+        .err()
+        .unwrap();
+    assert!(error.contains("moved to another output"), "{error}");
+}
+
+#[test]
+fn changed_output_in_tree_without_move_event_is_a_sticky_failure() {
+    let (mut observer, mut events) = subscribed();
+    let original = multi_output(tree());
+    snapshot(
+        &mut observer,
+        &mut events,
+        multi_output_workspaces(),
+        original.clone(),
+    )
+    .unwrap();
+    let migrated = move_target_to_second_output(original);
+    let mut workspaces = multi_output_workspaces();
+    workspaces[0]["output"] = json!("HDMI-A-1");
+    let error = snapshot(&mut observer, &mut events, workspaces, migrated)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("changed output from id=2 to id=3"),
+        "{error}"
+    );
+    assert!(observer.next_until(deadline()).is_err());
+}
+
+#[test]
+fn unrelated_workspace_move_and_output_reconfiguration_keep_target_valid() {
+    let (mut observer, mut events) = subscribed();
+    let mut desktop = multi_output(tree());
+    snapshot(
+        &mut observer,
+        &mut events,
+        multi_output_workspaces(),
+        desktop.clone(),
+    )
+    .unwrap();
+
+    let unrelated = desktop["nodes"][1]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    desktop["nodes"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(unrelated);
+    desktop["nodes"][0]["rect"]["width"] = json!(200);
+    let mut workspaces = multi_output_workspaces();
+    workspaces[1]["output"] = json!("fixture");
+    send(&mut events, WORKSPACE, workspace_move(11));
+    let snapshot = snapshot(&mut observer, &mut events, workspaces, desktop).unwrap();
+    assert_eq!(snapshot.target, 10);
+    assert_eq!(snapshot.events.len(), 1);
+}
+
+#[test]
 fn idle_deadlines_preserve_later_events_and_partial_frames() {
     for split in [5, 14, 30] {
         let (mut observer, mut events) = initialized();

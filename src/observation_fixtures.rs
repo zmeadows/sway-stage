@@ -95,6 +95,45 @@ pub(crate) fn workspaces() -> Value {
     }])
 }
 
+pub(crate) fn multi_output(mut tree: Value) -> Value {
+    tree["nodes"][0]["name"] = json!("fixture");
+    let mut other_window = node(90, "con", false);
+    other_window["app_id"] = json!("unrelated");
+    other_window["shell"] = json!("xdg_shell");
+    let mut other_workspace = node(11, "workspace", false);
+    other_workspace["nodes"] = json!([other_window]);
+    let mut other_output = node(3, "output", false);
+    other_output["name"] = json!("HDMI-A-1");
+    other_output["nodes"] = json!([other_workspace]);
+    tree["nodes"].as_array_mut().unwrap().push(other_output);
+    tree
+}
+
+pub(crate) fn multi_output_workspaces() -> Value {
+    let mut workspaces = workspaces();
+    let mut other_workspace = workspaces[0].clone();
+    other_workspace["id"] = json!(11);
+    other_workspace["num"] = json!(2);
+    other_workspace["name"] = json!("2");
+    other_workspace["focused"] = json!(false);
+    other_workspace["output"] = json!("HDMI-A-1");
+    workspaces.as_array_mut().unwrap().push(other_workspace);
+    workspaces
+}
+
+pub(crate) fn move_target_to_second_output(mut tree: Value) -> Value {
+    let target = tree["nodes"][0]["nodes"].as_array_mut().unwrap().remove(0);
+    tree["nodes"][1]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(target);
+    tree
+}
+
+pub(crate) fn workspace_move(id: i64) -> Value {
+    json!({"change": "move", "current": node(id, "workspace", id == 10), "old": null})
+}
+
 pub(crate) fn focus(id: i64, old: i64) -> Value {
     json!({"change": "focus", "current": node(id, "workspace", true),
         "old": node(old, "workspace", false)})

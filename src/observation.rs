@@ -55,6 +55,8 @@ pub struct Observer {
     failure: Arc<Mutex<Option<String>>>,
     /// The focused workspace frozen by the first snapshot.
     target: Option<i64>,
+    /// Containing output's container ID, frozen with the target workspace.
+    target_output: Option<i64>,
 }
 
 impl Observer {
@@ -109,6 +111,7 @@ impl Observer {
             messages,
             failure,
             target: None,
+            target_output: None,
         };
         match observer.receive(deadline)? {
             Some(Message::Subscribed) => Ok(observer),
@@ -197,6 +200,13 @@ impl Observer {
                     {
                         return self.fail("target workspace was destroyed".into());
                     }
+                    if workspace.change == WorkspaceChange::Move && Some(current.id) == self.target
+                    {
+                        return self.fail(format!(
+                            "target workspace id={} moved to another output",
+                            current.id
+                        ));
+                    }
                 }
 
                 if let Event::Window(window) = &event
@@ -217,6 +227,17 @@ impl Observer {
     /// Each snapshot uses a separate, disposable query connection. The temporary query
     /// thread makes even a stalled/fragmented reply subject to the same monotonic deadline.
     pub fn snapshot(&mut self, socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
+        self.snapshot_for_workspace(socket, deadline, None)
+    }
+
+    /// Constrains initial target selection to a saved pre-menu workspace, when supplied.
+    /// The comparison and event fence belong to the same observation used by construction.
+    pub fn snapshot_for_workspace(
+        &mut self,
+        socket: UnixStream,
+        deadline: Instant,
+        expected_workspace: Option<i64>,
+    ) -> Result<Snapshot, String> {
         self.healthy()?;
         let control = socket
             .try_clone()
@@ -284,6 +305,13 @@ impl Observer {
         {
             return self.fail(format!("snapshot: focus left target id={previous}"));
         }
+        if let Some(expected) = expected_workspace
+            && expected != target
+        {
+            return self.fail(format!(
+                "snapshot: focused workspace id={target} differs from pre-menu workspace id={expected}; keep the original workspace focused"
+            ));
+        }
         self.target = Some(target);
 
         let mut container_ids = HashSet::new();
@@ -301,6 +329,22 @@ impl Observer {
         {
             return self.fail("snapshot: workspace/tree focus is inconsistent".into());
         }
+
+        let Some(output) = tree.nodes.iter().find(|container| {
+            container.node_type == NodeType::Output
+                && container.find_as_ref(|node| node.id == target).is_some()
+        }) else {
+            return self.fail("snapshot: target workspace has no containing output".into());
+        };
+        if let Some(original_output) = self.target_output
+            && output.id != original_output
+        {
+            return self.fail(format!(
+                "snapshot: target workspace id={target} changed output from id={original_output} to id={}",
+                output.id
+            ));
+        }
+        self.target_output = Some(output.id);
 
         let mut events = Vec::new();
         loop {

@@ -101,7 +101,7 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
-    load_named(name, layouts_dir, &mut diagnostics)
+    load_named(name, layouts_dir, Ok(None), &mut diagnostics)
         .map_err(|error| diagnostics.report_failure(error))
 }
 
@@ -110,6 +110,7 @@ fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load_named(
     name: &str,
     layouts_dir: Option<PathBuf>,
+    expected_workspace: Result<Option<i64>, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
     let path = find_layout(name, layouts_dir)?;
@@ -118,7 +119,9 @@ fn load_named(
         "validated layout {name:?} from {}",
         path.display()
     ));
-    launch::load(&config, diagnostics).map_err(|error| format!("layout {name:?}: {error}"))
+    // Validate the selected layout before surfacing a deferred pre-menu snapshot error.
+    launch::load(&config, expected_workspace?, diagnostics)
+        .map_err(|error| format!("layout {name:?}: {error}"))
 }
 
 /// Resolves a layout name to its discovered file. Parses no layout contents.
@@ -159,8 +162,7 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
 }
 
 fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {
-    // Snapshot failure matters only if Capture is selected. Loading observes its own
-    // target after Fuzzel exits; cancellation needs neither a tree nor a valid layout.
+    // Defer snapshot failure until an action needs it; cancellation needs no tree.
     let snapshot = capture::snapshot();
     let output_name = snapshot.as_ref().ok().and_then(|saved| saved.output_name());
     let action = menu::select(layouts_dir.clone(), output_name).map_err(report_menu_failure)?;
@@ -169,7 +171,11 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
         Some(menu::Action::Load(name)) => {
             let mut diagnostics = Diagnostics::start("menu");
             diagnostics.stage(format!("menu load {name:?}: validation"));
-            load_named(&name, layouts_dir, &mut diagnostics)
+            let expected_workspace = snapshot
+                .as_ref()
+                .map(|saved| Some(saved.workspace_id()))
+                .map_err(|error| format!("pre-menu workspace snapshot: {error}"));
+            load_named(&name, layouts_dir, expected_workspace, &mut diagnostics)
                 .map_err(|error| diagnostics.report_failure(error))
         }
         Some(menu::Action::Capture) => {

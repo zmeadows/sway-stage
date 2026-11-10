@@ -43,6 +43,11 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Focused workspace identity established from the saved tree, before any menu opens.
+    pub fn workspace_id(&self) -> i64 {
+        self.target
+    }
+
     fn from_tree(tree: Node) -> Result<Self, String> {
         if tree.node_type != NodeType::Root {
             return Err("snapshot: invalid tree root".into());

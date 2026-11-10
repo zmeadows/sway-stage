@@ -10,7 +10,7 @@ without hand-written `swaymsg` sequences.
 
 It is deliberately cautious. It never touches windows it did not launch, and it stops
 instead of guessing when something unexpected happens: the workspace is occupied, focus
-moves away, or a window appears in the wrong place.
+moves away, the target moves to another output, or a window appears in the wrong place.
 
 **Status:** early development; there is no release yet. `load`, `list`, `check`,
 `capture`, and `menu` are implemented. Automated tests run offline against recorded Sway IPC
@@ -102,12 +102,14 @@ bindsym $mod+Shift+d exec sway-stage load dev
 swaymsg workspace 9 && sway-stage load dev
 ```
 
-Keep the target workspace focused until `sway-stage` exits. A successful `load` prints
-nothing and exits 0; failures exit 1 and invalid usage exits 2.
+Keep the target workspace focused and on its original output until `sway-stage` exits.
+A successful `load` prints nothing and exits 0; failures exit 1 and invalid usage exits 2.
 
 `menu` lists `Load: NAME` entries and a `Capture current layout…` action, even if no
-layouts exist. Loading still requires an empty workspace at load time. Capture saves the
-arrangement from before the menu opened; later focus changes do not alter it. Both prompts
+layouts exist. Loading targets the workspace focused before Fuzzel opens and refuses if a
+different workspace is focused when it exits; it never restores focus automatically. The
+target must still be empty at load time. Capture saves the arrangement from before the
+menu opened; later focus changes do not alter it. Both prompts
 use the original monitor when known. After asking for a name, it saves `NAME.yaml` in the
 layouts directory: `--layouts-dir PATH` if given, otherwise
 `$XDG_CONFIG_HOME/sway-stage/layouts` (by default `~/.config/sway-stage/layouts`). Names
@@ -156,7 +158,8 @@ prints nothing to stdout.
 
 - `sway-stage` never chooses, creates, or switches workspaces or outputs. Any tiled or
   floating occupant of the target, even an empty container, makes `load` refuse to start.
-- Switching away from the target, even briefly, stops the run.
+- During construction, switching away from the target, even briefly, or moving it to
+  another output stops the run. The target workspace and containing output stay fixed.
 - Only windows that appear after each launch can match. A matching window on another
   workspace, two new matching windows, a matching window that is floating or fullscreen,
   or an unexpected window entering the target stops the run. Give each window a

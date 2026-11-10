@@ -594,7 +594,7 @@ fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
     desktop["nodes"][0]["name"] = json!("DP-1");
     desktop["nodes"][0]["nodes"][0]["name"] = json!("named-workspace");
     let saved = saved_snapshot(desktop.clone()).unwrap();
-    assert_eq!(saved.target, 10);
+    assert_eq!(saved.workspace_id(), 10);
     assert_eq!(saved.tree.nodes[0].name.as_deref(), Some("DP-1"));
     let original = saved.render(false).unwrap();
 
@@ -638,7 +638,7 @@ fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes()
     desktop["nodes"].as_array_mut().unwrap().push(second_output);
 
     let saved = saved_snapshot(desktop.clone()).unwrap();
-    assert_eq!(saved.target, 77);
+    assert_eq!(saved.workspace_id(), 77);
     let draft = saved.render(false).unwrap();
     assert!(draft.contains("app_id: right"));
     assert!(!draft.contains("app_id: left"));
@@ -647,7 +647,7 @@ fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes()
     workspace["floating_nodes"] = workspace["nodes"].take();
     workspace["nodes"] = json!([]);
     let saved = saved_snapshot(desktop).unwrap();
-    assert_eq!(saved.target, 77);
+    assert_eq!(saved.workspace_id(), 77);
     assert!(saved.render(false).unwrap_err().contains("floating"));
 }
 
@@ -658,7 +658,7 @@ fn acquisition_allows_empty_and_unsupported_layouts_until_rendering() {
         workspace("tabbed", vec![left(), right()], 20),
     ] {
         let saved = saved_snapshot(desktop).unwrap();
-        assert_eq!(saved.target, 10);
+        assert_eq!(saved.workspace_id(), 10);
         assert!(saved.render(false).is_err());
     }
 }

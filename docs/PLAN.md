@@ -234,13 +234,16 @@ with empty stdout cancels; status 1, other failures, and malformed output remain
 Fuzzel is optional for all other commands.
 
 After a load selection and Fuzzel exit, `main.rs` starts `Diagnostics` under `menu` and
-calls the unchanged `load_named` implementation, including rediscovery and safe target
-observation, selecting the workspace focused at load time independently of the pre-menu
-tree. Before the first prompt, `main.rs` retains `capture::snapshot()` as a `Result`;
+calls `load_named`, including rediscovery and ordinary validation. The optional expected
+workspace ID constrains the loader's initial synchronized observation to the workspace
+focused before Fuzzel opened; a different ID is refused, even with the same name/number.
+Standalone loading supplies no expected ID and still selects the focused workspace.
+Before the first prompt, `main.rs` retains `capture::snapshot()` as a `Result`;
 `Snapshot::output_name` reads the original workspace's containing output from that tree.
 Both prompts receive the same literal `--output=OUTPUT` when known. Acquisition errors
-are deferred until Capture; Load and cancellation ignore them. Empty and unsupported
-layouts are validated only if Capture renders the saved tree after the action prompt exits.
+are deferred until the selected action needs the snapshot: Capture reports them before
+rendering, Load after ordinary layout validation, and cancellation ignores them. Empty and
+unsupported layouts are validated only if Capture renders the saved tree after the action prompt exits.
 No later tree query or fallback capture occurs. Inference runs only on Capture and uses
 saved PIDs, allowing stale-process null fallback. Cancellation discards any draft in
 memory. Selection/capture/save failures notify under `menu` without launch logs.
@@ -263,11 +266,13 @@ The `.partial` staging name is outside discovery's extensions.
 
 Offline tests use fake Fuzzel/notify-send and single-tree capture IPC fixtures. They verify
 the tree response precedes the first Fuzzel launch, both prompts use the original output,
-Capture renders saved state, and Load independently observes its target after Fuzzel exit.
+Capture renders saved state, and Load checks the saved workspace ID inside its fresh
+synchronized observation after Fuzzel exit.
 They also cover deferred snapshot errors, empty/unsupported initial layouts, exact
 selections, cancellation, subprocess/protocol errors, opt-in inference, default/HOME and
 explicit (relative) save destinations, permissions, collisions, exclusive publication,
-write and directory-creation failures, discovery of saved drafts, placeholder rejection
+write and directory-creation failures, changed workspace IDs (including the same name
+and number), discovery of saved drafts, placeholder rejection
 by `check`, `load`, and menu loading, and launch-log isolation.
 The ten-scenario integration harness is unchanged. Live menu acceptance is user-only;
 see the manual procedure below.
@@ -304,8 +309,13 @@ the reader never blocks on a send. Each snapshot uses a disposable query connect
 temporary thread: `GET_WORKSPACES`, `GET_TREE`, then `SEND_TICK` with a unique payload.
 Consuming events through that tick proves earlier events were read; initial ticks and
 other clients' ticks cannot satisfy the fence. The first snapshot freezes the target
-workspace ID; a focus event away from it aborts even if focus returns before the next
-snapshot. A workspace reload or the target's destruction also aborts. Snapshot history is
+workspace ID and its containing output's container ID from `GET_TREE`; no `GET_OUTPUTS`
+query is needed. A focus event away from the target or a workspace move event concerning
+it aborts permanently, even if focus or output later returns. Each subsequent tree must
+show the same containing output ID. Unrelated workspace moves and output reconfiguration
+that preserves that ID are allowed unless another guard fails. A workspace reload or the
+target's destruction also aborts. Offline multi-output trees and event transcripts cover
+both migration paths and stopping before further launches/commands. Snapshot history is
 capped at 256 events. A cloned event socket provides `shutdown(Both)` cancellation, and
 dropping the observer joins the reader even during an idle or partial read.
 
@@ -572,9 +582,19 @@ the action prompt is open and change workspace while the name prompt is open, th
 the same original snapshot. Compare `sha256sum` of `last-run.log` before and after capture.
 
 For loading, invoke from an empty workspace; after the action menu opens, manually switch
-to a different empty workspace before choosing `Load: two-foot`. Verify construction uses
-the workspace focused after Fuzzel exits, with the normal safety checks and a new log.
-Snapshot errors must not prevent cancellation or reaching ordinary load validation.
+to a different empty workspace before choosing `Load: two-foot`. Verify refusal before
+any application launch or layout mutation, with a menu error notification and a new log;
+focus must stay where the user left it. Repeat while keeping the original workspace
+focused and verify normal construction. A workspace recreated with the same name must
+also be refused. Snapshot errors must not prevent cancellation or ordinary layout
+validation, but a valid Load selection must refuse if the original identity is unavailable.
+
+During a separate load on two outputs, manually move the target workspace to the other
+output while it remains focused. Expect immediate failure, no further launches or layout
+mutations, no recovery, and any already launched windows left in place. Repeat moving it
+away and back; the move history must still abort. Separately move only an unrelated
+workspace, or reconfigure output geometry while the target stays on its original output:
+these alone should not stop construction. Other existing safety guards still apply.
 Output-removal behavior remains a user-only check: any Fuzzel failure should be reported
 without focus manipulation or automatic repair. No claim of live acceptance is made for
 these corrected interactions until the user performs them.

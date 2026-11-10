@@ -37,7 +37,7 @@ impl Fixture {
 
     fn run(&self, config: &Config, steps: Vec<Step>) -> Result<(), String> {
         self.exchange(steps, |connect, diagnostics| {
-            load_with(config, connect, diagnostics).map(|_| ())
+            load_with(config, None, connect, diagnostics).map(|_| ())
         })
     }
 
@@ -91,7 +91,7 @@ impl Fixture {
                     drop(events);
                     return consumed;
                 }
-                send(&mut socket, 1, workspaces());
+                send(&mut socket, 1, step.workspaces.clone());
                 request(&mut socket, 4);
                 send(&mut socket, 4, step.tree.clone());
                 let token = String::from_utf8(request(&mut socket, 10)).unwrap();
@@ -152,6 +152,7 @@ impl Drop for Fixture {
 #[derive(Clone)]
 struct Step {
     tree: Value,
+    workspaces: Value,
     events: Vec<(u32, Value)>,
     disconnect: bool,
     command: Option<(String, Value)>,
@@ -159,6 +160,7 @@ struct Step {
 fn step(tree: Value) -> Step {
     Step {
         tree,
+        workspaces: workspaces(),
         events: Vec::new(),
         disconnect: false,
         command: None,
@@ -271,6 +273,141 @@ fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation(
     );
     assert!(!fixture.path.join("bad").exists());
     assert_eq!(env::var_os("PATH"), original_path);
+}
+
+#[test]
+fn menu_target_and_standalone_target_complete_with_unrelated_windows_on_another_output() {
+    for (expected_workspace, target, move_unrelated) in [
+        (Some(10), 10, false),
+        (Some(10), 10, true),
+        (None, 88, false),
+        (None, 88, true),
+    ] {
+        let fixture = Fixture::new();
+        let config = fixture.config();
+        let mut steps = successful_steps();
+        let completed = steps.last().unwrap().tree.clone();
+        final_focus_steps(&mut steps, &completed, 20);
+        for step in &mut steps {
+            step.tree["nodes"][0]["nodes"][0]["id"] = json!(target);
+            step.tree = multi_output(step.tree.clone());
+            step.workspaces = multi_output_workspaces();
+            step.workspaces[0]["id"] = json!(target);
+        }
+        // A move involving only the unrelated workspace does not invalidate the run.
+        if move_unrelated {
+            let unrelated = steps[1].tree["nodes"][1]["nodes"][0].clone();
+            for step in steps.iter_mut().skip(1) {
+                step.tree["nodes"][1]["nodes"] = json!([]);
+                step.tree["nodes"][0]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(unrelated.clone());
+                step.workspaces[1]["output"] = json!("fixture");
+            }
+            steps[1].events.push((WORKSPACE, workspace_move(11)));
+        }
+        fixture
+            .exchange(steps, |connect, diagnostics| {
+                load_with(&config, expected_workspace, connect, diagnostics).map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(fixture.launches(), 1);
+    }
+}
+
+#[test]
+fn mismatched_menu_target_refuses_before_any_launch_or_command() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let error = fixture
+        .exchange(vec![step(multi_output(tree()))], |connect, diagnostics| {
+            load_with(&config, Some(88), connect, diagnostics).map(|_| ())
+        })
+        .unwrap_err();
+    assert!(
+        error.contains("differs from pre-menu workspace id=88"),
+        "{error}"
+    );
+    assert!(!fixture.path.join("launches").exists());
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    assert!(!log.contains("launch leaf="), "{log}");
+    assert!(!log.contains("command replies"), "{log}");
+}
+
+#[test]
+fn workspace_migration_stops_before_launch_or_any_further_construction() {
+    for during_construction in [false, true] {
+        for with_event in [false, true] {
+            let fixture = Fixture::new();
+            let config = layout_config(
+                &fixture,
+                &format!(
+                    "{{split: horizontal, children: [{}, {}]}}",
+                    leaf(&fixture, 0),
+                    leaf(&fixture, 1)
+                ),
+            );
+            let mut steps = if during_construction {
+                successful_steps()
+            } else {
+                vec![step(tree())]
+            };
+            // Stop at the first fence before the split command, or the first launch.
+            let last_tree = steps.last().unwrap().tree.clone();
+            steps.push(step(last_tree));
+            for step in &mut steps {
+                step.tree = multi_output(step.tree.clone());
+                step.workspaces = multi_output_workspaces();
+            }
+            let last = steps.last_mut().unwrap();
+            let expected_error = if with_event {
+                // Even a move away and back with unchanged tree/focus must fail.
+                last.events = vec![
+                    (WORKSPACE, workspace_move(10)),
+                    (WORKSPACE, workspace_move(10)),
+                ];
+                "moved to another output"
+            } else {
+                last.tree = move_target_to_second_output(last.tree.clone());
+                last.workspaces[0]["output"] = json!("HDMI-A-1");
+                "changed output"
+            };
+            let expected_connections = steps.len() + 1;
+            let error = fixture
+                .exchange(steps, |connect, diagnostics| {
+                    let mut connections = 0;
+                    let result = load_with(
+                        &config,
+                        None,
+                        &mut || {
+                            connections += 1;
+                            assert!(
+                                connections <= expected_connections,
+                                "IPC after migration failure"
+                            );
+                            connect()
+                        },
+                        diagnostics,
+                    );
+                    assert_eq!(connections, expected_connections);
+                    result.map(|_| ())
+                })
+                .unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+            if during_construction {
+                assert_eq!(fixture.launches(), 1);
+            } else {
+                assert!(!fixture.path.join("launches").exists());
+            }
+            let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+            assert!(!log.contains("command replies"), "{log}");
+            assert_eq!(
+                log.matches("launching once").count(),
+                usize::from(during_construction)
+            );
+        }
+    }
 }
 
 #[test]
@@ -505,7 +642,7 @@ fn failure_reports_mention_partial_layouts_only_after_a_successful_spawn() {
     fn report(fixture: &Fixture, config: &Config, steps: Vec<Step>) -> (String, String) {
         let error = fixture
             .exchange(steps, |connect, diagnostics| {
-                let result = load_with(config, connect, diagnostics).map(|_| ());
+                let result = load_with(config, None, connect, diagnostics).map(|_| ());
                 result.map_err(|error| diagnostics.report_failure(error))
             })
             .unwrap_err();

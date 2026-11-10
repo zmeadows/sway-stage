@@ -573,11 +573,12 @@ fn missing_output_does_not_change_capture_or_cancellation() {
 }
 
 #[test]
-fn failed_snapshot_is_reported_only_for_capture_and_is_never_retried() {
-    for selection in [CAPTURE, "", "Load: writing\n"] {
+fn failed_snapshot_is_deferred_until_selected_action_and_is_never_retried() {
+    for selection in [CAPTURE, "", "Load: writing\n", "Load: valid\n"] {
         let fixture = Fixture::new();
         setup(&fixture);
         fixture.file("writing.yaml", "invalid layout contents");
+        fixture.file("valid.yaml", WINDOW);
         let socket = fixture.path.join("failed.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
@@ -614,6 +615,15 @@ fn failed_snapshot_is_reported_only_for_capture_and_is_never_retried() {
             assert!(output.status.success(), "{output:?}");
             assert!(stderr.is_empty());
             assert_log_preserved(&fixture);
+        } else if selection == "Load: valid\n" {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(
+                stderr.contains("pre-menu workspace snapshot: get tree:"),
+                "{stderr}"
+            );
+            let log =
+                fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+            assert!(log.contains("validated layout"), "{log}");
         } else {
             assert_eq!(output.status.code(), Some(1));
             assert!(!stderr.contains("get tree:"), "{stderr}");
@@ -629,12 +639,18 @@ fn failed_snapshot_is_reported_only_for_capture_and_is_never_retried() {
 }
 
 #[test]
-fn empty_or_unsupported_snapshot_allows_loading_with_fresh_observation() {
-    for initial_layout in ["empty", "tabbed"] {
+fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
+    for (initial_layout, final_id, final_name) in [
+        ("empty", 10, "original"),
+        ("tabbed", 10, "original"),
+        ("empty", 88, "later"),
+        ("empty", 88, "original"),
+    ] {
         let fixture = Fixture::new();
         setup(&fixture);
         fixture.file("writing.yaml", WINDOW);
         let mut initial = capture_tree();
+        initial["nodes"][0]["nodes"][0]["name"] = json!("original");
         if initial_layout == "empty" {
             let workspace = &mut initial["nodes"][0]["nodes"][0];
             workspace["nodes"] = json!([]);
@@ -660,7 +676,8 @@ fn empty_or_unsupported_snapshot_allows_loading_with_fresh_observation() {
             write_ipc_message(&mut query, 4, &initial);
             assert_eq!(query.read(&mut [0]).unwrap(), 0);
 
-            // The loader must subscribe and select a different workspace after Fuzzel exits.
+            // The loader subscribes after Fuzzel exits, then checks the saved identity
+            // against the same synchronized observation that establishes its target.
             let mut events = accept();
             let pid = fs::read_to_string(directory.join("action-pid")).unwrap();
             assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
@@ -672,14 +689,20 @@ fn empty_or_unsupported_snapshot_allows_loading_with_fresh_observation() {
                 &mut query,
                 1,
                 &json!([{
-                    "id": 88, "num": 8, "name": "later", "visible": true, "focused": true,
+                    "id": final_id, "num": 1, "name": final_name, "visible": true, "focused": true,
                     "urgent": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
                     "output": "another-output"
                 }]),
             );
             assert_eq!(read_ipc_message(&mut query).0, 4);
             let mut later = capture_tree();
-            later["nodes"][0]["nodes"][0]["id"] = json!(88);
+            later["nodes"][0]["nodes"][0]["id"] = json!(final_id);
+            later["nodes"][0]["nodes"][0]["name"] = json!(final_name);
+            if final_id != 10 {
+                let workspace = &mut later["nodes"][0]["nodes"][0];
+                workspace["nodes"] = json!([]);
+                workspace["focused"] = json!(true);
+            }
             write_ipc_message(&mut query, 4, &later);
             let (kind, token) = read_ipc_message(&mut query);
             assert_eq!(kind, 10);
@@ -698,10 +721,24 @@ fn empty_or_unsupported_snapshot_allows_loading_with_fresh_observation() {
             .output()
             .unwrap();
         server.join().unwrap();
-        // Refusal on the later occupied workspace proves the initial empty tree wasn't reused.
+        // Matching identity reaches ordinary occupancy validation; a changed identity
+        // must refuse even with the same workspace name and number.
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
-        assert!(log.contains("prelaunch workspace=88"), "{log}");
+        if final_id == 10 {
+            assert!(log.contains("prelaunch workspace=10"), "{log}");
+            assert!(log.contains("completely empty"), "{log}");
+        } else {
+            assert!(
+                log.contains("differs from pre-menu workspace id=10"),
+                "{log}"
+            );
+            assert!(!log.contains("prelaunch workspace="), "{log}");
+        }
+        assert!(!log.contains("launch leaf="), "{log}");
+        assert!(!log.contains("command replies"), "{log}");
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(notification.contains("sway-stage menu failed"));
         assert!(!fixture.path.join("name-opened").exists());
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),

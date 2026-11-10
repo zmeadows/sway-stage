@@ -76,7 +76,8 @@ Before launching the initial Fuzzel menu, attempt one read-only Sway tree snapsh
 `SWAYSOCK`. Retain its original focused workspace identity, output ancestry, hierarchy,
 focus, and window PIDs in memory. Do not validate layout representability at this point:
 an empty or unsupported arrangement must still allow Load and cancellation. Retain any
-snapshot acquisition error; report it only if Capture is selected, without retrying.
+snapshot acquisition error; report it only when the selected action needs the snapshot,
+without retrying. Cancellation remains a successful no-op.
 
 When the saved tree identifies the original output name, pass `--output=OUTPUT` to both
 the action menu and draft-name prompt. With no output name, omit that option; never choose
@@ -85,10 +86,14 @@ failure normally, without switching outputs or repairing desktop state.
 
 For Load, wait for Fuzzel to exit, then start launch diagnostics and use the same
 `load_named` path as `load`. Rediscover the selected layout and perform all ordinary
-validation. Ignore the saved capture snapshot, including any acquisition error. The loader
-independently selects the workspace focused at load time after Fuzzel exits, using its
-existing safe observation procedure; it must still be completely empty. Preserve
-construction, sizing, final focus, and launch failure reporting.
+validation. Constrain the loader's initial synchronized observation to the original
+pre-Fuzzel workspace container ID. Refuse if another workspace is focused, even if it has
+the same name or number; never restore focus automatically. If the original identity could
+not be established, refuse Load after ordinary layout validation. Empty or unsupported
+capture arrangements do not prevent loading. The original workspace must still be
+completely empty at load time. Compare original and final focused identities; intermediate
+away-and-back changes while Fuzzel is open need not be detected. Preserve construction,
+sizing, final focus, and launch failure reporting.
 
 For Capture, wait for the action menu to exit, then render the saved pre-menu tree into
 complete YAML in memory. Do not query Sway again. Subsequent focus, workspace, output,
@@ -214,8 +219,10 @@ activity between launches or during command verification also abort conservative
 
 Construction has no transaction or rollback. Safety takes precedence over completing a
 layout. The target is the focused workspace observed after validation, identified by its
-Sway workspace identity rather than a configured number or monitor. Keep that target
-fixed; never create, select, rename, or assign a workspace on the user's behalf.
+Sway workspace identity rather than a configured number or monitor. Menu Load additionally
+requires the pre-Fuzzel workspace identity as described above. Freeze both the target
+workspace and its containing output identity at the initial synchronized observation;
+never create, select, rename, or assign a workspace on the user's behalf.
 
 1. Validate the whole layout before launching or mutating Sway. Connect and subscribe to
    workspace/window events before the initial target snapshot. Establish an empty target:
@@ -223,8 +230,13 @@ fixed; never create, select, rename, or assign a workspace on the user's behalf.
    Snapshot existing window container IDs across the whole tree, including other workspaces.
 2. Observe workspace focus throughout construction, including while waiting and resizing.
    A focus event away from the target aborts even if the user switches back before the
-   next snapshot. Recheck focus, target existence, and ownership before every launch or
-   mutating IPC command. Lost event observation or IPC connectivity is fatal.
+   next snapshot. A move event for the target workspace to another output also aborts,
+   including a move away and back. Recheck the target's containing output in every
+   synchronized tree observation; a changed output aborts even without a move event or
+   focus change. Moving an unrelated workspace or reconfiguring outputs while the target
+   stays on its original output does not alone abort. Recheck focus, target existence,
+   output identity, and ownership before every launch or mutating IPC command. Lost event
+   observation or IPC connectivity is fatal.
 3. Launch leaves in depth-first order, establishing split orientations as groups are built.
    Snapshot global window IDs immediately before each launch. Launch exactly once and wait for
    exactly one new, unclaimed window with the leaf's explicit selector; never match an

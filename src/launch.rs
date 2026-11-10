@@ -33,10 +33,14 @@ const MAX_SIZING_PASSES: usize = 3;
 // Less than a tenth of a percentage point of improvement is not worth another pass.
 const MIN_SIZING_PROGRESS: f64 = 0.001;
 
-pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String> {
+pub fn load(
+    config: &Config,
+    expected_workspace: Option<i64>,
+    diagnostics: &mut Diagnostics,
+) -> Result<(), String> {
     let socket = observation::sway_socket()?;
     let mut connect = || observation::connect(&socket);
-    let sizing_warnings = load_with(config, &mut connect, diagnostics)?;
+    let sizing_warnings = load_with(config, expected_workspace, &mut connect, diagnostics)?;
     diagnostics.report_sizing_warnings(&sizing_warnings);
     Ok(())
 }
@@ -44,12 +48,17 @@ pub fn load(config: &Config, diagnostics: &mut Diagnostics) -> Result<(), String
 // Concrete socket injection keeps all fixture traffic disconnected from socket discovery.
 fn load_with(
     config: &Config,
+    expected_workspace: Option<i64>,
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<Vec<String>, String> {
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
-    let initial = observer.snapshot(connect()?, Instant::now() + IPC_TIMEOUT)?;
+    let initial = observer.snapshot_for_workspace(
+        connect()?,
+        Instant::now() + IPC_TIMEOUT,
+        expected_workspace,
+    )?;
     let target = initial.target;
 
     diagnostics.stage(format!("prelaunch workspace={target}"));
