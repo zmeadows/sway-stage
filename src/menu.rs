@@ -68,7 +68,10 @@ fn fuzzel(
     output_name: Option<&str>,
 ) -> Result<Option<String>, String> {
     let mut command = Command::new("fuzzel");
-    command.arg("--dmenu");
+    command.args(["--dmenu", "--no-exit-on-keyboard-focus-loss"]);
+    if input.is_some() {
+        command.arg("--no-sort");
+    }
     if let Some(output_name) = output_name {
         command.arg(format!("--output={output_name}"));
     }

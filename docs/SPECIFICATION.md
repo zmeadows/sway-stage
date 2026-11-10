@@ -60,7 +60,11 @@ stdout; users choose where to redirect it.
 through `std::process::Command` without a shell or an interactive-input deadline. Supply
 lexically ordered layout names as `Load: NAME` lines, followed by the separate
 `Capture current layout…` action. Discover filenames without parsing their contents;
-with no layouts, still offer Capture. Accept only an exact offered label, mapped to its
+with no layouts, still offer Capture. Pass `--no-sort` to preserve this supplied order
+without changing matching. Both the action menu and draft-name prompt use
+`--no-exit-on-keyboard-focus-loss` so pointer-triggered keyboard-focus loss does not
+automatically close them. This does not restore keyboard focus or override Fuzzel's
+configured keyboard-focus mode. Accept only an exact offered label, mapped to its
 explicit action. Arbitrary typed input must never become a name, path, command, or action.
 Require one UTF-8 newline-terminated output line without embedded control characters.
 Fuzzel's dmenu cancellation is exit status 2 with no output: treat it as a successful no-op.

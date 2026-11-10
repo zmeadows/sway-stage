@@ -10,23 +10,30 @@ fn setup(fixture: &Fixture) {
 printf '%s\n' "$@" >> "$MENU_DIRECTORY/arguments"
 prompt=''
 output=''
+keep_open=0
+no_sort=0
 for argument in "$@"; do
     case "$argument" in
         --prompt=*|--prompt-only=*) prompt="$argument" ;;
         --output=*) output="${argument#--output=}" ;;
         --dmenu) ;;
+        --no-exit-on-keyboard-focus-loss) keep_open=1 ;;
+        --no-sort) no_sort=1 ;;
         *) exit 92 ;;
     esac
 done
+test "$keep_open" = 1 || exit 95
 printf '%s\n' "$output" >> "$MENU_DIRECTORY/outputs"
 case "$prompt" in
   '--prompt-only=Draft name: ')
+    test "$no_sort" = 0 || exit 96
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
     : > "$MENU_DIRECTORY/name-opened"
     printf '%b' "$NAME_OUTPUT"
     exit "$NAME_STATUS"
     ;;
   '--prompt=Layout: ')
+    test "$no_sort" = 1 || exit 96
     if test "$REQUIRE_SNAPSHOT" = 1; then
         test -f "$MENU_DIRECTORY/snapshot-ready" || exit 94
     fi
@@ -257,6 +264,15 @@ fn captures_save_complete_private_drafts_to_xdg_or_home_with_opt_in_inference() 
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),
             "DP-1\nDP-1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("arguments")).unwrap(),
+            concat!(
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n",
+                "--output=DP-1\n--prompt=Layout: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
+                "--output=DP-1\n--prompt-only=Draft name: \n",
+            )
         );
         if infer_commands {
             assert!(!draft.lines().any(|line| line.trim() == "command: null"));
