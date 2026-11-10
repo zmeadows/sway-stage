@@ -18,10 +18,27 @@ other compositors, or a graphical editor unless explicitly requested.
 
 ## Engineering principles
 
+Readability is an engineering requirement here, not a cosmetic preference: safety checks
+that a maintainer cannot follow will eventually be broken. Naming, visual structure, and
+the readability review below apply to every source change.
+
 - Write code a reader can follow in execution order. Prefer concrete types, ordinary
   functions, `if`, `match`, loops, early returns, and named intermediate values when
   they express the operation clearly. Concise idiomatic expressions are welcome when
   they are easier to read.
+- **Descriptive naming.** Choose identifiers that state a value's role, meaning, or units
+  and an operation's effect: `preexisting_ids`, `expected_hierarchy`, `child_index`,
+  `window_timeout_ms`, `apply_sizing`. Use a specific name wherever a generic one (`node`,
+  `expected`, `existing`, `index`, `value`) could be confused with a nearby concept,
+  especially configured layout versus observed Sway state (`LayoutNode` versus
+  `swayipc::Node`). Short names are fine when the scope makes them obvious; do not
+  sacrifice clarity for brevity or expand names that merely restate their type.
+- **Visual structure.** Separate meaningful phases (validation, preparation, computation,
+  side effects, verification, reporting) with intentional blank lines, and keep tightly
+  related statements together. Never compact a function into a wall of statements because
+  the formatter permits it, and never insert blank lines mechanically. Prefer a named
+  intermediate value to a dense expression or awkward formatter wrapping; do not add
+  helpers only to create visual separation.
 - Keep related operations together and side effects apparent. A coherent longer
   function is preferable to layers of trivial delegation. Extract helpers to clarify
   responsibilities, enforce invariants, or remove meaningful duplication.
@@ -38,12 +55,10 @@ other compositors, or a graphical editor unless explicitly requested.
 - Comments explain constraints, surprising choices, and ordering requirements. Avoid
   narrating obvious statements, unexplained magic values, or commented-out alternatives.
 - Follow `.editorconfig` and `rustfmt.toml`: UTF-8, LF, four-space Rust indentation,
-  two-space YAML indentation, and 100-column Rust formatting. Group related lines of
-  code together, with blank lines between meaningful phases such as validation,
-  computation, mutation, and feedback so a human reader can follow the operation.
-  Keep closely related statements together; avoid mechanical blank-line counts or
-  splitting every expression. For genuinely table-like code only, a narrowly scoped
-  `#[rustfmt::skip]` may preserve one entry per line; rustfmt governs everything else.
+  two-space YAML indentation, and 100-column Rust formatting. `cargo fmt` is necessary
+  but not sufficient; it makes no naming or phase-separation decisions. For genuinely
+  table-like code only, a narrowly scoped `#[rustfmt::skip]` may preserve one entry per
+  line; rustfmt governs everything else.
 - Make the smallest coherent change. Avoid speculative generalization, unrelated
   cleanup, module scaffolding, and churn. Add a module only for a substantial, coherent
   responsibility; keep one binary crate until there is a concrete reason to change.
@@ -89,9 +104,13 @@ as necessary guards; do not promise atomic isolation against concurrent user act
 
 Each kind of information has one home:
 
-- `README.md`: accurate introduction, current status, and build/quick-start instructions.
+- `README.md`: concise user-facing introduction, current status, requirements, build and
+  usage instructions, and important restrictions. No implementation mechanics or history.
 - `docs/SPECIFICATION.md`: authoritative planned behavior and configuration contract.
-- `docs/PLAN.md`: milestones, completion criteria, dependency decisions, and open questions.
+- `docs/PLAN.md`: implementation status, remaining milestones and completion criteria,
+  architectural and dependency decisions, Sway/swayipc technical findings, open questions,
+  and the user's manual verification procedure. Condense completed work into decisions
+  and findings; do not accumulate per-change histories or test counts.
 - `examples/`: illustrative configurations, linked to the specification.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help becomes the command reference
@@ -106,9 +125,13 @@ or resizing windows. Never run `sway-stage load` against the real compositor. Al
 live-desktop behavioral verification must be performed manually by the user in an
 isolated disposable Sway session.
 
-After changes, review the diff as a maintainer: can a reader identify authoritative data,
-side effects, failure paths, and the reason for each helper? Update only documentation
-affected by the change. Do not leave `dbg!`, `todo!`, or `unimplemented!` in checked-in code.
+**Human readability review.** After every source change, reread the modified code in full
+as a maintainer meeting it for the first time, not only as a diff. Check that names are
+informative enough to follow without reconstructing context; that control flow and phases
+are visible at a glance; and that a reader can identify authoritative data, side effects,
+failure paths, and the reason for each helper. Fix what fails this review before reporting
+the work as done. Update only documentation affected by the change. Do not leave `dbg!`,
+`todo!`, or `unimplemented!` in checked-in code.
 
 Run applicable checks (use `cargo fmt --all` to format):
 

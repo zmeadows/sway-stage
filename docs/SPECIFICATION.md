@@ -1,11 +1,9 @@
 # sway-stage specification
 
-This is the authoritative behavioral contract for the initial implementation. Layout
-discovery, `list`, `check`, and single-window/nested `load` with proportional sizing and
-final focus selection are implemented. Capture and the picker remain planned.
-Read-only IPC examples and manual verification instructions are in the [README](../README.md).
-The YAML format may be revised before its first release, with this
-document and examples updated together.
+This is the authoritative behavioral contract. It specifies `capture` and `pick` before they
+are implemented; current status, design decisions, and the manual verification procedure
+are in the [roadmap](PLAN.md). The YAML format may be revised before its first release,
+with this document and the examples updated together.
 
 ## Purpose and scope
 
@@ -25,7 +23,7 @@ or monitor assignment, and management of application lifetimes after launch.
 
 ## Commands and discovery
 
-The planned command surface is:
+The command surface (`capture` and `pick` are not yet implemented):
 
 | Command | Behavior |
 | --- | --- |
@@ -66,8 +64,8 @@ users choose where to save stdout.
 
 ## YAML format, version 1
 
-See [`examples/four-windows.yaml`](../examples/four-windows.yaml) for the complete planned
-Firefox and three-terminal layout. Each file contains one UTF-8 YAML document with these
+See [`examples/four-windows.yaml`](../examples/four-windows.yaml) for a complete Firefox
+and three-terminal layout. Each file contains one UTF-8 YAML document with these
 top-level keys:
 
 | Key | Contract |
@@ -126,8 +124,8 @@ otherwise follows the same format. There is no executable fallback or command in
 
 ## Loading and safety
 
-Current execution supports a root window and ordered, arbitrarily nested splits within
-the validation limits. See [two Foot windows](../examples/two-foot.yaml) and the
+`load` supports a root window and ordered, arbitrarily nested splits within the validation
+limits. See [two Foot windows](../examples/two-foot.yaml) and the
 [four-window reference](../examples/four-windows.yaml). One observation session retains
 the original workspace and every accepted window throughout the run.
 
@@ -138,12 +136,14 @@ the workspace parent is selected explicitly through an owned direct child and ve
 before splitting. This does not change workspaces. Equal-axis meaningful groups remain
 separate. No empty placeholder hierarchy or window move commands are used.
 
-Every command is guarded by a fresh fenced tree and ownership checks. Its replies must
-succeed, and subsequent trees must match the expected leaf order, grouping, orientation,
-and retained identities. New wrapper identities are obtained from Sway. Only the exact
-structural transition requested by the command is allowed. The reviewed split path
-reparents without emitting window move events; every move event remains fatal because
-its payload omits workspace ancestry. New-window close events and uncertain structural
+Every command is guarded by a fresh fenced tree and ownership checks. A launch or command
+may proceed only from a settled fence: a verified tree whose event history contains no
+window events. Harmless window events, such as focus or title changes, require another
+fence rather than aborting. Every command reply must succeed, and subsequent trees must
+match the expected leaf order, grouping, orientation, and retained identities. New wrapper
+identities are obtained from Sway. Only the exact structural transition requested by the
+command is allowed. The reviewed split path reparents without emitting window move events;
+every move event remains fatal because its payload omits workspace ancestry. New-window close events and uncertain structural
 activity between launches or during command verification also abort conservatively.
 
 Construction has no transaction or rollback. Safety takes precedence over completing a
@@ -211,12 +211,11 @@ observed share; it does not turn an otherwise correct hierarchy into failure. St
 or ownership errors are always fatal. Do not disable user gaps, borders, or application
 constraints to force a result.
 
-The reference Python script launches Firefox, middle Foot, upper-right Foot, then
-lower-right Foot, constructs a horizontal root with a vertical right column, and focuses
-Firefox last. The example expresses root weights **44:32:24** and right-column weights
-**77:23**. Its stable explicit Foot IDs replace the script's per-process suffixes; only
-new windows are eligible. The script's repeated resizing is a reason to verify proportions,
-not a requirement to reproduce its exact sequence of percentage commands.
+The [four-window reference](../examples/four-windows.yaml) launches Firefox, middle Foot,
+upper-right Foot, then lower-right Foot, constructs a horizontal root with a vertical right
+column, applies root weights **44:32:24** and right-column weights **77:23**, and focuses
+Firefox last. Sizing verifies the resulting proportions; it does not replay a fixed sequence
+of percentage commands.
 
 ## Capture
 

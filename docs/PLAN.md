@@ -1,401 +1,64 @@
-# Implementation plan
+# Development roadmap
 
-Keep one binary crate, synchronous control flow, and a small set of concrete types. Add
-modules only as implemented responsibilities justify them. The
-[specification](SPECIFICATION.md) owns behavior; this document owns sequencing and open
-engineering decisions. Milestones 1, 2A, 2B, 2C.1, and 2C.2 are implemented; milestones
-3–4 remain pending. The user has manually verified construction of the single-Foot,
-two-Foot, and four-window Firefox/Foot layouts on Sway. The user's four-window inspector
-output confirms Firefox focus and parent-area values consistent with the sizing tolerance;
-precise axis measurements and broader compositor behavior remain unverified.
+The [specification](SPECIFICATION.md) owns behavior. This document owns implementation
+status, remaining milestones, design decisions, Sway and `swayipc` findings, open questions,
+and the manual verification procedure. Keep one binary crate, synchronous control flow,
+and a small set of concrete types; add modules only as implemented responsibilities
+justify them.
 
-## Preliminary step: read-only IPC inspection
+## Status
 
-Implemented before milestone 1: `cargo run --example inspect_sway` uses synchronous
-`swayipc` 4.0.0 to query workspaces, identify the focused workspace by container ID in the
-full tree, and display its layout, occupancy, and nested tiled/floating hierarchy without
-window titles. Both child lists must be empty for the workspace to count as empty.
-`SWAYSOCK` is required: construct a `Connection` from a `UnixStream` to avoid
-`Connection::new()` preferring `I3SOCK` or spawning socket-discovery processes.
+Implemented through milestone 2:
 
-This development example issues only `GET_WORKSPACES` and `GET_TREE`. It does not
-implement a public CLI command or any layout-engine behavior. The two queries are not
-atomic; a missing target or focus observed outside it fails, but switches away and back
-are not detected. Event history and bounded observation remain milestone 2 work.
-Build/lint checks and temporary fake-socket checks passed, including nested/floating
-trees, optional metadata, occupancy, and failure paths. Live Sway behavior is unverified;
-manual inspection is still required.
+- Layout discovery, `list`, and `check` with strict YAML validation.
+- `load` for a root window and arbitrarily nested splits, with relative weights applied by
+  bounded sizing and verified final focus.
+- Launch diagnostics: a private `last-run.log`, stderr errors, and bounded `notify-send`
+  notifications for fatal errors and sizing warnings.
+- Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
+  and `observe_sway` runs the production observer for ten seconds.
 
-Tree/API findings: `Node::id` identifies every Sway container, while `Node::window` is an
-optional X11 window ID. App IDs and Xwayland classes are optional, and a workspace's
-`focused` flag need not be true when a descendant has focus. Traverse `nodes` and
-`floating_nodes` explicitly, preserving order and split wrappers. Sway's `percent` is
-parent-area share, not the normalized sibling dimension required for future layout
-weights; it may be absent. The example labels this distinction as `parent_area`.
+Remaining: `capture` and `pick` (milestone 3), then the first Linux release (milestone 4).
 
-## 1. Layout validation and discovery
+Automated tests are offline. Configuration and CLI tests use temporary directories and a
+fake `notify-send`; IPC tests replay recorded trees and the window events Sway emits for
+them over disposable `UnixStream::pair` sockets, with harmless child scripts as
+applications. They never use `SWAYSOCK` and do not simulate Sway's window manager.
 
-Implemented: a typed split/window model, strict YAML validation, immediate-file discovery,
-and Clap `check`/`list` commands. Help identifies the remaining commands as unimplemented.
-Neither command contacts Sway, launches processes, writes logs, or sends notifications.
-Discovery uses XDG/HOME or an explicit directory, rejects invalid/duplicate names, and
-returns lexical order without parsing layouts for `list`.
+The user has manually verified, on Sway, construction of the single-Foot, two-Foot, and
+four-window Firefox/Foot examples, and Firefox focus after the four-window load with
+parent-area values consistent with the sizing tolerance. Still unverified live: precise
+normalized axis shares, abort behavior under real interference, keybinding launch contexts,
+multi-seat behavior, and a supported Sway version.
 
-The four-window example validates. Twelve configuration test groups and six CLI/filesystem
-test groups cover strict mapping/scalar boundaries, malformed and unsupported YAML,
-weights, nested order, IDs/selectors, cwd/environment semantics, timeouts, null capture
-placeholders, exact resource-limit boundaries, XDG resolution, and exit codes. Filesystem
-tests use temporary directories and child-specific environment settings without compositor
-sockets or external tools. Local formatting, Clippy, all-target compilation, tests, release
-build, and locked Rust 1.89 compilation pass. Hosted CI has not been run in this change.
+## Completed milestones
 
-## 2A. Reliable event observation
-
-Implemented as the development-only `cargo run --example observe_sway`, with its concrete
-observation component originally in `examples/support/observation.rs` (moved unchanged
-into `src/observation.rs` for 2B). The existing `inspect_sway`
-example and Milestone 1 CLI behavior are unchanged. The new example observes for ten
-seconds, periodically querying fresh state, and exits on lost observation or focus. It
-does not require an empty workspace or accept window ownership; those are loader guards
-for 2B. It sends only subscriptions, workspace/tree queries, and tick fences; no Sway
-commands, application launches, focus changes, or desktop mutations. Tick fences are
-visible to other tick subscribers. No code was run against a live compositor.
-
-The event reader acknowledges successful workspace/window/tick subscriptions before any
-snapshot query. One dedicated thread owns the blocking `swayipc` event stream. Its FIFO
-channel retains at most 256 messages; overflow invalidates all history and is fatal.
-The reader never blocks on channel sends. `Instant` deadlines bound consumer waits,
-subscription acknowledgement, snapshot replies, and fence receipt. Idle expiry leaves
-the reader intact, including partially received headers and payloads. A cloned socket
-provides `shutdown(Both)` cancellation; dropping the observer shuts down and joins the
-reader even during idle or incomplete reads. The first failure remains terminal.
-
-Each snapshot uses a separate, disposable query connection and a temporary query thread.
-At the shared deadline, socket shutdown interrupts blocked reads/writes; failed query
-connections are never reused. Workspace identity is frozen from the initial focused
-workspace; snapshots reject missing targets, duplicate identities, and inconsistent focus.
-Focus-away events abort even if a subsequent event and snapshot show the target again.
-History since subscription is checked against the initial target too: focus activity
-during initialization may conservatively abort. Reloads and target destruction also fail.
-Window events retain their decoded change/container data in wire order for future guards.
-
-After workspace/tree queries, `SEND_TICK` on the query connection supplies a unique fence
-on the subscribed event connection. Consuming through that tick establishes that earlier
-events have been read, unlike draining a temporarily empty local channel. Initial and
-other clients' ticks cannot satisfy the fence. Snapshot history is also capped at 256
-events, failing rather than retaining unbounded history. This ordering follows Sway's
-[IPC handler](https://github.com/swaywm/sway/blob/master/sway/ipc-server.c), reviewed on
-2026-11-09: it queues tick events before replying to `SEND_TICK`, and appends each client's
-outgoing messages in order. This source review does not establish a supported Sway version.
-
-Technical conclusions from the actual locked `swayipc` 4.0.0 implementation:
-
-- `common.rs::receive_from_stream` uses separate `read_exact` calls for the 14-byte header
-  and declared payload, with local buffers only. A read timeout can consume part of either
-  buffer; retrying `EventStream::next` would start a new header and corrupt framing.
-  Polling with socket timeouts or nonblocking retries is therefore unsuitable. The
-  blocking reader plus channel deadlines avoids that problem without another IPC client,
-  async runtime, or production protocol implementation.
-- `EventStream` owns a private socket and exposes no cancellation method. Retaining a
-  `UnixStream::try_clone` before subscription permits shutdown without competing reads.
-  Its iterator always returns `Some`, including on EOF/errors; stop at the first error.
-- Invalid magic, wrong query reply types, JSON decoding failures, unknown events/changes,
-  and truncated frames are fatal. A stalled incomplete frame cannot satisfy a snapshot
-  fence. An idle consumer timeout alone cannot distinguish silence from a stalled frame;
-  the next bounded snapshot/fence performs that liveness check.
-- The crate is not a hardened protocol validator: it allocates the declared payload size,
-  disables JSON recursion limits, accepts defaulted/optional fields (including absent
-  `nodes`), does not check for trailing JSON, and masks rather than validates the event
-  high bit. The observer checks decoded workspace/container/focus invariants but cannot
-  recover discarded wire information. This foundation assumes a normal local Sway peer,
-  not a malicious IPC server. If strict validation of every malformed payload or resource
-  caps is required, the smallest next step is a targeted upstream/client patch exposing
-  strict bounded decoding, rather than a second general IPC implementation.
-
-Snapshots and events are not an atomic view. The fence covers emitted events through a
-known point, not changes after it, and the tree may predate some returned window events.
-2B must reconcile event history with fresh trees before launch/acceptance; never treat
-snapshot success as ownership or mutation permission. Not all app-ID/class updates have
-dedicated events: use periodic snapshots within the window deadline even while idle.
-The reviewed [Wayland app-ID handler](https://github.com/swaywm/sway/blob/master/sway/desktop/xdg_shell.c)
-and [Xwayland class handler](https://github.com/swaywm/sway/blob/master/sway/desktop/xwayland.c)
-do not emit dedicated identity IPC events.
-Deadlines cover established sockets and I/O waits, not `UnixStream::connect`, OS scheduling,
-or arbitrary CPU/allocation time inside the upstream decoder. All threads are joined;
-no background worker is deliberately detached.
-
-Fourteen automated fixture tests use disposable `UnixStream::pair` sockets, never
-`SWAYSOCK`. They cover subscriptions, away-and-back focus including initialization,
-queued event order/fences, idle and expired deadlines, later events, fragmented headers
-and payloads across idle deadlines, malformed/unknown/truncated frames, EOF, subscription
-failure/stalls, queue overflow, query failure/stalls, missing/rejected fences, inconsistent
-snapshots, delayed identity metadata without events, and idle/partial-read shutdown.
-These tests now run in the binary harness so ordinary `cargo test --locked` runs them
-once; the observation example imports the same source module.
-`serde_json` is now an explicit development dependency for fixtures; it was already
-locked through `swayipc`, with no new packages or production dependencies.
-Local formatting, Clippy with warnings denied, all-target compilation, all 32 tests,
-release build, and locked Rust 1.89 all-target compilation pass. Socket tests required
-running outside the execution sandbox because it denied socket timeout configuration;
-they still used only disposable socket pairs. Hosted CI and live Sway remain unverified.
-
-## 2B. Safe single-window launching and diagnostics
-
-Historical 2B delivery (extended by 2C.1 below): `load NAME` supports only a validated root window. Split roots are rejected
-before IPC or launching. `src/launch.rs` owns the concrete synchronous launch/acceptance
-sequence, `src/diagnostics.rs` owns operational logging/notifications, and the existing
-observer now lives in `src/observation.rs`. The development observation example imports
-that exact module by path, preserving the single binary crate and avoiding duplicate
-implementations. Shared socket-pair/JSON fixture helpers were extracted to
-`src/observation_fixtures.rs`; the original 2A tests moved alongside the observer.
-`swayipc` 4.0.0 is now a production dependency. No new packages or lockfile resolution
-changes were needed; the previously reviewed dependency graph is unchanged.
-
-The production sequence is:
-
-1. Resolve discovery, read/fully validate YAML, and reject unsupported execution shapes.
-2. Subscribe before any snapshot; freeze the focused workspace by container ID.
-3. Require both child lists empty and retain all global container IDs. Reconcile a second
-   fenced empty-workspace snapshot, retaining the union of prelaunch IDs and event IDs.
-   Structural window activity during these fences is conservatively fatal.
-4. Spawn exactly once through `Command`, preserving argv, child PATH/cwd and inherited
-   environment with child-only overrides. Resolve explicit relative executable paths
-   against effective cwd. Use null standard streams and a separate child process group
-   so terminal interrupts directed at the launcher do not also signal the application.
-5. Within a checked monotonic deadline, poll fresh fenced trees with 100 ms idle
-   intervals while consuming ordered events. Individual IPC waits have a two-second bound.
-   Process exit is diagnostic only: delegation is allowed. Exited children are reaped
-   when observed; live children are never waited on, killed, or relaunched.
-6. Inspect new IDs globally; exact app ID/class equality must identify only one ID across
-   observed history. Delayed/missing identity can wait, but conflicting known identities,
-   wrong workspace/scratchpad, floating/fullscreen, preexisting target entries, and
-   unexpected target windows fail. New-window diagnostic history is capped at 256 IDs.
-7. Provisionally identify the sole direct tiled child; then require a fresh verification
-   of the same ID, hierarchy, identity and known non-fullscreen state through a fence
-   without intervening window activity. Events newer than their tree cannot establish
-   successful final verification. Focus loss, accepted-window loss, and uncertain IPC
-   history stop the run without cleanup. No Sway command strings are sent.
-
-Window event payloads omit workspace ancestry. Move-away-and-back history cannot be
-reconstructed from a later tree. For now *any* window move event aborts, including foreign
-moves elsewhere; new-window close events also abort rather than guess where the window
-was. Prelaunch structural events abort even when elsewhere. These conservative false
-positives are intentional and documented; unrelated stable windows elsewhere are ignored.
-Changing layout/container structure on the target is never repaired. Continuous window
-activity can prevent final verification and exhaust the configured deadline.
-
-Source review on 2026-11-09: Sway's
-[`cmd_exec_process`](https://github.com/swaywm/sway/blob/master/sway/commands/exec_always.c)
-creates an internal launcher context, exports its token as `XDG_ACTIVATION_TOKEN` and
-(normally) `DESKTOP_STARTUP_ID`, records a launch PID, and invokes `sh -c`.
-[`launcher_ctx_create_internal` and PID lookup](https://github.com/swaywm/sway/blob/master/sway/desktop/launcher.c)
-associate that context with the seat's focused workspace and can find it through process
-ancestry. The
-[`select_workspace`/`view_map` path](https://github.com/swaywm/sway/blob/master/sway/tree/view.c)
-checks assignment criteria and launcher context before falling back to seat focus;
-fullscreen output requests can also influence placement. This is a source-level
-conclusion from upstream master, not a supported-version or live-behavior claim.
-
-Direct `Command` does not create that token/context. Inference from the source: a simple
-new client without assignments/context should land on current focus at mapping time,
-but freezing our target does not bind the compositor's placement choice. Existing
-inherited activation variables, ancestor launch contexts, single-instance/delegating
-applications, assignment rules, and application activation behavior can affect it.
-Environment inheritance is preserved; no token is fabricated, stripped, or rewritten.
-Wrong placement is observed globally and fails without moving anything. A delegated
-request that only reuses an existing window cannot succeed. Distinctive app IDs improve
-matching but never prove causal ownership against an indistinguishable concurrent launch.
-No shell-based Sway exec or workspace-placement workaround was added. Verify Foot and
-keybinding/terminal launch contexts manually using the README's disposable-session steps.
-
-Each load invocation replaces the XDG state last-run log with a newly created 0600 file
-(unlink plus exclusive create avoids following an existing log symlink or retaining old
-permissions/hard links). Newly created directories use 0700. Logs have wall-clock epoch
-and elapsed timestamps, stage/leaf/target, occupancy, expected/observed identities and IDs,
-placement and process status. They omit titles, full argv and environment values; external
-text is escaped to retain record boundaries. File/log failures fall back to stderr.
-Fatal errors include stage, layout, cause, retry guidance and log path when available;
-`notify-send` is attempted with literal arguments, null streams, and a two-second wait.
-Only a stuck notification helper is terminated. Missing tools, bad state paths and
-notification failures never replace the original error. Help/list/check remain independent.
-
-Manual single-Foot feedback exposed a fixture gap: Sway serializes `fullscreen_mode: 1`
-on every workspace, even when its tiled windows are not fullscreen. The collector had
-incorrectly inherited that value as window state. Fullscreen inheritance now applies
-only to `con`/`floating_con` nodes, while the window itself must still report mode 0.
-Shared fixtures now include realistic workspace fullscreen metadata; regressions cover
-the reported tiled Foot sequence and actual fullscreen-container inheritance. The
-[Sway workspace serializer](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c)
-confirms the unconditional workspace value. The user reports a successful end-to-end
-single-Foot launch after the fix. This verifies that manual case; broader compositor
-behavior and the supported Sway version remain unverified.
-
-Automated coverage now includes 14 observer test groups, 15 launch test groups, 12 config
-test groups and 9 CLI/filesystem groups. The launch fixture supplies disposable sockets
-and harmless child scripts, running real process spawning plus the full observer/loader
-sequence. It covers empty/occupied containers, delayed identity without events, exact
-Xwayland classes, preexisting matches elsewhere, wrong workspace/scratchpad, ambiguous
-matches, unrelated/preexisting target windows, floating ancestry/fullscreen/unknown state,
-focus-away-and-back, disconnects, stale trees versus close/move/identity/second-match events,
-accepted-window loss, timeouts, spawn failure, child PATH/cwd/argv/env semantics, delegation,
-and failure without application termination or retry. CLI fixtures verify unsupported
-layout refusal before IPC, private log replacement and symlink handling, XDG/fallback
-failures, literal notifications and helper timeouts. The existing observer overflow,
-fragmentation and fence fixtures continue to cover lost/uncertain history.
-
-Local formatting, Clippy with warnings denied, locked all-target compilation, all 50 tests,
-release build and locked Rust 1.89 all-target compilation pass. The sandbox denies socket
-timeout configuration, so socket tests run with approved escalation while still using
-only disposable socket pairs. No live compositor connections or desktop operations were
-performed. Hosted CI, live placement/activation, multi-seat behavior, and a supported Sway
-version remain unverified. Existing upstream decoding/socket-establishment limits from 2A
-still apply. Milestone 2C.1 extends this path below.
-
-## 2C.1. Generic nested layout construction
-
-Implemented by extending `src/launch.rs`: one observer, a cumulative global prelaunch ID
-history, accepted container IDs with their original matchers, and an expected ordered
-hierarchy. Application launch, identity matching, deadlines, and non-destructive failure
-handling share the single-window path. No dependencies or lockfile changes were needed.
-
-The recursive algorithm completes the first child, encloses it in the required split,
-then focuses each completed child by ID before launching the next sibling. Sway's
-singleton split optimization changes the existing parent's axis; a populated workspace
-split wraps its completed children when the first child itself is a split. This preserves
-meaningful groups even on equal axes, without placeholders, scratchpad use, moves, or
-arbitrary extra splits. When workspace wrapping is needed, select an owned direct child and
-focus its parent. The criteria-free workspace split explicitly requires workspace focus on
-its own settled pre-command fence. Other commands use numeric container criteria exclusively.
-
-Before each command/launch, fresh fenced state must match all accepted identities,
-placement, tiled/fullscreen state, and hierarchy. Every command reply is checked and its
-exact expected structural result is read back before continuing. New wrapper IDs are
-bound from the verified tree, not predicted; unexpected wrapper replacement fails.
-Logs record leaf IDs/accepted IDs, commands/replies, expected and observed hierarchy,
-reparent transitions, wrapper identities, interference and the failing operation.
-
-Source review on 2026-11-09 against upstream master:
-
-- [`container_split`, `container_replace`, `container_flatten` and `container_squash`](https://github.com/swaywm/sway/blob/master/sway/tree/container.c)
-  explain singleton orientation changes, wrapper creation and simplification. The split
-  path reparents without emitting window `move` events.
-- [`workspace_split`/`workspace_wrap_children`](https://github.com/swaywm/sway/blob/master/sway/tree/workspace.c)
-  wrap populated children while retaining their old axis.
-- [`view_map`](https://github.com/swaywm/sway/blob/master/sway/tree/view.c) inserts the
-  new tiled view after the focused container, including a focused structural group.
-- [`split`](https://github.com/swaywm/sway/blob/master/sway/commands/split.c),
-  [`focus`](https://github.com/swaywm/sway/blob/master/sway/commands/focus.c), and
-  [`layout`](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c) supply
-  the command semantics; [`arrange`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c)
-  supplies ordinary default sizing without tree squashing.
-
-Expected reparenting is authorized only as that exact tree transition between guarded
-command fences. No move-event exemption is needed or permitted: payloads lack ancestry,
-so even a move during our command is fatal. Foreign structural activity can still cause
-conservative aborts. Tree/event fencing reduces races but cannot make IPC transactional.
-These source-level findings are not proof of compatibility with an installed Sway version.
-
-The locked `swayipc-types` 2.0.3 `CommandOutcome::decode` ignores `success` and can lose an
-incomplete error object, so `Connection::run_command` alone cannot meet the reply invariant.
-A small disposable command connection uses swayipc's request encoder and typed decoder,
-retaining `success` plus optional error text. Its frame reader checks magic, reply type,
-a 1 MiB response bound, and a monotonic deadline; an uncertain command is never retried.
-The existing tree/event decoder and socket-establishment limitations still apply.
-
-Isolated socket transcripts cover the single-window regressions, two H/V siblings,
-three siblings, nested splits on either/both sides, three meaningful levels, equal-axis
-groups, initial tabbed workspace orientation, the four-window example, and repeated
-selectors. Failure cases cover reparenting/reordering, invalid hierarchy, missing/closed
-accepted windows, unexpected descendants, focus away-and-back, IPC loss, unsuccessful or
-empty replies, malformed command frames, and stalled/truncated command replies. Fixture
-transcripts supply trees and exact commands; they do not simulate a window manager.
-
-Verification: `cargo fmt --all -- --check`, Clippy with warnings denied, locked all-target
-check, all 60 tests (51 unit/IPC and 9 CLI), locked release build, and locked Rust 1.89.0
-all-target check pass. Both manual example files also pass the release binary's `check`.
-The sandbox denied socket timeout setup, so IPC tests used approved escalation and only
-disposable socket pairs. No packages or toolchains were installed. Insertion focus is
-rechecked before each subsequent spawn; interference stops before launching another app.
-
-Weights and final focus were validated but unapplied in 2C.1; 2C.2 below implements them.
-Manual two-Foot and four-window checks are documented in the README. The user reports
-that both the two-Foot and four-window Firefox/Foot manual checks passed. This confirms
-those construction cases; arbitrary layouts, live interference/abort behavior, multi-seat behavior, and a supported
-Sway version remain unverified. The agent performed no live Sway operations. The code
-was the starting point for 2C.2.
-
-## 2C.2. Proportional sizing and final focus
-
-Implemented in `src/launch.rs` after full hierarchy construction. Each split computes
-child weight / sibling weight sum; the root's own weight is unused. Outer groups are
-sized before nested groups, preserving meaningful equal-axis groups and sibling order.
-Each adjustment targets a verified child container ID, including structural groups;
-the workspace itself is never a resize target.
-
-Source review on 2026-11-09 of Sway
-[`resize.c`](https://github.com/swaywm/sway/blob/master/sway/commands/resize.c)
-(and the 1.10 tag) found that tiled `resize set ... ppt` converts against the nearest
-ancestor with the requested axis, or the workspace. Width/height resizing redistributes
-the delta equally among other siblings and can succeed without changing geometry at
-minimum sizes. Therefore setting every child's percentage once does not establish a
-multi-child ratio. The implementation uses explicit `px` targets calculated from fresh
-sibling rectangle dimensions, normalized by their sum, and remeasures after each command.
-[`arrange.c`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c) accounts for
-gaps and integer rounding; [`ipc-json.c`](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c)
-reports container rectangles and parent-area `percent`. No screen size, content size,
-or `percent` value is used to infer axis shares. These source findings do not establish
-compatibility with an installed Sway version.
-
-Each split gets at most three passes, visiting each child at most once per pass. Children
-within five absolute percentage points are skipped; sizing stops once all are acceptable.
-A pass must reduce maximum share error by at least 0.1 percentage point to continue,
-preventing repeated stagnant or cyclic passes. Minimum sizes are left to Sway. Zero or
-negative dimensions and dimensions beyond Sway's integer command range are reported as
-unavailable geometry. Residual deviations and measurement limitations produce warnings
-with group/path, targets and observed shares (or the measurement reason). Warnings are
-logged, printed to stderr and consolidated into one normal-urgency `notify-send` after
-successful final focus. Notification failure remains secondary and bounded to two seconds.
-
-Sizing/focus reuse the same observer, exact-ID commands, complete hierarchy and accepted
-identity checks before and after every mutation. Geometry changes alone do not change
-the expected hierarchy. No event exemption, ownership relaxation, additional IPC client,
-or construction rewrite was added. All command errors, focus-away history, structural
-changes and uncertain observation still fail immediately without cleanup.
-
-Final focus walks the YAML in depth-first order, selecting the configured ID or first
-leaf, and resolves its path through the verified hierarchy. The existing focus operation
-rechecks all ownership/placement and observation guards, checks every command reply, and
-requires a fresh fenced snapshot with that exact accepted window focused. Logs include
-the logical ID, Sway ID and successful focus verification.
-
-Offline socket fixtures cover unequal two/three-child splits, redistribution over multiple
-passes, already-close shares (including the exact tolerance boundary), root weight and
-parent-area independence, minimum-size no-ops, stalled progress, the three-pass cap,
-unavailable geometry, nested groups on both sides, equal-axis nesting, the four-window
-reference, explicit/default focus and incorrect focus. Failure fixtures inject focus
-away-and-back, missing/relocated windows, foreign descendants, reordered hierarchy,
-new/move events, failed replies and disconnected observation during sizing/focus. Successful
-transcripts must consume all expected steps. Notifications are not sent by these fixtures.
-
-No dependencies or lockfile changes. Local formatting, Clippy with warnings denied,
-locked all-target check, all 68 tests (59 unit/IPC and 9 CLI), locked release build and
-locked Rust 1.89.0 all-target check pass. IPC fixtures require approved escalation because
-the sandbox denies socket timeout setup; they use only disposable socket pairs. No live
-Sway operations, package installations or toolchain installations were performed.
-
-Implementation and offline verification are complete. The user's four-window inspector
-output shows the intended hierarchy and Firefox focused, with parent-area values consistent
-with the sizing tolerance. Precise normalized axis measurements and live abort behavior
-remain pending; commands and read-only measurements are in the README. The existing IPC races,
-conservative event aborts, launch-causality, decoder/socket-establishment, multi-seat and
-supported-version limitations remain. No persistent enforcement or automatic retry is
-provided.
+- **Preliminary inspection.** Read-only `inspect_sway` example over `GET_WORKSPACES` and
+  `GET_TREE`.
+- **1. Validation and discovery.** Typed split/window model, strict YAML, immediate-file
+  discovery, `check`, and `list`; no IPC, launches, logs, or notifications.
+- **2A. Event observation.** Subscribed reader thread, bounded event history, tick fences,
+  and monotonic deadlines (`src/observation.rs`).
+- **2B. Single-window launching.** Direct process launch, global new-window matching,
+  provisional then confirmed acceptance, and launch diagnostics (`src/launch.rs`,
+  `src/diagnostics.rs`).
+- **2C.1. Nested construction.** Recursive guarded construction of arbitrary split trees.
+- **2C.2. Sizing and focus.** Weighted sizing from outer splits inward, then verified final
+  focus.
 
 ## 3. Capture and optional picker
 
 Implement read-only `capture`, preserving nested hierarchy and proportions while emitting
-missing-command placeholders. Add `pick` through an optional `fuzzel --dmenu` subprocess
-that delegates to the same load path.
+missing-command placeholders. Reuse the observer's snapshot validation, `locate_windows`,
+`sibling_dimensions`, and `proportions`; capture sends no commands. Report capture errors
+through `diagnostics::notify_failure`, never `Diagnostics::start`, so `last-run.log` is
+untouched. Decide whether to enable serde-saphyr serialization or emit the small document
+by hand; placeholder comments may favor a hand-written emitter.
+
+Add `pick` through an optional `fuzzel --dmenu` subprocess (`std::process::Command`, no
+shell). Only after an exact selection may it start launch diagnostics and call the same
+path as `load` (`load_named` in `src/main.rs`); cancellation and preselection errors leave
+the log alone.
 
 Complete when fixture-based captures preserve order, focus, and proportions; unsupported
 floating/tabbed/stacked/fullscreen layouts fail before output; missing match metadata
@@ -405,9 +68,9 @@ neither tool is required by unrelated commands and capture never issues mutation
 
 ## 4. First Linux release
 
-Review actual behavior against the specification, update README with working usage, and
-document demonstrated limitations. The MIT license and repository URL are set.
-Add a small tagged-release workflow after the behavior is validated; reuse CI checks.
+Review actual behavior against the specification, update the README with working usage,
+and document demonstrated limitations. The MIT license and repository URL are set. Add a
+small tagged-release workflow after the behavior is validated, reusing the CI checks.
 
 Complete when precompiled Linux archives and checksums can be reproduced from a tag,
 installation is documented and smoke-tested, the supported Sway version and Linux
@@ -415,71 +78,257 @@ architecture/libc baseline are recorded, and optional-tool failures are understa
 Start with x86_64 Linux; add ARM64 only with a validated build/run path. Do not claim
 static linking, other platforms, or untested compositor versions.
 
-## Dependency review
+## Architecture and decisions
 
-Dependencies and remaining candidates reviewed against their upstream documentation on
-2026-11-09:
-
-| Need | Candidate and decision |
+| Module | Responsibility |
 | --- | --- |
-| CLI | [Clap 4.6.7](https://docs.rs/clap/4.6.7/clap/) with derive, std, help, usage, and error-context; default features disabled. Declares Rust 1.85. |
-| Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with only deserialize enabled. The parser declares Rust 1.89. No serialization, comments, include, interpolation, robotics, or validation-framework features are enabled. |
-| Field diagnostics | [serde_path_to_error 0.1.20](https://docs.rs/serde_path_to_error/0.1.20/serde_path_to_error/) supplies paths for nested deserialization errors; declares Rust 1.61 and adds only already-used Serde core/itoa dependencies. |
-| Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html), from [swayipc-rs](https://github.com/JayceFayne/swayipc-rs), is now a production dependency (2B). Its direct dependencies are Serde, serde_json, and swayipc-types. The locked graph compiles on Rust 1.89. Milestone 2A proves channel deadlines, cancellable blocking reads, and ordered event fences with fixtures; decoding limitations are recorded above. |
-| Launching and optional tools | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, async runtime, or Fuzzel crate. Bound helper-process waits. |
-| Diagnostics and errors | Begin with standard-library I/O and contextual errors; add a logging/error crate only if concrete implementation needs justify it. |
+| `main.rs` | Clap CLI, command dispatch, and the single `load_named` path. |
+| `discovery.rs` | Layout directory resolution and immediate-file discovery. |
+| `config.rs` | Strict YAML parsing into `LayoutNode` trees and semantic validation. |
+| `observation.rs` | Event reader, fenced snapshots, and read-only tree inspection. |
+| `launch.rs` | Launching, window acceptance, guarded construction, sizing, and focus. |
+| `diagnostics.rs` | `last-run.log`, stderr reporting, and bounded notifications. |
 
-The inspection example resolves 15 dependency packages including `swayipc` and
-`swayipc-types` 2.0.3. The latter also pulls in `thiserror` 2 and Serde derive macros;
-the graph includes their proc-macro dependencies and JSON formatting/parsing helpers.
-`swayipc` has no selectable features; its types enable Serde derive, serde_json's
-`unbounded_depth`, and default error support. No async runtime is included. Both IPC
-crates are MIT licensed and declare no MSRV; the locked graph was checked with the
-installed Rust 1.89.0 toolchain. Transitive licenses are permissive MIT/Apache-2.0 (with
-Unlicense/MIT for memchr and an additional Unicode-3.0 license for unicode-ident).
-Manifest/feature review and the [RustSec advisory index](https://rustsec.org/advisories/)
-review found no applicable advisories; this is not a security guarantee.
+**Observation.** One reader thread owns the blocking `swayipc` event stream and forwards
+workspace, window, and tick events through a 256-message channel; overflow is fatal, and
+the reader never blocks on a send. Each snapshot uses a disposable query connection on a
+temporary thread: `GET_WORKSPACES`, `GET_TREE`, then `SEND_TICK` with a unique payload.
+Consuming events through that tick proves earlier events were read; initial ticks and
+other clients' ticks cannot satisfy the fence. The first snapshot freezes the target
+workspace ID; a focus event away from it aborts even if focus returns before the next
+snapshot. A workspace reload or the target's destruction also aborts. Snapshot history is
+capped at 256 events. A cloned event socket provides `shutdown(Both)` cancellation, and
+dropping the observer joins the reader even during an idle or partial read.
 
-Milestone 1 adds 23 locked dependency packages. The YAML deserializer uses granit-parser
-2.1.0, numeric helpers, encoding_rs_io/encoding_rs, smallvec, and annotate-snippets;
-Clap adds its builder/lexer/derive and their small helpers. Review of package manifests
-found permissive licenses: MIT/Apache-2.0, with BSD-3-Clause additionally required by
-encoding_rs. Existing license exceptions above still apply. Declared compiler baselines
-do not exceed 1.89, and the complete locked graph compiles on installed Rust 1.89.0.
-The current RustSec index review found no applicable advisory for the added versions;
-this was a source review, not an automated vulnerability audit.
+**Guarded command path.** Every launch and Sway command starts from a settled fence: a
+fenced snapshot whose tree verifies the complete expected hierarchy and every accepted
+window, and whose history holds no window events. Structural events for unaccepted windows
+(new, close, move, floating, fullscreen) abort; harmless window events trigger another
+fence within the same two-second deadline. A command runs on its own connection, every
+reply must report success, and a settled fence afterwards must show the exact expected
+structural transition. New wrapper IDs are bound from that tree, never predicted. The path
+exists because IPC is not transactional, an accepted command is not proof of its effect,
+and `swayipc` discards the reply's success flag.
 
-Strict YAML behavior is verified with fixtures: duplicate-key and merge-key policies
-reject, aliases have a zero-event budget, unsupported tags are rejected on values and
-field names, and the single-document API rejects trailing documents/content. String
-fields require quotes around numeric/boolean scalars; small numeric deserializers also
-reject quoted numbers rather than coercing them. Explicit nulls never trigger defaults.
-Reads stop at 1 MiB plus one detection byte and require UTF-8. Parser collection depth
-is capped at 68 (allowing children sequences and leaf field collections at layout depth
-32), with bounded events, scalar bytes, nodes, anchor retention, and flow nesting before
-semantic validation enforces 32 layout levels and 256 layout nodes. Parser errors carry
-field paths and source locations; semantic tree errors identify the field and containing
-node's location. Source snippets are disabled to avoid printing full commands or env maps.
-No known format-contract guarantee is left unenforced. Serialization features can be
-evaluated when capture is implemented.
+**Launch acceptance.** Each launch snapshots global container IDs, spawns once, and polls
+fenced trees every 100 ms within the leaf's monotonic deadline (IPC waits are bounded to
+two seconds). `std::process::Command` preserves argv and applies cwd and environment
+overrides to the child only; explicit relative executables (containing `/`) resolve
+against the effective cwd. Children get null standard streams and their own process group,
+so a terminal interrupt aimed at the launcher does not reach them. A new window must be
+the only new, unclaimed window with the exact selector, on the target, tiled, and not
+fullscreen. A first matching tree makes it provisional; a second fresh tree without window
+events confirms it. Delayed identities may wait; any contradictory history fails.
+New-window diagnostic history is capped at 256 IDs. Process exit is only diagnostic, since
+applications may delegate; exited children are reaped, and live ones are never waited on,
+killed, or relaunched.
 
-Do not use archived [serde_yaml](https://github.com/dtolnay/serde-yaml) for a new project.
-Recent releases and a compatible declared MSRV are useful evidence, not a maintenance or
-security guarantee. Before adding each dependency, inspect current releases, advisories,
-license, necessary features, transitive graph, and actual MSRV compilation. Keep the
-lockfile committed; do not silently raise the compiler baseline to satisfy resolution.
-There is no need for an async IPC crate, a general IPC protocol implementation, a config
-framework, or a process supervision system. The narrow command-reply reader in 2C.1
-exists to preserve the success flag discarded by the upstream API.
+**Construction.** Build the first child, enclose it in the split, then focus each
+completed child by ID before launching the next sibling. A singleton parent changes axis
+in place (`splith`/`splitv`, or `layout splith`/`layout splitv` when the parent is tabbed
+or stacked). When the first completed child is a split occupying the whole workspace,
+focus an owned direct child, `focus parent`, and run the criteria-free workspace split
+only after the settled pre-command fence shows the workspace focused. All other commands
+use numeric `con_id` criteria. No placeholders, scratchpad staging, moves, or extra splits
+are used; equal-axis groups stay separate.
 
-## Remaining decisions and proof points
+**Sizing.** For each split, outer before inner, compute `weight / sibling sum` and compare
+it with sibling container dimensions along the split axis, normalized by their sum. Set
+each out-of-tolerance child with `resize set <width|height> N px`, remeasuring after every
+command. Stop within 5 percentage points per child, after three passes, or when a pass
+improves the maximum error by less than 0.1 percentage point. Residual deviation or
+unusable geometry becomes a warning, logged, printed, and sent as one normal-urgency
+notification after final focus succeeds.
 
-- Milestone 2A proves bounded event observation with fixtures; 2B adds fenced single-window
-  acceptance. 2C.1 extends those guards to construction; 2C.2 preserves them during sizing
-  and final focus, with precise sizing measurements and live abort checks pending.
-  Strict wire-validation limits and unbounded socket establishment remain documented above.
-- App IDs/classes cannot prove launch causality, and IPC cannot make observation and
-  mutation atomic. Test conservative aborts; do not disguise these limits as recoverable
-  placement errors. No live-session checks were performed during repository setup.
-- Supported Sway version and Linux ABI baseline remain unset. Cargo publishing stays
-  disabled until release behavior is ready.
+**Diagnostics.** Each launch replaces `last-run.log` by unlinking it and creating a new
+0600 file with `create_new` (0700 directories), so an existing symlink or hard link is never
+followed or reused. Records carry wall-clock and elapsed times, stage, and escaped text;
+they omit titles, full argv, and environment values. `notify-send` runs with literal
+arguments and null streams and is killed after two seconds; it is the only process the tool
+ever terminates. Partial-layout advice appears only after this run spawned an application.
+
+## Sway and swayipc findings
+
+Upstream sources reviewed on 2026-11-09 against Sway master (and the 1.10 tag for
+`resize.c`). These are source-level conclusions, not compatibility claims for an installed
+Sway version.
+
+- **Tree.** `Node::id` identifies every container; `Node::window` is an optional X11 ID.
+  App IDs and Xwayland classes are optional. A workspace's `focused` flag is false when a
+  descendant has focus. Traverse `nodes` and `floating_nodes` explicitly. `percent` is
+  parent-area share, may be absent, and is never used for sizing.
+  [`ipc-json.c`](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c) serializes
+  `fullscreen_mode: 1` on every workspace, so only `con`/`floating_con` values carry
+  fullscreen state to descendants.
+- **Socket.** Use `SWAYSOCK` with `Connection::from(UnixStream)`. `Connection::new()` prefers
+  `I3SOCK` and can spawn socket-discovery processes.
+- **Event framing.** `swayipc` 4.0.0 `receive_from_stream` uses separate `read_exact` calls
+  for the 14-byte header and payload with local buffers, so a read timeout can lose partial
+  progress and corrupt framing. Never use socket timeouts or retries on the event stream;
+  the blocking reader plus channel deadlines avoids this without an async runtime or a
+  second IPC client. `EventStream` has no cancellation method, and its iterator returns
+  `Some` even on EOF or errors; stop at the first error.
+- **Fences.** Sway's [IPC server](https://github.com/swaywm/sway/blob/master/sway/ipc-server.c)
+  queues tick events before replying to `SEND_TICK` and sends each client's messages in
+  order. A fence covers events emitted through a known point, not later changes, and the
+  tree may predate some returned events; snapshots and events are not an atomic view.
+- **Identity updates.** The [app-ID](https://github.com/swaywm/sway/blob/master/sway/desktop/xdg_shell.c)
+  and [Xwayland class](https://github.com/swaywm/sway/blob/master/sway/desktop/xwayland.c)
+  handlers emit no dedicated IPC event, so waits poll fresh trees even when idle.
+- **Window events.** Payloads omit workspace ancestry, so any move event (even a foreign
+  one) and any new-window close event abort. A window's map emits `window::new`, then
+  `window::focus` if it takes focus. Sway 1.10.1's `seat_set_workspace_focus` emits
+  `window::focus` only when focus moves to a different view, never for workspace or
+  structural-container focus. A command's events precede its reply, so they arrive in the
+  next fence.
+- **Splits.** [`container.c`](https://github.com/swaywm/sway/blob/master/sway/tree/container.c)
+  (`container_split`, `container_replace`, `container_flatten`, `container_squash`) explains
+  singleton orientation changes, wrapper creation, and simplification; the split path
+  reparents without move events.
+  [`workspace.c`](https://github.com/swaywm/sway/blob/master/sway/tree/workspace.c)
+  (`workspace_split`, `workspace_wrap_children`) wraps populated children, keeping their
+  old axis. [`view.c`](https://github.com/swaywm/sway/blob/master/sway/tree/view.c)
+  (`view_map`) inserts a new tiled view after the focused container, including a focused
+  group. Command semantics come from
+  [`split`](https://github.com/swaywm/sway/blob/master/sway/commands/split.c),
+  [`focus`](https://github.com/swaywm/sway/blob/master/sway/commands/focus.c), and
+  [`layout`](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c).
+- **Resizing.** In [`resize.c`](https://github.com/swaywm/sway/blob/master/sway/commands/resize.c),
+  tiled `resize set ... ppt` converts against the nearest ancestor with the requested axis,
+  or the workspace, and width/height changes redistribute the delta equally among the other
+  siblings. A resize can succeed without changing geometry at minimum sizes. Setting each
+  child's percentage once therefore cannot establish a multi-child ratio; use pixel targets
+  from fresh rectangles. [`arrange.c`](https://github.com/swaywm/sway/blob/master/sway/tree/arrange.c)
+  accounts for gaps and integer rounding.
+- **Command replies.** `swayipc-types` 2.0.3 `CommandOutcome::decode` ignores `success` and
+  can lose an incomplete error object. `run_command` in `src/launch.rs` therefore encodes
+  with swayipc, then reads one reply frame itself, checking the magic, reply type, a 1 MiB
+  bound, and the deadline. An uncertain command is never retried.
+- **Placement.** Sway's [`cmd_exec_process`](https://github.com/swaywm/sway/blob/master/sway/commands/exec_always.c)
+  creates a launcher context, exports `XDG_ACTIVATION_TOKEN` (and usually
+  `DESKTOP_STARTUP_ID`), and runs `sh -c`.
+  [`launcher.c`](https://github.com/swaywm/sway/blob/master/sway/desktop/launcher.c) ties that
+  context to the focused workspace and finds it through process ancestry; `view_map` checks
+  assignments and launcher context before falling back to seat focus, and fullscreen output
+  requests can also influence placement. Direct `Command` launching creates no token, so a
+  simple new client should map on the focused workspace, but inherited activation
+  variables, ancestor launch contexts, delegating applications, and assignment rules can
+  place it elsewhere. Environment is inherited unchanged; no token is fabricated or
+  stripped, and wrong placement fails without moving anything.
+- **Decoder limits.** `swayipc` is not a hardened protocol validator: it allocates the
+  declared payload, disables JSON recursion limits, accepts defaulted fields, ignores
+  trailing JSON, and masks the event high bit. The observer validates decoded workspace,
+  container, and focus invariants and assumes a normal local Sway peer. Strict wire
+  validation would need a targeted upstream patch, not a second IPC implementation.
+  Deadlines cover established sockets and I/O waits, not `UnixStream::connect`, scheduling,
+  or decoding time.
+
+## Dependencies
+
+Reviewed against upstream documentation on 2026-11-09:
+
+| Need | Decision |
+| --- | --- |
+| CLI | [Clap 4.6.7](https://docs.rs/clap/4.6.7/clap/) with derive, std, help, usage, and error-context; default features disabled. |
+| Typed YAML | [Serde](https://serde.rs/) with derive and [serde-saphyr 2.1.1](https://docs.rs/serde-saphyr/2.1.1/serde_saphyr/) with only `deserialize`; the parser declares Rust 1.89. |
+| Field diagnostics | [serde_path_to_error 0.1.20](https://docs.rs/serde_path_to_error/0.1.20/serde_path_to_error/) for nested field paths. |
+| Native synchronous IPC | [swayipc 4.0.0](https://docs.rs/swayipc/4.0.0/swayipc/struct.Connection.html) and swayipc-types 2.0.3 (Serde, serde_json, thiserror 2); no async runtime. |
+| Processes | `std::process::Command` for applications, Fuzzel, and `notify-send`; no shell wrapper, Fuzzel crate, or supervision system. |
+| Errors and logging | Standard-library I/O and contextual `String` errors; add a logging or error crate only for a concrete need. |
+| Tests | `serde_json` as a development dependency, already locked through `swayipc`. |
+
+serde-saphyr brings granit-parser, encoding_rs/encoding_rs_io, smallvec, and
+annotate-snippets; Clap adds its builder, lexer, and derive crates. No declared compiler
+baseline exceeds 1.89, and the locked graph compiles on Rust 1.89.0. Licenses are
+permissive: MIT/Apache-2.0, with Unlicense/MIT for memchr, Unicode-3.0 for unicode-ident,
+and BSD-3-Clause for encoding_rs. A manual review of the RustSec advisory index found no
+applicable advisory; this is not a security guarantee. Do not use the archived
+`serde_yaml`. Before adding a dependency, inspect releases, advisories, license, needed
+features, the transitive graph, and actual MSRV compilation; keep the lockfile committed
+and never silently raise the compiler baseline.
+
+serde-saphyr is configured strictly: duplicate and merge keys are errors, aliases have a
+zero budget, unsupported tags are rejected on values and field names, and only one
+document is accepted. String fields require quotes around numeric or boolean scalars, and
+numeric fields reject quoted numbers; explicit nulls never trigger defaults. Input is read
+up to 1 MiB plus one detection byte and must be UTF-8. Parser depth is capped at 68
+(children sequences plus window field collections at layout depth 32), with bounded
+events, scalar bytes, and nodes, before semantic validation enforces 32 layout levels and
+256 layout nodes. Source snippets are disabled so errors cannot echo commands or
+environment values.
+
+## Known limitations and open questions
+
+- Sway IPC is not transactional. Fences narrow races but cannot isolate construction from
+  concurrent activity. Conservative aborts are intentional: any move event, foreign
+  structural activity during a fence, or continuous window activity can stop or time out
+  a run.
+- App IDs and classes identify a window type, not causality; an indistinguishable
+  concurrent launch cannot be detected.
+- Placement depends on Sway's rules and inherited launch context. Keybinding and terminal
+  launch contexts still need manual verification.
+- `swayipc` decoding and socket establishment limits are listed under the findings above.
+- No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
+  until release behavior is ready.
+- Precise axis-share measurement and live abort behavior await manual verification.
+- Milestone 3 must settle the capture serialization approach and how `fuzzel --dmenu`
+  reports cancellation (exit status and output) as distinct from failure.
+
+## Manual verification
+
+For the user only, in an isolated, disposable Sway session with `SWAYSOCK` pointing to it.
+Agents must never run these commands; see [AGENTS.md](../AGENTS.md).
+
+Build and validate from the repository root. Install Foot and, for the four-window example,
+`firefox-esr` with the app ID used in the YAML; adapt the example to your installation
+before checking it.
+
+```sh
+cargo build --release --locked
+./target/release/sway-stage --layouts-dir examples check two-foot
+./target/release/sway-stage --layouts-dir examples check four-windows
+```
+
+From a terminal in the repository root, run **one** load, then switch to a completely empty
+disposable workspace during the five-second delay. The terminal must stay on another
+workspace; stay on the target until the command exits. Use a different empty workspace
+for each run.
+
+```sh
+sleep 5; ./target/release/sway-stage --layouts-dir examples load two-foot
+sleep 5; ./target/release/sway-stage --layouts-dir examples load four-windows
+```
+
+- `two-foot`: two Foot windows of equal width, left then right; the left one focused.
+- `four-windows`: Firefox at 44% width, middle Foot at 32%, and the right column at 24%;
+  inside the column, the upper Foot at 77% height and the lower at 23%; Firefox focused.
+  Shares are sibling dimensions normalized by their sum, excluding gaps, and may differ by
+  up to 5 percentage points.
+
+Success exits 0 without stdout. Inspect `last-run.log` after failures. To inspect the
+loaded workspace, run either read-only command below from the terminal and switch back to
+the loaded workspace during the delay. The inspector prints the hierarchy, focus marker,
+app IDs or classes, and Sway's `parent_area`, which is not an axis share.
+
+```sh
+sleep 5; cargo run --locked --example inspect_sway
+```
+
+The following query (requires `jq`) prints every sibling group with normalized axis
+shares and focus flags:
+
+```sh
+sleep 5; swaymsg -t get_tree | jq '
+  recurse(.nodes[]) | select(.type == "workspace")
+  | select(any(recurse(.nodes[]); .focused))
+  | recurse(.nodes[]) | select((.nodes | length) > 1)
+  | (if .layout == "splith" then "width" else "height" end) as $axis
+  | (.nodes | map(.rect[$axis]) | add) as $total
+  | {group: .id, layout, children: [.nodes[] |
+      {id, app_id, focused, share_pct:
+        (if $total > 0 then 100 * .rect[$axis] / $total else null end)}]}'
+```
+
+`cargo run --locked --example observe_sway` prints ten seconds of events through the
+production observer. It sends only workspace/tree queries and tick fences, which other
+tick subscribers can see.

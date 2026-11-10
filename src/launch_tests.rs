@@ -43,7 +43,7 @@ impl Fixture {
 
     fn run_finished(&self, config: &Config, mut steps: Vec<Step>) -> Result<(), String> {
         let tree = steps.last().unwrap().tree.clone();
-        fn sizing(steps: &mut Vec<Step>, tree: &Value, node: &crate::config::Node) {
+        fn sizing(steps: &mut Vec<Step>, tree: &Value, node: &LayoutNode) {
             if let NodeKind::Split { children, .. } = &node.kind {
                 steps.push(step(tree.clone()));
                 for child in children {
@@ -506,7 +506,7 @@ fn failure_reports_mention_partial_layouts_only_after_a_successful_spawn() {
         let error = fixture
             .exchange(steps, |connect, diagnostics| {
                 let result = load_with(config, connect, diagnostics).map(|_| ());
-                result.map_err(|error| diagnostics.failure(error))
+                result.map_err(|error| diagnostics.report_failure(error))
             })
             .unwrap_err();
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
@@ -1102,7 +1102,7 @@ fn four_window_reference_transcript_uses_three_root_children() {
     let path = fixture.path.join("reference.yaml");
     fs::write(&path, include_str!("../examples/four-windows.yaml")).unwrap();
     let mut config = crate::config::read(&path).unwrap();
-    fn substitute(node: &mut crate::config::Node, cwd: &PathBuf) {
+    fn substitute(node: &mut LayoutNode, cwd: &PathBuf) {
         match &mut node.kind {
             NodeKind::Window {
                 command,
@@ -1404,7 +1404,7 @@ fn completed_session(
             .find_as_ref(|n| n.id == initial.target)
             .unwrap();
         fn owned<'a>(
-            config: &'a crate::config::Node,
+            config: &'a LayoutNode,
             actual: &Node,
             accepted: &mut BTreeMap<i64, &'a Matcher>,
         ) -> Hierarchy {
@@ -1413,15 +1413,15 @@ fn completed_session(
                     accepted.insert(actual.id, matcher);
                     Hierarchy::Window(actual.id)
                 }
-                NodeKind::Split { children, .. } => Hierarchy::Split(
-                    Some(actual.id),
-                    actual.layout,
-                    children
+                NodeKind::Split { children, .. } => Hierarchy::Split {
+                    id: Some(actual.id),
+                    layout: actual.layout,
+                    children: children
                         .iter()
                         .zip(&actual.nodes)
                         .map(|(child, actual)| owned(&child.value, actual, accepted))
                         .collect(),
-                ),
+                },
             }
         }
         let mut accepted = BTreeMap::new();
@@ -1431,10 +1431,10 @@ fn completed_session(
             connect,
             diagnostics,
             target: initial.target,
-            existing: HashSet::new(),
+            preexisting_ids: HashSet::new(),
             accepted,
-            expected,
-            timeout_ms: config.window_timeout_ms,
+            expected_hierarchy: expected,
+            window_timeout_ms: config.window_timeout_ms,
         };
         session.verify(&initial)?;
         action(&mut session)
@@ -1497,7 +1497,7 @@ fn two_sibling_weights_use_dimensions_and_ignore_root_weight_and_percent() {
     );
     completed_session(&fixture, &config, steps, |session| {
         let mut warnings = Vec::new();
-        session.size(&config.layout.value, &[], &mut warnings)?;
+        session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
         assert!(warnings.is_empty());
         Ok(())
     })
@@ -1525,7 +1525,7 @@ fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
     operation(&mut steps, "[con_id=21] resize set width 300 px", &b, &c);
     completed_session(&fixture, &config, steps, |session| {
         let mut warnings = Vec::new();
-        session.size(&config.layout.value, &[], &mut warnings)?;
+        session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
         assert!(warnings.is_empty());
         Ok(())
     })
@@ -1547,7 +1547,7 @@ fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
     operation(&mut steps, "[con_id=20] resize set width 200 px", &e, &f);
     completed_session(&fixture, &config, steps, |session| {
         let mut warnings = Vec::new();
-        session.size(&config.layout.value, &[], &mut warnings)?;
+        session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
         assert!(warnings.is_empty());
         Ok(())
     })
@@ -1587,7 +1587,7 @@ fn minimum_constraints_stagnation_and_three_pass_limit_warn_without_failing() {
         }
         completed_session(&fixture, &config, steps, |session| {
             let mut warnings = Vec::new();
-            session.size(&config.layout.value, &[], &mut warnings)?;
+            session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
             assert_eq!(warnings.len(), 1);
             assert!(warnings[0].contains("group=10"));
             assert!(warnings[0].contains("targets=[90.00%, 10.00%]"));
@@ -1626,7 +1626,7 @@ fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
             vec![step(tree.clone()), step(tree)],
             |session| {
                 let mut warnings = Vec::new();
-                session.size(&config.layout.value, &[], &mut warnings)?;
+                session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
                 assert_eq!(!warnings.is_empty(), warning);
                 if warning {
                     assert!(warnings[0].contains("observed=unavailable"));
@@ -1714,7 +1714,7 @@ fn nested_groups_are_sized_outer_first_including_equal_axes() {
         operation(&mut steps, "[con_id=22] resize set height 200 px", &c, &d);
         completed_session(&fixture, &config, steps, |session| {
             let mut warnings = Vec::new();
-            session.size(&config.layout.value, &[], &mut warnings)?;
+            session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
             assert!(warnings.is_empty());
             Ok(())
         })
@@ -1795,7 +1795,7 @@ fn sizing_interference_and_ipc_errors_are_fatal_even_when_sizes_are_nonfatal() {
             }
         };
         let error = completed_session(&fixture, &config, steps, |session| {
-            session.size(&config.layout.value, &[], &mut Vec::new())
+            session.apply_sizing(&config.layout.value, &[], &mut Vec::new())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
@@ -1879,7 +1879,7 @@ fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
         final_focus_steps(&mut steps, &a, id);
         completed_session(&fixture, &config, steps, |session| {
             let (logical, path) =
-                focus_path(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
+                find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
             assert_eq!(logical, if explicit { "w1" } else { "w0" });
             assert_eq!(path, [0, if explicit { 1 } else { 0 }]);
             session.focus(&path)

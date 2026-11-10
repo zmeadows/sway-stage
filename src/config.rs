@@ -7,8 +7,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
-const MAX_DEPTH: usize = 32;
-const MAX_NODES: usize = 256;
+const MAX_LAYOUT_DEPTH: usize = 32;
+const MAX_LAYOUT_NODES: usize = 256;
 // Each wait is interactive: the user must keep the target workspace focused throughout.
 // Five minutes covers slow cold starts; larger values are not interactive waits.
 const MAX_WINDOW_TIMEOUT_MS: u64 = 5 * 60 * 1000;
@@ -16,18 +16,22 @@ const MAX_WINDOW_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(deserialize_with = "integer")]
+    #[serde(deserialize_with = "unquoted_integer")]
     version: u64,
-    pub layout: Spanned<Node>,
-    #[serde(default, deserialize_with = "present")]
+    pub layout: Spanned<LayoutNode>,
+    #[serde(default, deserialize_with = "non_null")]
     pub focus: Option<String>,
-    #[serde(default = "default_timeout", deserialize_with = "integer")]
+    #[serde(
+        default = "default_window_timeout_ms",
+        deserialize_with = "unquoted_integer"
+    )]
     pub window_timeout_ms: u64,
 }
 
+/// A configured split or window. Distinct from `swayipc::Node`, an observed Sway container.
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "NodeFields")]
-pub struct Node {
+pub struct LayoutNode {
     pub weight: f64,
     pub kind: NodeKind,
 }
@@ -35,8 +39,8 @@ pub struct Node {
 #[derive(Debug)]
 pub enum NodeKind {
     Split {
-        split: Orientation,
-        children: Vec<Spanned<Node>>,
+        orientation: Orientation,
+        children: Vec<Spanned<LayoutNode>>,
     },
     Window {
         id: String,
@@ -66,30 +70,30 @@ pub enum Matcher {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NodeFields {
-    #[serde(default = "default_weight", deserialize_with = "number")]
+    #[serde(default = "default_weight", deserialize_with = "unquoted_number")]
     weight: f64,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
     split: Option<Orientation>,
-    #[serde(default, deserialize_with = "present")]
-    children: Option<Vec<Spanned<Node>>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
+    children: Option<Vec<Spanned<LayoutNode>>>,
+    #[serde(default, deserialize_with = "non_null")]
     id: Option<String>,
-    #[serde(default, deserialize_with = "command_field")]
+    #[serde(default, deserialize_with = "non_null_command")]
     command: Option<Vec<String>>,
-    #[serde(default, rename = "match", deserialize_with = "match_field")]
+    #[serde(default, rename = "match", deserialize_with = "non_null_match")]
     matcher: Option<Matcher>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
     cwd: Option<String>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
     env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatchFields {
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
     app_id: Option<String>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "non_null")]
     class: Option<String>,
 }
 
@@ -98,28 +102,30 @@ impl TryFrom<MatchFields> for Matcher {
 
     fn try_from(fields: MatchFields) -> Result<Self, String> {
         match (fields.app_id, fields.class) {
-            (Some(value), None) => Ok(Self::AppId(value)),
-            (None, Some(value)) => Ok(Self::Class(value)),
+            (Some(app_id), None) => Ok(Self::AppId(app_id)),
+            (None, Some(class)) => Ok(Self::Class(class)),
             _ => Err("match must contain exactly one of app_id or class".into()),
         }
     }
 }
 
-impl TryFrom<NodeFields> for Node {
+impl TryFrom<NodeFields> for LayoutNode {
     type Error = String;
 
     fn try_from(fields: NodeFields) -> Result<Self, String> {
-        let kind = if fields.split.is_some() || fields.children.is_some() {
-            if fields.id.is_some()
-                || fields.command.is_some()
-                || fields.matcher.is_some()
-                || fields.cwd.is_some()
-                || fields.env.is_some()
-            {
+        let is_split = fields.split.is_some() || fields.children.is_some();
+        let has_window_fields = fields.id.is_some()
+            || fields.command.is_some()
+            || fields.matcher.is_some()
+            || fields.cwd.is_some()
+            || fields.env.is_some();
+
+        let kind = if is_split {
+            if has_window_fields {
                 return Err("node mixes split fields with window fields".into());
             }
             NodeKind::Split {
-                split: fields.split.ok_or("split node is missing split")?,
+                orientation: fields.split.ok_or("split node is missing split")?,
                 children: fields.children.ok_or("split node is missing children")?,
             }
         } else {
@@ -142,12 +148,12 @@ fn default_weight() -> f64 {
     1.0
 }
 
-fn default_timeout() -> u64 {
+fn default_window_timeout_ms() -> u64 {
     20_000
 }
 
 // Missing optional fields get defaults; explicit nulls must still be type errors.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+fn non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -155,31 +161,33 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-fn command_field<'de, D: Deserializer<'de>>(
+// Like `non_null`, but explains that a null command is an unfilled capture placeholder.
+fn non_null_command<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error> {
-    let value = Option::<Vec<String>>::deserialize(deserializer)?;
-    if value.is_none() {
+    let command = Option::<Vec<String>>::deserialize(deserializer)?;
+    if command.is_none() {
         return Err(de::Error::custom(
             "command: null is a capture placeholder; fill in an executable and literal arguments",
         ));
     }
-    Ok(value)
+    Ok(command)
 }
 
-fn match_field<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Matcher>, D::Error> {
-    let value = Option::<Matcher>::deserialize(deserializer)?;
-    if value.is_none() {
+// Like `non_null`, but explains that a null match is an unfilled capture placeholder.
+fn non_null_match<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Matcher>, D::Error> {
+    let matcher = Option::<Matcher>::deserialize(deserializer)?;
+    if matcher.is_none() {
         return Err(de::Error::custom(
             "match: null is a capture placeholder; fill in exactly one app_id or class",
         ));
     }
-    Ok(value)
+    Ok(matcher)
 }
 
 // Direct numeric deserialization accepts quoted numbers in this parser. Serde's
 // untagged buffering uses YAML scalar types and rejects those strings instead.
-fn integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+fn unquoted_integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged, expecting = "a nonnegative YAML integer (not a string)")]
     enum Integer {
@@ -189,7 +197,7 @@ fn integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> 
     Ok(value)
 }
 
-fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+fn unquoted_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged, expecting = "a finite positive YAML number")]
     enum Number {
@@ -212,18 +220,21 @@ pub fn read(path: &Path) -> Result<Config, String> {
     }
 
     // Cap the read itself, including if the file grows after discovery/metadata.
-    let mut input = Vec::new();
+    let mut bytes = Vec::new();
     file.take((MAX_INPUT_BYTES + 1) as u64)
-        .read_to_end(&mut input)
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("{}: read: {error}", path.display()))?;
-    if input.len() > MAX_INPUT_BYTES {
+    if bytes.len() > MAX_INPUT_BYTES {
         return Err(format!("{}: input exceeds the 1 MiB limit", path.display()));
     }
-    let input = std::str::from_utf8(&input)
+
+    let input = std::str::from_utf8(&bytes)
         .map_err(|error| format!("{}: expected UTF-8 YAML: {error}", path.display()))?;
     parse(input, path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// Parses and validates one layout document. `path` locates the file only for resolving
+/// relative `cwd` values; it is not read here.
 fn parse(input: &str, path: &Path) -> Result<Config, String> {
     if input.len() > MAX_INPUT_BYTES {
         return Err("input exceeds the 1 MiB limit".into());
@@ -243,8 +254,8 @@ fn parse(input: &str, path: &Path) -> Result<Config, String> {
             max_documents: 1,
             // YAML includes children sequences and window field collections in
             // addition to layout nodes. Allow the full 32-node layout depth.
-            max_depth: MAX_DEPTH * 2 + 4,
-            flow_nesting_limit: MAX_DEPTH * 2 + 4,
+            max_depth: MAX_LAYOUT_DEPTH * 2 + 4,
+            flow_nesting_limit: MAX_LAYOUT_DEPTH * 2 + 4,
             max_events: MAX_INPUT_BYTES,
             max_nodes: MAX_INPUT_BYTES,
             max_total_scalar_bytes: MAX_INPUT_BYTES,
@@ -254,11 +265,11 @@ fn parse(input: &str, path: &Path) -> Result<Config, String> {
     let mut config: Config =
         serde_saphyr::with_deserializer_from_str_with_options(input, options, |deserializer| {
             serde_path_to_error::deserialize(deserializer).map_err(|error| {
-                let path = error.path().to_string();
+                let serde_path = error.path().to_string();
                 // Spanned contributes synthetic `value` fields to Serde's path.
-                field_path = match path.strip_prefix("layout.value") {
+                field_path = match serde_path.strip_prefix("layout.value") {
                     Some(rest) => format!("layout{}", rest.replace("].value", "]")),
-                    None => path,
+                    None => serde_path,
                 };
                 error.into_inner()
             })
@@ -279,19 +290,20 @@ fn parse(input: &str, path: &Path) -> Result<Config, String> {
         ));
     }
 
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let mut ids = HashSet::new();
+    let layout_dir = path.parent().unwrap_or(Path::new("."));
+    let mut window_ids = HashSet::new();
     let mut node_count = 0;
     validate_node(
         &mut config.layout,
         "layout",
         1,
         &mut node_count,
-        &mut ids,
-        parent,
+        &mut window_ids,
+        layout_dir,
     )?;
+
     if let Some(focus) = &config.focus
-        && !ids.contains(focus)
+        && !window_ids.contains(focus)
     {
         return Err(format!(
             "focus: {focus:?} does not identify a window id in this layout"
@@ -300,27 +312,30 @@ fn parse(input: &str, path: &Path) -> Result<Config, String> {
     Ok(config)
 }
 
+/// Validates a subtree and resolves each window's relative `cwd` against `layout_dir`.
+/// `field_path` names the node in errors, such as `layout.children[1]`.
 fn validate_node(
-    node: &mut Spanned<Node>,
-    path: &str,
+    node: &mut Spanned<LayoutNode>,
+    field_path: &str,
     depth: usize,
     node_count: &mut usize,
-    ids: &mut HashSet<String>,
-    parent: &Path,
+    window_ids: &mut HashSet<String>,
+    layout_dir: &Path,
 ) -> Result<(), String> {
     let location = node.referenced;
     let fail = |field: &str, message: &str| {
         format!(
-            "{path}{field} (line {}, column {}): {message}",
+            "{field_path}{field} (line {}, column {}): {message}",
             location.line(),
             location.column()
         )
     };
+
     *node_count += 1;
-    if depth > MAX_DEPTH {
+    if depth > MAX_LAYOUT_DEPTH {
         return Err(fail("", "layout depth exceeds 32 nodes along a path"));
     }
-    if *node_count > MAX_NODES {
+    if *node_count > MAX_LAYOUT_NODES {
         return Err(fail("", "layout exceeds 256 nodes"));
     }
     if !node.value.weight.is_finite() || node.value.weight <= 0.0 {
@@ -332,13 +347,20 @@ fn validate_node(
             if children.len() < 2 {
                 return Err(fail(".children", "a split requires at least two children"));
             }
-            let mut sum = 0.0;
-            for (index, child) in children.iter_mut().enumerate() {
-                let child_path = format!("{path}.children[{index}]");
-                validate_node(child, &child_path, depth + 1, node_count, ids, parent)?;
-                sum += child.value.weight;
+            let mut weight_sum = 0.0;
+            for (child_index, child) in children.iter_mut().enumerate() {
+                let child_path = format!("{field_path}.children[{child_index}]");
+                validate_node(
+                    child,
+                    &child_path,
+                    depth + 1,
+                    node_count,
+                    window_ids,
+                    layout_dir,
+                )?;
+                weight_sum += child.value.weight;
             }
-            if !sum.is_finite() {
+            if !weight_sum.is_finite() {
                 return Err(fail(".children", "sibling weight sum must be finite"));
             }
         }
@@ -352,30 +374,33 @@ fn validate_node(
             if !valid_name(id) {
                 return Err(fail(".id", "expected [A-Za-z0-9][A-Za-z0-9_-]*"));
             }
-            if !ids.insert(id.clone()) {
+            if !window_ids.insert(id.clone()) {
                 return Err(fail(".id", &format!("duplicate window id {id:?}")));
             }
+
             if command.is_empty() || command[0].is_empty() {
                 return Err(fail(
                     ".command",
                     "provide a nonempty executable followed by literal arguments",
                 ));
             }
-            for (index, argument) in command.iter().enumerate() {
+            for (argument_index, argument) in command.iter().enumerate() {
                 if argument.contains('\0') {
                     return Err(fail(
-                        &format!(".command[{index}]"),
+                        &format!(".command[{argument_index}]"),
                         "arguments cannot contain NUL",
                     ));
                 }
             }
+
             let (field, selector) = match matcher {
-                Matcher::AppId(value) => (".match.app_id", value),
-                Matcher::Class(value) => (".match.class", value),
+                Matcher::AppId(app_id) => (".match.app_id", app_id),
+                Matcher::Class(class) => (".match.class", class),
             };
             if selector.is_empty() {
                 return Err(fail(field, "provide a nonempty exact window selector"));
             }
+
             if let Some(directory) = cwd {
                 if directory.as_os_str().is_empty()
                     || directory.as_os_str().as_encoded_bytes().contains(&0)
@@ -385,7 +410,7 @@ fn validate_node(
                         "provide a nonempty directory path without NUL",
                     ));
                 }
-                let resolved = parent.join(&directory);
+                let resolved = layout_dir.join(&directory);
                 let metadata = fs::metadata(&resolved).map_err(|error| {
                     fail(".cwd", &format!("inspect {}: {error}", resolved.display()))
                 })?;
@@ -397,6 +422,7 @@ fn validate_node(
                 }
                 *directory = resolved;
             }
+
             for (key, value) in env {
                 if key.is_empty() || key.contains(['=', '\0']) {
                     return Err(fail(
@@ -439,18 +465,26 @@ mod tests {
         let config = parse_test(include_str!("../examples/four-windows.yaml")).unwrap();
         assert_eq!(config.focus.as_deref(), Some("browser"));
         assert_eq!(config.window_timeout_ms, 20_000);
-        let NodeKind::Split { split, children } = config.layout.value.kind else {
+        let NodeKind::Split {
+            orientation,
+            children,
+        } = config.layout.value.kind
+        else {
             panic!("expected root split");
         };
-        assert!(matches!(split, Orientation::Horizontal));
+        assert!(matches!(orientation, Orientation::Horizontal));
         assert_eq!(children.len(), 3);
         assert_eq!(children[0].value.weight, 44.0);
         assert_eq!(children[1].value.weight, 32.0);
         assert_eq!(children[2].value.weight, 24.0);
-        let NodeKind::Split { split, children } = &children[2].value.kind else {
+        let NodeKind::Split {
+            orientation,
+            children,
+        } = &children[2].value.kind
+        else {
             panic!("expected nested split");
         };
-        assert!(matches!(split, Orientation::Vertical));
+        assert!(matches!(orientation, Orientation::Vertical));
         let NodeKind::Window { id, matcher, .. } = &children[0].value.kind else {
             panic!("expected window");
         };
@@ -696,8 +730,8 @@ mod tests {
 
     #[test]
     fn bounds_layout_depth_and_parser_nesting() {
-        assert!(parse_test(&nested_layout(MAX_DEPTH)).is_ok());
-        rejects(&nested_layout(MAX_DEPTH + 1), "depth exceeds 32");
+        assert!(parse_test(&nested_layout(MAX_LAYOUT_DEPTH)).is_ok());
+        rejects(&nested_layout(MAX_LAYOUT_DEPTH + 1), "depth exceeds 32");
         let input = format!(
             "version: 1\nlayout: &anchor {}0{}",
             "[".repeat(10_000),

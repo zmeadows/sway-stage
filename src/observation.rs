@@ -47,10 +47,13 @@ pub struct Snapshot {
 }
 
 pub struct Observer {
-    socket: UnixStream,
+    /// A clone of the reader thread's event socket, kept only to shut it down.
+    event_socket: UnixStream,
     reader: Option<JoinHandle<()>>,
     messages: mpsc::Receiver<Message>,
+    /// A terminal failure, set by the reader thread or the observer; never cleared.
     failure: Arc<Mutex<Option<String>>>,
+    /// The focused workspace frozen by the first snapshot.
     target: Option<i64>,
 }
 
@@ -66,21 +69,22 @@ impl Observer {
             .set_read_timeout(None)
             .and_then(|()| socket.set_write_timeout(None))
             .map_err(|error| format!("configure event socket: {error}"))?;
+
         let (sender, messages) = mpsc::sync_channel(EVENT_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
         let reader_failure = Arc::clone(&failure);
         let reader = thread::Builder::new()
             .name("sway-events".into())
             .spawn(move || {
-                let read = || -> Result<(), String> {
-                    let mut events = Connection::from(socket)
+                let read_events = || -> Result<(), String> {
+                    let mut event_stream = Connection::from(socket)
                         .subscribe([EventType::Workspace, EventType::Window, EventType::Tick])
                         .map_err(|error| format!("subscribe to workspace/window/tick: {error}"))?;
                     sender
                         .try_send(Message::Subscribed)
                         .map_err(|_| "event history unavailable".to_owned())?;
                     loop {
-                        let event = events
+                        let event = event_stream
                             .next()
                             .ok_or("event stream ended")?
                             .map_err(|error| format!("read Sway event: {error}"))?;
@@ -90,7 +94,7 @@ impl Observer {
                         })?;
                     }
                 };
-                if let Err(error) = read()
+                if let Err(error) = read_events()
                     && let Ok(mut failure) = reader_failure.lock()
                     && failure.is_none()
                 {
@@ -98,8 +102,9 @@ impl Observer {
                 }
             })
             .map_err(|error| format!("start event reader: {error}"))?;
+
         let mut observer = Self {
-            socket: control,
+            event_socket: control,
             reader: Some(reader),
             messages,
             failure,
@@ -135,7 +140,7 @@ impl Observer {
         if let Ok(mut failure) = self.failure.lock() {
             *failure = Some(error.clone());
         }
-        let _ = self.socket.shutdown(Shutdown::Both);
+        let _ = self.event_socket.shutdown(Shutdown::Both);
         Err(error)
     }
 
@@ -179,6 +184,7 @@ impl Observer {
                     {
                         return self.fail("workspace event has an invalid workspace node".into());
                     }
+
                     if workspace.change == WorkspaceChange::Focus
                         && let Some(target) = self.target
                         && (current.id != target
@@ -192,6 +198,7 @@ impl Observer {
                         return self.fail("target workspace was destroyed".into());
                     }
                 }
+
                 if let Event::Window(window) = &event
                     && !matches!(
                         window.container.node_type,
@@ -214,14 +221,15 @@ impl Observer {
         let control = socket
             .try_clone()
             .map_err(|error| format!("clone query socket: {error}"))?;
-        let token = format!(
+        let fence_token = format!(
             "sway-stage:{}:{}",
             std::process::id(),
             NEXT_FENCE.fetch_add(1, Ordering::Relaxed)
         );
-        let query_token = token.clone();
-        let (sender, result) = mpsc::channel();
-        let worker = thread::Builder::new()
+        let query_fence_token = fence_token.clone();
+
+        let (sender, receiver) = mpsc::channel();
+        let query_thread = thread::Builder::new()
             .name("sway-snapshot".into())
             .spawn(move || {
                 let query = || -> Result<_, String> {
@@ -235,7 +243,7 @@ impl Observer {
                     // Sway queues this tick behind earlier events on the event socket.
                     // Unlike an empty channel, its receipt proves the reader caught up.
                     if !connection
-                        .send_tick(query_token)
+                        .send_tick(query_fence_token)
                         .map_err(|error| format!("send observation fence: {error}"))?
                     {
                         return Err("Sway rejected observation fence".into());
@@ -245,19 +253,22 @@ impl Observer {
                 let _ = sender.send(query());
             })
             .map_err(|error| format!("start snapshot reader: {error}"))?;
-        let result = result.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+
+        let query_result =
+            receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         // Also cancels a read_exact partway through a header/payload. Never reuse it.
         let _ = control.shutdown(Shutdown::Both);
-        if worker.join().is_err() {
+        if query_thread.join().is_err() {
             return self.fail("snapshot reader panicked".into());
         }
-        let (workspaces, tree) = match result {
+        let (workspaces, tree) = match query_result {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => return self.fail(error),
             Err(error) => return self.fail(format!("snapshot deadline/channel failure: {error}")),
         };
-        let mut focused = workspaces.iter().filter(|workspace| workspace.focused);
-        let target = match (focused.next(), focused.next()) {
+
+        let mut focused_workspaces = workspaces.iter().filter(|workspace| workspace.focused);
+        let target = match (focused_workspaces.next(), focused_workspaces.next()) {
             (Some(workspace), None) => workspace.id,
             _ => return self.fail("snapshot: expected exactly one focused workspace".into()),
         };
@@ -274,8 +285,11 @@ impl Observer {
             return self.fail(format!("snapshot: focus left target id={previous}"));
         }
         self.target = Some(target);
-        let mut ids = HashSet::new();
-        if tree.node_type != NodeType::Root || tree.iter().any(|node| !ids.insert(node.id)) {
+
+        let mut container_ids = HashSet::new();
+        if tree.node_type != NodeType::Root
+            || tree.iter().any(|node| !container_ids.insert(node.id))
+        {
             return self.fail("snapshot: invalid root or duplicate container identities".into());
         }
         let Some(workspace) = tree.find_as_ref(|node| node.id == target) else {
@@ -291,7 +305,7 @@ impl Observer {
         let mut events = Vec::new();
         loop {
             match self.next_until(deadline)? {
-                Some(Event::Tick(tick)) if !tick.first && tick.payload == token => break,
+                Some(Event::Tick(tick)) if !tick.first && tick.payload == fence_token => break,
                 Some(Event::Tick(_)) => {}
                 Some(event) => {
                     if events.len() == EVENT_CAPACITY {
@@ -314,7 +328,7 @@ impl Drop for Observer {
     fn drop(&mut self) {
         // The worker never waits on a channel send. shutdown wakes idle and partial
         // socket reads (and a stalled subscription), so joining does not wait for Sway.
-        let _ = self.socket.shutdown(Shutdown::Both);
+        let _ = self.event_socket.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -323,7 +337,7 @@ impl Drop for Observer {
 
 /// A window-like container with the ancestry that determines its placement. Location
 /// alone never establishes ownership.
-pub struct Located<'a> {
+pub struct LocatedWindow<'a> {
     pub node: &'a Node,
     pub workspace: Option<i64>,
     pub floating: bool,
@@ -334,19 +348,20 @@ pub struct Located<'a> {
 /// Every `con`/`floating_con` that has view properties or no children, across the whole
 /// tree in pre-order with tiled children before floating ones. Structural split wrappers
 /// are excluded; an empty container counts, since it may still become a window.
-pub fn locate_windows(tree: &Node) -> Vec<Located<'_>> {
+pub fn locate_windows(tree: &Node) -> Vec<LocatedWindow<'_>> {
     let mut windows = Vec::new();
-    collect(tree, None, false, false, false, &mut windows);
+    collect_windows(tree, None, false, false, false, &mut windows);
     windows
 }
 
-fn collect<'a>(
+/// The flags carry placement inherited from `node`'s ancestors.
+fn collect_windows<'a>(
     node: &'a Node,
     workspace: Option<i64>,
     floating: bool,
     fullscreen: bool,
     scratchpad: bool,
-    windows: &mut Vec<Located<'a>>,
+    windows: &mut Vec<LocatedWindow<'a>>,
 ) {
     let workspace = if node.node_type == NodeType::Workspace {
         Some(node.id)
@@ -367,13 +382,14 @@ fn collect<'a>(
             Some(ScratchpadState::Fresh | ScratchpadState::Changed)
         )
         || (node.node_type == NodeType::Workspace && node.name.as_deref() == Some("__i3_scratch"));
+
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && (node.nodes.is_empty() && node.floating_nodes.is_empty()
             || node.app_id.is_some()
             || node.window.is_some()
             || node.shell.is_some())
     {
-        windows.push(Located {
+        windows.push(LocatedWindow {
             node,
             workspace,
             floating,
@@ -382,10 +398,10 @@ fn collect<'a>(
         });
     }
     for child in &node.nodes {
-        collect(child, workspace, floating, fullscreen, scratchpad, windows);
+        collect_windows(child, workspace, floating, fullscreen, scratchpad, windows);
     }
     for child in &node.floating_nodes {
-        collect(child, workspace, true, fullscreen, scratchpad, windows);
+        collect_windows(child, workspace, true, fullscreen, scratchpad, windows);
     }
 }
 

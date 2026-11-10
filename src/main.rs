@@ -83,7 +83,8 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
-    load_named(name, layouts_dir, &mut diagnostics).map_err(|error| diagnostics.failure(error))
+    load_named(name, layouts_dir, &mut diagnostics)
+        .map_err(|error| diagnostics.report_failure(error))
 }
 
 /// Validates and constructs a named layout under launch diagnostics. This is the single

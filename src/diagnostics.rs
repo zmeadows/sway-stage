@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct Diagnostics {
     /// The invoked command, which names failure notifications.
     operation: &'static str,
-    file: Option<File>,
-    path: Option<PathBuf>,
+    log_file: Option<File>,
+    log_path: Option<PathBuf>,
     started: Instant,
     stage: String,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
@@ -27,11 +27,11 @@ pub struct Diagnostics {
 impl Diagnostics {
     #[cfg(test)]
     pub(crate) fn for_test(path: PathBuf) -> Self {
-        let (file, path) = open_log(path).unwrap();
+        let (log_file, log_path) = open_log(path).unwrap();
         Self {
             operation: "load",
-            file: Some(file),
-            path: Some(path),
+            log_file: Some(log_file),
+            log_path: Some(log_path),
             started: Instant::now(),
             stage: "test".into(),
             launched: false,
@@ -43,16 +43,16 @@ impl Diagnostics {
     pub fn start(operation: &'static str) -> Self {
         let mut diagnostics = Self {
             operation,
-            file: None,
-            path: None,
+            log_file: None,
+            log_path: None,
             started: Instant::now(),
             stage: "validation".into(),
             launched: false,
         };
-        match state_path().and_then(open_log) {
-            Ok((file, path)) => {
-                diagnostics.file = Some(file);
-                diagnostics.path = Some(path);
+        match last_run_log_path().and_then(open_log) {
+            Ok((log_file, log_path)) => {
+                diagnostics.log_file = Some(log_file);
+                diagnostics.log_path = Some(log_path);
             }
             Err(error) => stderr(&format!("sway-stage: logging unavailable: {error}")),
         }
@@ -77,12 +77,13 @@ impl Diagnostics {
             self.stage.escape_debug(),
             message.escape_debug(),
         );
-        if let Some(file) = &mut self.file {
-            if let Err(error) = file.write_all(line.as_bytes()) {
+
+        if let Some(log_file) = &mut self.log_file {
+            if let Err(error) = log_file.write_all(line.as_bytes()) {
                 stderr(&format!(
                     "sway-stage: logging failed: {error}; using stderr"
                 ));
-                self.file = None;
+                self.log_file = None;
             } else {
                 return;
             }
@@ -97,7 +98,7 @@ impl Diagnostics {
     }
 
     /// Logs and notifies a fatal error, returning the primary message for stderr.
-    pub fn failure(&mut self, error: String) -> String {
+    pub fn report_failure(&mut self, error: String) -> String {
         let mut message = format!("{}: {error}", self.stage);
         // Validation, connection, prelaunch and failed-spawn errors leave nothing behind.
         if self.launched {
@@ -105,8 +106,9 @@ impl Diagnostics {
                 .push_str("; stopped without cleanup or relaunch; inspect windows before retrying");
         }
         self.record(&message);
-        if let Some(path) = &self.path {
-            message.push_str(&format!("; log: {}", path.display()));
+
+        if let Some(log_path) = &self.log_path {
+            message.push_str(&format!("; log: {}", log_path.display()));
         }
         if let Err(error) = notify_failure(self.operation, &message) {
             self.record(&format!("secondary notification failure: {error}"));
@@ -114,10 +116,11 @@ impl Diagnostics {
         message
     }
 
-    pub fn sizing_warnings(&mut self, warnings: &[String]) {
+    pub fn report_sizing_warnings(&mut self, warnings: &[String]) {
         if warnings.is_empty() {
             return;
         }
+
         let message = warnings.join("\n");
         stderr(&format!("sway-stage: warning: {message}"));
         if let Err(error) = notify("normal", "sway-stage sizing warning", &message) {
@@ -142,7 +145,7 @@ fn stderr(message: &str) {
     let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
-fn state_path() -> Result<PathBuf, String> {
+fn last_run_log_path() -> Result<PathBuf, String> {
     let base = if let Some(xdg) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         PathBuf::from(xdg)
     } else {
@@ -155,6 +158,7 @@ fn state_path() -> Result<PathBuf, String> {
         }
         home.join(".local/state")
     };
+
     if !base.is_absolute() {
         return Err("XDG_STATE_HOME must be absolute".into());
     }
@@ -206,6 +210,7 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("start notify-send: {error}"))?;
+
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match child.try_wait() {
