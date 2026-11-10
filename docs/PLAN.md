@@ -8,7 +8,7 @@ justify them.
 
 ## Status
 
-Implemented through milestones 3B and 3A.1 (new inference coverage awaits manual execution):
+Implemented through milestone 3C (combined menu awaits manual desktop verification):
 
 - Layout discovery, `list`, and `check` with strict YAML validation.
 - `load` for a root window and arbitrarily nested splits, with relative weights applied by
@@ -17,26 +17,28 @@ Implemented through milestones 3B and 3A.1 (new inference coverage awaits manual
   notifications for fatal errors and sizing warnings.
 - Read-only `capture`, printing an editable draft with `command: null` (and, without an
   identifier, `match: null`) placeholders, plus opt-in `--infer-commands` process arguments.
+- Combined `menu`: Fuzzel layout loading and named draft capture, with opt-in inference
+  and private saves outside the executable layouts directory.
 - Development examples: `inspect_sway` prints a read-only snapshot of the focused workspace,
   and `observe_sway` runs the production observer for ten seconds.
 - Development-only `scripts/integration.py`: six Foot scenarios plus four optional extended
   scenarios, with independent raw-tree verification, capture checks, guarded cleanup, and
   workspace restoration.
 
-Remaining: the Fuzzel picker (3C), then public release preparation (4).
+Next remaining milestone: public release preparation (4).
 
 Automated tests are offline. Configuration and CLI tests use temporary directories and a
 fake `notify-send`; IPC tests replay recorded trees and the window events Sway emits for
 them over disposable `UnixStream::pair` sockets, with harmless child scripts as
 applications. They never use the user's `SWAYSOCK` and do not simulate Sway's window
-manager. One CLI test runs `capture` end to end against a fake Sway socket bound in its
-temporary directory; sandboxes that forbid binding Unix sockets fail it.
+manager. CLI capture/menu tests use fake Fuzzel and Sway sockets bound in temporary
+directories; sandboxes that forbid binding Unix sockets require an outside-sandbox run.
 
 The user has manually verified all six original Foot integration scenarios, including
 raw-tree sizing/focus and read-only capture checks, as well as construction of the
 single-Foot, two-Foot, and four-window Firefox/Foot examples. All four extended scenarios
-also passed the user's manual runs. Still unverified live: the new inference checks,
-abort behavior under real interference, keybinding launch contexts,
+also passed the user's manual runs, including command inference coverage. Still unverified
+live: the combined menu, abort behavior under real interference, keybinding launch contexts,
 multi-seat behavior, and a supported Sway version.
 
 ## Completed milestones
@@ -63,8 +65,11 @@ multi-seat behavior, and a supported Sway version.
   validation, partial success, and unchanged structure. The existing `single-window`
   and `horizontal-pair` scenarios compare normal and inferred captures, require each
   Foot's run-specific `--app-id`, and recheck workspace ownership/state after each.
-  These new observational checks await the user's manual run; scenario definitions,
+  The user has manually verified these observational checks; scenario definitions,
   Firefox/Xterm assertions, and cleanup behavior are unchanged.
+- **3C. Combined Fuzzel menu.** `menu [--infer-commands]` loads exact offered selections
+  through `load_named` or captures before a separate name prompt. Offline process and IPC
+  fixtures cover ordering, cancellation, diagnostics, private saves, and failures.
 
 ## 3B. Self-contained Sway integration harness
 
@@ -141,23 +146,58 @@ present. Otherwise it is skipped; an empty original workspace destroyed by Sway 
 recreated. A concurrent user action can still occur after the last guard and before a
 command, so run only in a disposable session and leave input idle.
 
-The six standard and four extended scenarios have passed manual acceptance. The new
-inference checks and verification that interference stops safely with useful diagnostics
-remain outstanding. No live execution by an agent is permitted,
+The six standard and four extended scenarios, including inference checks, have passed
+manual acceptance. Verification that interference stops safely with useful diagnostics
+remains outstanding. No live execution by an agent is permitted,
 including help, partial runs, or trial runs.
 
-## 3C. Fuzzel picker
+## 3C. Combined Fuzzel menu — complete
 
-Add an optional `pick` command through a `fuzzel --dmenu` subprocess
-(`std::process::Command`, no shell), reusing configuration discovery and the `load` path.
-The future Fuzzel interface may invoke capture with `--infer-commands` by default through
-its configuration or launch arguments; that interface is outside milestone 3A.1.
-Only after an exact selection may it start launch diagnostics and call `load_named` in
-`src/main.rs`; cancellation and preselection errors leave the log alone and report through
-`diagnostics::notify_failure`.
+`menu [--infer-commands]` uses an explicit label/action mapping: lexical `Load: NAME`
+entries followed by `Capture current layout…`. It discovers names without parsing YAML
+and offers Capture even when there are no layouts. Fuzzel is synchronous, with literal
+arguments and no timeout for user input. A scoped writer feeds options while stdout is
+read, then both process and writer are joined. Output must be exactly one UTF-8 line;
+arbitrary typed selections fail closed. Fuzzel must use its default dmenu text output;
+index output is rejected with a useful error.
 
-Complete when fake picker tests cover exact selection, cancellation, missing executable,
-and invalid output, and Fuzzel is not required by unrelated commands.
+Fuzzel 1.11 introduced both `--prompt-only=PROMPT` and dmenu cancellation status 2
+(previously 1), per the upstream manual and changelog shipped with Fuzzel and
+[upstream sources](https://codeberg.org/dnkl/fuzzel). Require 1.11 or newer: only status 2
+with empty stdout cancels; status 1, other failures, and malformed output remain errors.
+Fuzzel is optional for all other commands.
+
+After a load selection and Fuzzel exit, `main.rs` starts `Diagnostics` under `menu` and
+calls the unchanged `load_named` implementation, including rediscovery and safe target
+observation, selecting the workspace focused at load time independently of the pre-menu
+tree. Before the first prompt, `main.rs` retains `capture::snapshot()` as a `Result`;
+`Snapshot::output_name` reads the original workspace's containing output from that tree.
+Both prompts receive the same literal `--output=OUTPUT` when known. Acquisition errors
+are deferred until Capture; Load and cancellation ignore them. Empty and unsupported
+layouts are validated only if Capture renders the saved tree after the action prompt exits.
+No later tree query or fallback capture occurs. Inference runs only on Capture and uses
+saved PIDs, allowing stale-process null fallback. Cancellation discards any draft in
+memory. Selection/capture/save failures notify under `menu` without launch logs.
+
+`discovery::config_home` shares configuration-base validation. Drafts always go to its
+`sway-stage/drafts` child, independently of `--layouts-dir`. Directory creation uses 0700
+without changing existing permissions. Saving creates a 0600 `.partial` staging file
+exclusively, writes and syncs the unchanged draft, then publishes with `hard_link` so an
+existing `.yaml` destination cannot be overwritten. Both `.yaml` and `.yml` collisions
+are checked; names are ASCII layout names limited to 250 bytes. Write/publication failure
+retains the staging file and reports its path; no partial YAML is published and no failure
+rollback removes uncertain files. Successful publication removes its staging link and
+attempts a best-effort path notification. The filesystem must support hard links within
+the drafts directory. External concurrent changes across two suffixes are not atomic.
+
+Offline tests use fake Fuzzel/notify-send and single-tree capture IPC fixtures. They verify
+the tree response precedes the first Fuzzel launch, both prompts use the original output,
+Capture renders saved state, and Load independently observes its target after Fuzzel exit.
+They also cover deferred snapshot errors, empty/unsupported initial layouts, exact
+selections, cancellation, subprocess/protocol errors, opt-in inference, draft destinations,
+permissions, collisions, exclusive publication, write failures, and launch-log isolation.
+The ten-scenario integration harness is unchanged. Live menu acceptance is user-only;
+see the manual procedure below.
 
 ## 4. Public release preparation
 
@@ -181,6 +221,7 @@ static linking, other platforms, or untested compositor versions.
 | `config.rs` | Strict YAML parsing into `LayoutNode` trees and semantic validation. |
 | `observation.rs` | Event reader, fenced snapshots, and read-only tree inspection. |
 | `launch.rs` | Launching, window acceptance, guarded construction, sizing, and focus. |
+| `menu.rs` | Fuzzel actions/name prompts and private, exclusive draft saving. |
 | `capture.rs` | Read-only conversion of the focused workspace into a YAML draft. |
 | `diagnostics.rs` | `last-run.log`, stderr reporting, and bounded notifications. |
 
@@ -245,8 +286,8 @@ ancestry and PIDs, and identifies the original workspace by the uniquely focused
 workspace ancestry and container ID. An empty workspace may itself be focused. Invalid
 root, duplicate IDs, absent focus, or ambiguous focus fails acquisition; representability
 and occupancy are checked only by `Snapshot::render`. Later desktop activity cannot
-redirect or invalidate rendering. Snapshot acquisition and rendering are separate
-operations for reuse by a future menu.
+redirect or invalidate rendering. Menu retains this snapshot before its first prompt
+and renders it only after Capture is selected.
 
 One recursive pass validates and converts the saved target subtree directly, since it
 needs the structure that `locate_windows` flattens:
@@ -264,7 +305,8 @@ unavailable or invalid data. Reads are bounded to 64 KiB plus a detection byte a
 UTF-8 argv boundaries, including empty arguments. Reads use positive leaf PIDs recorded
 in the saved tree, with no second PID observation. Process exit, PID reuse, or argv
 changes after the snapshot remain possible and cannot alter the captured structure.
-No inferred arguments reach error diagnostics or persistent storage. Capture failures report through
+No inferred arguments reach error diagnostics; only an explicit menu save or stdout
+redirection persists the generated draft. Capture failures report through
 `diagnostics::notify_failure`, never `Diagnostics::start`, so `last-run.log` is untouched.
 
 **Diagnostics.** Each launch replaces `last-run.log` by unlinking it and creating a new
@@ -402,18 +444,60 @@ environment values.
 - `swayipc` decoding and socket establishment limits are listed under the findings above.
 - No supported Sway version or Linux ABI baseline is set; Cargo publishing stays disabled
   until release behavior is ready.
-- New inference integration checks and live abort behavior await manual verification.
+- Combined-menu desktop behavior and live abort behavior await manual verification.
 - Capture fixes Sway state at one tree response and ignores subsequent desktop activity.
   Process arguments may already have changed by inference time; there is no second PID
   consistency check. Inference is opt-in and best-effort. Capture refuses structural
   container focus and never approximates tabbed, stacked, floating, or fullscreen state.
-- Milestone 3C must settle how `fuzzel --dmenu` reports cancellation (exit status and
-  output) as distinct from failure.
 
 ## Manual verification
 
 For the user only, in an isolated, disposable Sway session with `SWAYSOCK` pointing to it.
 Agents must never run these commands; see [AGENTS.md](../AGENTS.md).
+
+### Combined menu (user only)
+
+With Fuzzel 1.11 or newer and the built binary on the disposable session's PATH, use a
+Sway keybinding such as `bindsym $mod+Shift+m exec sway-stage menu`. Alternatively, from
+a terminal in the repository root, allow five seconds to focus the intended workspace:
+
+```sh
+sleep 5; ./target/release/sway-stage --layouts-dir examples menu
+sleep 5; ./target/release/sway-stage --layouts-dir examples menu --infer-commands
+```
+
+Run these separately. For loading, focus a completely empty workspace and select
+`Load: two-foot`; verify the normal sizes/final focus and a new launch log. Repeat with
+an occupied workspace to confirm refusal. For capture, focus a supported tiled arrangement,
+note the original focused window and proportions, invoke the menu, and move the pointer
+between windows while the action menu is open before selecting Capture. Move it again
+while entering a fresh name such as `captured-development`. Verify a path
+notification and the complete draft in `$XDG_CONFIG_HOME/sway-stage/drafts` (or
+`$HOME/.config/sway-stage/drafts`). The normal command must leave null commands; the
+inference command may recover process argv, which needs review. Neither capture changes
+the arrangement or launch log, and `--layouts-dir examples` does not change the save path.
+
+On two monitors, invoke the menu from a supported layout on output A. While each prompt
+is open, move the pointer to output B and change workspace focus, then return to complete
+the prompt. Both prompts must remain on A; the draft must preserve A's original hierarchy,
+weights, selectors, and focused window. Repeat with `--infer-commands`; arguments remain
+best-effort if a process exits during the wait. On one monitor, change window focus while
+the action prompt is open and change workspace while the name prompt is open, then verify
+the same original snapshot. Compare `sha256sum` of `last-run.log` before and after capture.
+
+For loading, invoke from an empty workspace; after the action menu opens, manually switch
+to a different empty workspace before choosing `Load: two-foot`. Verify construction uses
+the workspace focused after Fuzzel exits, with the normal safety checks and a new log.
+Snapshot errors must not prevent cancellation or reaching ordinary load validation.
+Output-removal behavior remains a user-only check: any Fuzzel failure should be reported
+without focus manipulation or automatic repair. No claim of live acceptance is made for
+these corrected interactions until the user performs them.
+
+Press Escape in the action menu, then separately choose Capture and press Escape at the
+name prompt. Both should exit successfully without files, errors, or a replaced launch
+log. Try an invalid name and an existing draft name: expect a menu error and preserved
+files. Drafts require manual review/editing and `check` before moving into layouts.
+Agents must never run these desktop checks.
 
 ### Integration harness (user only)
 
@@ -461,7 +545,7 @@ Xterm coverage additionally requires `xterm`, `Xwayland`, and `xdpyinfo` on `PAT
 `XWAYLAND` extension. The bounded read-only `xdpyinfo -queryExtensions` probe skips an
 unavailable server (or missing probe); a later Xterm launch or class mismatch fails.
 Keep the disposable session idle throughout. All four extended scenarios passed the
-user's manual verification before milestone 3A.1.
+user's manual verification, including the later inference checks.
 
 ### Individual examples
 

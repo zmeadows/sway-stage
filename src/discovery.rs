@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,18 +10,6 @@ pub struct Directory {
 
 impl Directory {
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self, String> {
-        Self::from_bases(
-            explicit,
-            env::var_os("XDG_CONFIG_HOME"),
-            env::var_os("HOME"),
-        )
-    }
-
-    fn from_bases(
-        explicit: Option<PathBuf>,
-        xdg: Option<OsString>,
-        home: Option<OsString>,
-    ) -> Result<Self, String> {
         if let Some(path) = explicit {
             if path.as_os_str().is_empty() {
                 return Err("--layouts-dir must not be empty".into());
@@ -33,24 +20,8 @@ impl Directory {
             });
         }
 
-        let base = if let Some(xdg) = xdg.filter(|value| !value.is_empty()) {
-            let path = PathBuf::from(xdg);
-            if !path.is_absolute() {
-                return Err("XDG_CONFIG_HOME must be absolute; set it or use --layouts-dir".into());
-            }
-            path
-        } else {
-            let home = home.filter(|value| !value.is_empty()).ok_or(
-                "neither XDG_CONFIG_HOME nor HOME is usable; set one or use --layouts-dir",
-            )?;
-            let path = PathBuf::from(home);
-            if !path.is_absolute() {
-                return Err("HOME must be absolute; set it or use --layouts-dir".into());
-            }
-            path.join(".config")
-        };
         Ok(Self {
-            path: base.join("sway-stage/layouts"),
+            path: config_home()?.join("sway-stage/layouts"),
             explicit: false,
         })
     }
@@ -109,6 +80,26 @@ impl Directory {
         }
         Ok(layouts)
     }
+}
+
+/// Shared XDG configuration base for executable layouts and separate capture drafts.
+pub fn config_home() -> Result<PathBuf, String> {
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(xdg);
+        if !path.is_absolute() {
+            return Err("XDG_CONFIG_HOME must be absolute".into());
+        }
+        return Ok(path);
+    }
+
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .ok_or("neither XDG_CONFIG_HOME nor HOME is usable; set one")?;
+    let path = PathBuf::from(home);
+    if !path.is_absolute() {
+        return Err("HOME must be absolute".into());
+    }
+    Ok(path.join(".config"))
 }
 
 pub fn valid_name(name: &str) -> bool {

@@ -3,6 +3,7 @@ mod config;
 mod diagnostics;
 mod discovery;
 mod launch;
+mod menu;
 mod observation;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -15,7 +16,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. The picker is not implemented yet."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures in the XDG drafts directory."
 )]
 struct Cli {
     /// Read layouts from PATH instead of the XDG configuration directory
@@ -45,12 +46,18 @@ enum Command {
         #[arg(long)]
         infer_commands: bool,
     },
+    /// Use Fuzzel to load a layout or capture a named draft
+    Menu {
+        /// Recover best-effort process arguments for captures only; review for secrets
+        #[arg(long)]
+        infer_commands: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Only load writes the launch log; load and capture also notify on failure. The other
-    // commands report solely to stdout/stderr.
+    // Only layout-loading attempts write the launch log. Menu and capture also notify
+    // on failure; the other commands report solely to stdout/stderr.
     let result = match cli.command {
         None => help().map_err(|error| format!("help: stdout: {error}")),
         Some(Command::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
@@ -59,6 +66,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Load { name }) => load(&name, cli.layouts_dir),
         Some(Command::Capture { infer_commands }) => capture(infer_commands),
+        Some(Command::Menu { infer_commands }) => menu(cli.layouts_dir, infer_commands),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -98,7 +106,7 @@ fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 }
 
 /// Validates and constructs a named layout under launch diagnostics. This is the single
-/// loading path: the planned picker calls it only after a layout has been selected.
+/// loading path: menu calls it only after Fuzzel has exited with a valid selection.
 fn load_named(
     name: &str,
     layouts_dir: Option<PathBuf>,
@@ -148,4 +156,31 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
         .write_all(draft.as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|error| format!("stdout: {error}"))
+}
+
+fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {
+    // Snapshot failure matters only if Capture is selected. Loading observes its own
+    // target after Fuzzel exits; cancellation needs neither a tree nor a valid layout.
+    let snapshot = capture::snapshot();
+    let output_name = snapshot.as_ref().ok().and_then(|saved| saved.output_name());
+    let action = menu::select(layouts_dir.clone(), output_name).map_err(report_menu_failure)?;
+    match action {
+        None => Ok(()),
+        Some(menu::Action::Load(name)) => {
+            let mut diagnostics = Diagnostics::start("menu");
+            diagnostics.stage(format!("menu load {name:?}: validation"));
+            load_named(&name, layouts_dir, &mut diagnostics)
+                .map_err(|error| diagnostics.report_failure(error))
+        }
+        Some(menu::Action::Capture) => {
+            let snapshot =
+                snapshot.map_err(|error| report_menu_failure(format!("capture: {error}")))?;
+            menu::capture_draft(&snapshot, infer_commands).map_err(report_menu_failure)
+        }
+    }
+}
+
+fn report_menu_failure(error: String) -> String {
+    let _ = diagnostics::notify_failure("menu", &error);
+    format!("menu: {error}")
 }

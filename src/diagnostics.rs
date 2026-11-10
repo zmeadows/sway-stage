@@ -39,7 +39,7 @@ impl Diagnostics {
     }
 
     /// Replaces the last-run log. Call only for an invocation that loads a selected layout:
-    /// `load`, or the picker once a layout is selected.
+    /// `load`, or `menu` once a layout is selected.
     pub fn start(operation: &'static str) -> Self {
         let mut diagnostics = Self {
             operation,
@@ -139,6 +139,16 @@ pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
         message,
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")))
+}
+
+/// Best-effort save confirmation, independent of launch diagnostics.
+pub fn notify_draft_saved(path: &std::path::Path) {
+    let _ = notify(
+        "normal",
+        "sway-stage draft saved",
+        &path.display().to_string(),
+    )
+    .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
 }
 
 fn stderr(message: &str) {
@@ -246,7 +256,7 @@ mod tests {
         let launch_log = fs::read_to_string(&path).unwrap();
         assert!(launch_log.contains("spawned pid=42"), "{launch_log}");
 
-        // Capture, or a picker before its selection, reports without any log access.
+        // Capture, or menu before layout selection, reports without any log access.
         notify_failure("capture", "capture: get tree: connection closed").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), launch_log);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);

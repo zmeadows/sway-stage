@@ -1,9 +1,8 @@
 # sway-stage specification
 
-This is the authoritative behavioral contract. It specifies `pick` before it is
-implemented; current status, design decisions, and the manual verification procedure
-are in the [roadmap](PLAN.md). The YAML format may be revised before its first release,
-with this document and the examples updated together.
+This is the authoritative behavioral contract. Current status, design decisions, and the
+manual verification procedure are in the [roadmap](PLAN.md). The YAML format may be revised
+before its first release, with this document and the examples updated together.
 
 ## Purpose and scope
 
@@ -23,17 +22,17 @@ or monitor assignment, and management of application lifetimes after launch.
 
 ## Commands and discovery
 
-The command surface (`pick` is not yet implemented):
+The command surface:
 
 | Command | Behavior |
 | --- | --- |
 | `load NAME` | Validate the named layout, then construct it on the focused empty workspace. |
 | `check NAME` | Validate a layout's syntax and semantics without IPC or launching anything. |
 | `capture [--infer-commands]` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
-| `pick` | Offer named layouts through `fuzzel --dmenu`, then perform `load` for the selection. |
+| `menu [--infer-commands]` | Use Fuzzel to load a named layout or capture and save a named draft. |
 | `list` | Print available layout names, one per line in lexical order. No IPC. |
 
-`--layouts-dir PATH` overrides discovery for `load`, `check`, `list`, and `pick`. Otherwise
+`--layouts-dir PATH` overrides discovery for `load`, `check`, `list`, and `menu`. Otherwise
 use `$XDG_CONFIG_HOME/sway-stage/layouts`, or `$HOME/.config/sway-stage/layouts` if
 `XDG_CONFIG_HOME` is unset or empty. A nonempty XDG path must be absolute; if neither
 base is usable, report an error. An explicit relative directory is relative to the CLI's
@@ -50,17 +49,75 @@ a matching window or that an application is installed. Help and version output a
 require no configuration, compositor, or optional tools. No subcommand shows help and
 performs no action.
 
-Fuzzel is an optional external executable needed only by `pick`; no shell is involved.
-Offer names as lines and accept only an exact member of that set. No layouts or picker
-cancellation is a successful no-op. An unavailable picker, execution failure other than
-cancellation, or invalid selection is an error. Resolve the target workspace only after
-selection; picker window focus must not select a target early. `pick` shares `load`'s
-validation and safety behavior.
-
-Successful operations and picker cancellation exit 0; validation or operational failure
+Successful operations and menu cancellation exit 0; validation or operational failure
 exits 1; invalid CLI usage exits 2. Data goes to stdout and errors, warnings, and diagnostics
-to stderr. A failed capture emits no partial YAML. Captures never overwrite a layout file;
-users choose where to save stdout.
+to stderr. A failed capture emits no partial YAML. Standalone `capture` writes only to
+stdout; users choose where to redirect it.
+
+## Combined Fuzzel menu
+
+`menu` requires Fuzzel 1.11 or newer as an optional external executable. Run it synchronously
+through `std::process::Command` without a shell or an interactive-input deadline. Supply
+lexically ordered layout names as `Load: NAME` lines, followed by the separate
+`Capture current layout…` action. Discover filenames without parsing their contents;
+with no layouts, still offer Capture. Accept only an exact offered label, mapped to its
+explicit action. Arbitrary typed input must never become a name, path, command, or action.
+Require one UTF-8 newline-terminated output line without embedded control characters.
+Fuzzel's dmenu cancellation is exit status 2 with no output: treat it as a successful no-op.
+Missing Fuzzel, any other nonzero status (including 1), unexpected output, and invalid
+selections are errors.
+
+Before launching the initial Fuzzel menu, attempt one read-only Sway tree snapshot through
+`SWAYSOCK`. Retain its original focused workspace identity, output ancestry, hierarchy,
+focus, and window PIDs in memory. Do not validate layout representability at this point:
+an empty or unsupported arrangement must still allow Load and cancellation. Retain any
+snapshot acquisition error; report it only if Capture is selected, without retrying.
+
+When the saved tree identifies the original output name, pass `--output=OUTPUT` to both
+the action menu and draft-name prompt. With no output name, omit that option; never choose
+another workspace for capture. If the output disappears, report any resulting Fuzzel
+failure normally, without switching outputs or repairing desktop state.
+
+For Load, wait for Fuzzel to exit, then start launch diagnostics and use the same
+`load_named` path as `load`. Rediscover the selected layout and perform all ordinary
+validation. Ignore the saved capture snapshot, including any acquisition error. The loader
+independently selects the workspace focused at load time after Fuzzel exits, using its
+existing safe observation procedure; it must still be completely empty. Preserve
+construction, sizing, final focus, and launch failure reporting.
+
+For Capture, wait for the action menu to exit, then render the saved pre-menu tree into
+complete YAML in memory. Do not query Sway again. Subsequent focus, workspace, output,
+and window changes during either prompt cannot alter or invalidate the captured structure
+or final-focus selection. Neither Fuzzel instance participates in capture. Do not focus,
+move, resize, or switch anything. Capture failure reports an error without opening the
+name prompt. Otherwise open `fuzzel --dmenu --prompt-only=...` for a draft name on the same
+original output. Canceling either prompt is a successful no-op; canceling the name prompt
+discards the draft without writing. `menu --infer-commands` attempts inference only after
+Capture is selected, using the saved window PIDs with best-effort null fallback. Arguments
+may have changed or processes exited during the unlimited menu wait. By default commands
+remain null. Standalone capture continues to use one tree snapshot at invocation.
+
+Save to `$XDG_CONFIG_HOME/sway-stage/drafts/`, falling back to
+`$HOME/.config/sway-stage/drafts/` when XDG_CONFIG_HOME is unset or empty. Use discovery's
+same absolute-base validation. `--layouts-dir` never changes this destination. Create
+needed directories only when saving, with private permissions (0700); do not change
+permissions of existing directories. New draft files are private (0600).
+
+Names must match `[A-Za-z0-9][A-Za-z0-9_-]*` and contain at most 250 ASCII characters,
+leaving room for the `.yaml` suffix. Save `development` as `drafts/development.yaml`.
+Reject empty or invalid names, separators, traversal, and collisions at either `.yaml` or
+`.yml`, including symlinks. Never trim, rewrite, or normalize input. Publish complete drafts
+exclusively so concurrent creation cannot silently overwrite a `.yaml` file. A failed write
+must not expose an incomplete YAML draft; preserve uncertain files for manual inspection
+rather than attempting destructive rollback. Report save errors under `menu` without
+including inferred arguments.
+
+Save the complete capture output without interpreting or validating it as an executable
+configuration. Drafts may contain inferred commands needing review, `command: null`, or
+`match: null`; never repair them or move them to executable layouts automatically. On a
+successful save, attempt a brief notification identifying the saved path. Notification
+failure is secondary and does not fail the save. No extra confirmation or load-success
+notification is needed.
 
 ## YAML format, version 1
 
@@ -289,8 +346,8 @@ IDs, app IDs/classes, workspace locations, and floating states; it must distingu
 new window from new windows that failed to match. Log stages, elapsed waits, accepted
 container IDs, IPC commands/replies, hierarchy checks, and requested/observed sizing.
 
-`load`, `pick`, and `capture` attempt a desktop notification for fatal errors, titled for
-the invoked operation (`sway-stage load failed`, `sway-stage pick failed`, or
+`load`, `menu`, and `capture` attempt a desktop notification for fatal errors, titled for
+the invoked operation (`sway-stage load failed`, `sway-stage menu failed`, or
 `sway-stage capture failed`), using `notify-send` with a bounded wait. Missing notification
 tools or delivery failures are secondary diagnostics; stderr remains sufficient and the
 original failure remains primary. Advise that a partial layout or applications may remain,
@@ -299,10 +356,10 @@ spawned an application; a spawn that fails to start does not count. Send a warni
 notification for substantial sizing deviations so keybinding launches can surface them.
 `list`, `check`, help, and version are side-effect-free apart from stdout/stderr.
 
-`last-run.log` is reserved for layout launches. Each `load`, and each `pick` once a layout
-has been selected, replaces it. Picker cancellation or failure before a selection and
-every `capture` leave the previous log untouched; their errors go only to stderr and a
-best-effort notification. Write the log to
+`last-run.log` is reserved for layout launches. Each `load`, and each `menu` once a layout
+has been selected for loading, replaces it. Menu cancellation, selection errors, capture,
+and save operations, as well as every standalone `capture`, leave the previous log untouched;
+their errors go only to stderr and a best-effort notification. Write the log to
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to
 `$HOME/.local/state/sway-stage/last-run.log`. Require absolute state bases. Keep only this
 last-run log, create it with private permissions, and include its path in failure output

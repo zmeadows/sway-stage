@@ -69,6 +69,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["check", "--help"],
         vec!["load", "--help"],
         vec!["capture", "--help"],
+        vec!["menu", "--help"],
         vec!["--version"],
     ] {
         let output = fixture
@@ -84,7 +85,7 @@ fn help_version_and_usage_do_not_need_configuration() {
     for args in [
         vec!["check"],
         vec!["load"],
-        vec!["pick"],
+        vec!["menu", "extra"],
         vec!["capture", "extra"],
         vec!["--bogus"],
         vec!["list", "extra"],
@@ -531,13 +532,35 @@ fn sway_node(id: i64, kind: &str, width: i32, nodes: Vec<Value>) -> Value {
 }
 
 /// Answers exactly one GET_TREE, refusing all other IPC requests and connections.
-fn serve_capture(listener: UnixListener, tree: Value) -> thread::JoinHandle<()> {
+fn serve_capture(
+    listener: UnixListener,
+    tree: Value,
+    menu_directory: Option<PathBuf>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let (mut query, _) = listener.accept().unwrap();
-        query
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let accept = || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+        };
+        let mut query = accept();
+        if let Some(directory) = &menu_directory {
+            assert!(
+                !directory.join("action-pid").exists(),
+                "snapshot precedes Fuzzel"
+            );
+            assert!(!directory.join("name-opened").exists());
+            assert_eq!(
+                fs::read_to_string(directory.join("state/sway-stage/last-run.log")).unwrap(),
+                "previous launch\n"
+            );
+        }
         assert_eq!(read_ipc_message(&mut query).0, 4);
+        if let Some(directory) = &menu_directory {
+            fs::write(directory.join("snapshot-ready"), "").unwrap();
+        }
         write_ipc_message(&mut query, 4, &tree);
         assert_eq!(query.read(&mut [0]).unwrap(), 0);
         listener.set_nonblocking(true).unwrap();
@@ -571,7 +594,7 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
             "sock"
         });
         let listener = UnixListener::bind(&socket).unwrap();
-        let server = serve_capture(listener, tree.clone());
+        let server = serve_capture(listener, tree.clone(), None);
         let mut command = fixture.command();
         command.env("SWAYSOCK", &socket).arg("capture");
         if infer_commands {
@@ -637,7 +660,7 @@ fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
         vec![sway_node(2, "output", 1920, vec![empty])],
     );
     let socket = fixture.path.join("capture.sock");
-    let server = serve_capture(UnixListener::bind(&socket).unwrap(), tree);
+    let server = serve_capture(UnixListener::bind(&socket).unwrap(), tree, None);
     let output = fixture
         .command()
         .env("SWAYSOCK", &socket)
@@ -714,3 +737,6 @@ fn capture_failures_notify_without_touching_the_launch_log() {
         );
     }
 }
+
+#[path = "cli/menu.rs"]
+mod menu;

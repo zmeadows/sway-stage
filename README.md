@@ -12,8 +12,8 @@ It is deliberately cautious. It never touches windows it did not launch, and it 
 instead of guessing when something unexpected happens: the workspace is occupied, focus
 moves away, or a window appears in the wrong place.
 
-**Status:** early development; there is no release yet. `load`, `list`, `check`, and
-`capture` are implemented. `pick` (choose a layout through Fuzzel) is planned. Automated tests run offline against recorded Sway IPC
+**Status:** early development; there is no release yet. `load`, `list`, `check`,
+`capture`, and `menu` are implemented. Automated tests run offline against recorded Sway IPC
 traffic, and the included examples have been loaded manually on Sway; no minimum Sway
 version is established yet.
 
@@ -22,7 +22,7 @@ version is established yet.
 - Linux and a running Sway session, with `SWAYSOCK` set (Sway sets it).
 - Rust 1.89 or newer to build.
 - The applications your layouts launch.
-- Optional: `notify-send`, for desktop error and warning notifications.
+- Optional: Fuzzel 1.11 or newer for `menu`; `notify-send` for desktop notifications.
 
 ## Build
 
@@ -86,6 +86,8 @@ sway-stage list          # print layout names; does not read their contents
 sway-stage check dev     # validate without contacting Sway or launching anything
 sway-stage load dev      # build the layout on the focused, empty workspace
 sway-stage capture > draft.yaml  # draft a layout from the focused workspace
+sway-stage menu                 # load a layout or capture a named draft through Fuzzel
+sway-stage menu --infer-commands # opt into command inference for menu captures
 ```
 
 `load` needs the focused workspace to be completely empty, so run it from a Sway
@@ -102,6 +104,23 @@ swaymsg workspace 9 && sway-stage load dev
 
 Keep the target workspace focused until `sway-stage` exits. A successful `load` prints
 nothing and exits 0; failures exit 1 and invalid usage exits 2.
+
+`menu` lists `Load: NAME` entries and a `Capture current layout…` action, even if no
+layouts exist. Loading still requires an empty workspace at load time. Capture saves the
+arrangement from before the menu opened; later focus changes do not alter it. Both prompts
+use the original monitor when known. After asking for a name, it saves `NAME.yaml` in
+`$XDG_CONFIG_HOME/sway-stage/drafts`
+(by default `~/.config/sway-stage/drafts`). Names use the layout-name grammar, at most 250
+characters; existing `.yaml` or `.yml` drafts are never overwritten. `--layouts-dir` affects
+loading only, not draft saving. Escape at either prompt cancels without saving or loading.
+For example:
+
+```text
+bindsym $mod+Shift+m exec sway-stage menu
+```
+
+Review and edit saved drafts, fill remaining placeholders, and validate with `check`
+before moving them into the executable layouts directory. Command inference stays opt-in.
 
 ### Capturing an arrangement
 
@@ -159,11 +178,13 @@ prints nothing to stdout.
 
 ## Diagnostics
 
-Errors from `load` and `capture` go to stderr and, when `notify-send` is available, to a
-desktop notification. Each `load` replaces a private log at `$XDG_STATE_HOME/sway-stage/last-run.log` (by default
+Errors from `load`, `menu`, and `capture` go to stderr and, when `notify-send` is available, to a
+desktop notification. Each loading attempt (`load` or a menu Load selection) replaces a
+private log at `$XDG_STATE_HOME/sway-stage/last-run.log` (by default
 `~/.local/state/sway-stage/last-run.log`) recording stages, container IDs, Sway commands
 and replies, and sizing results. It omits window titles, full command arguments, and
-environment values. `capture` never writes or replaces the log. `list`, `check`, `--help`,
+environment values. Menu cancellation, selection errors, and captures leave the launch
+log alone; standalone `capture` never writes or replaces it. `list`, `check`, `--help`,
 and `--version` never contact Sway, write logs, or send notifications.
 
 ## Documentation

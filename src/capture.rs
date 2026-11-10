@@ -74,6 +74,17 @@ impl Snapshot {
         Ok(Self { tree, target })
     }
 
+    /// Original workspace's containing output, when Sway supplied a nonempty name.
+    pub fn output_name(&self) -> Option<&str> {
+        let output = self.tree.nodes.iter().find(|container| {
+            container.node_type == NodeType::Output
+                && container
+                    .find_as_ref(|node| node.id == self.target)
+                    .is_some()
+        })?;
+        output.name.as_deref().filter(|name| !name.is_empty())
+    }
+
     /// Validates and renders only saved Sway state. Process arguments remain best-effort.
     pub fn render(&self, infer_commands: bool) -> Result<String, String> {
         self.render_with(infer_commands, &mut read_process_command)
