@@ -74,7 +74,16 @@ fn appimage_normalization_resolves_aliases_and_rejects_nonimages() {
 
 #[test]
 fn flatpak_cli_identity_is_a_complete_id_not_an_option_or_reference() {
-    for valid in ["org.gnome.Calculator", "com.example.Some-App"] {
+    for valid in [
+        "org.gnome.Calculator",
+        "com.example.Some-App",
+        "a.b.c",
+        "org.example.-App",
+        "org.example.-",
+        "_org.example_2._App9",
+        "org.example.subdomain.App",
+        "org.example.Some--App",
+    ] {
         validate_flatpak_id(valid).unwrap();
     }
     for invalid in [
@@ -82,6 +91,21 @@ fn flatpak_cli_identity_is_a_complete_id_not_an_option_or_reference() {
         "app",
         "org.App",
         "org..App",
+        ".org.example.App",
+        "org.example.App.",
+        "org.example..App",
+        "org-example.test.App",
+        "org.example-site.App",
+        "org.example.Sub-App.More",
+        "-org.example.App",
+        "org.-example.App",
+        "1org.example.App",
+        "org.1example.App",
+        "org.example.é",
+        "org.example.App+",
+        "org.example.App ",
+        "org.example.App\t",
+        "org.example.App\0",
         "org.example.1app",
         "--user",
         "org.example.App/stable",
@@ -89,6 +113,19 @@ fn flatpak_cli_identity_is_a_complete_id_not_an_option_or_reference() {
     ] {
         assert!(validate_flatpak_id(invalid).is_err(), "{invalid:?}");
     }
+}
+
+#[test]
+fn flatpak_cli_identity_enforces_the_total_length_boundary() {
+    let longest_id = format!("a.b.{}", "c".repeat(251));
+    assert_eq!(longest_id.len(), 255);
+    validate_flatpak_id(&longest_id).unwrap();
+    assert!(validate_flatpak_id(&format!("{longest_id}c")).is_err());
+
+    // The limit applies to the entire ID, with no separate component length limit.
+    let long_domain = format!("{}.b.c", "a".repeat(251));
+    validate_flatpak_id(&long_domain).unwrap();
+    assert!(validate_flatpak_id(&format!("a{long_domain}")).is_err());
 }
 
 fn metadata() -> String {

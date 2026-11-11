@@ -118,18 +118,25 @@ pub fn normalize_appimage(path: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn validate_flatpak_id(application: &str) -> Result<(), String> {
-    // A conservative CLI boundary, not inference: no refs, options, or partial IDs.
+    // Flatpak IDs require at least three ASCII components and permit hyphens only in
+    // the final component, including its first character. Keep this CLI check independent
+    // of production inference; refs, options, and partial IDs are not accepted.
     let components: Vec<_> = application.split('.').collect();
-    if application.len() > 255
-        || components.len() < 3
-        || components.iter().any(|part| {
+    let has_invalid_component = components
+        .iter()
+        .enumerate()
+        .any(|(component_index, part)| {
+            let final_component = component_index + 1 == components.len();
             part.is_empty()
-                || !part.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                || !part
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-        })
-    {
+                || !part.starts_with(|c: char| {
+                    c.is_ascii_alphabetic() || c == '_' || (final_component && c == '-')
+                })
+                || !part.bytes().all(|c| {
+                    c.is_ascii_alphanumeric() || c == b'_' || (final_component && c == b'-')
+                })
+        });
+
+    if application.len() > 255 || components.len() < 3 || has_invalid_component {
         return Err(
             "--flatpak requires a complete application ID, such as org.gnome.Calculator".into(),
         );
