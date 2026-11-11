@@ -101,13 +101,44 @@ fn is_executable_file(path: &Path) -> bool {
 /// child only. A nonzero exit reports the child's stderr. On expiry or a capture failure,
 /// the direct child is killed and reaped before the error is returned.
 pub fn run(command: Command, operation: &str, timeout: Duration) -> Result<String, String> {
-    run_bounded(command, operation, timeout, false)
+    run_bounded(command, operation, timeout, false)?.require_success(operation)
 }
 
 /// Only the read-only remaining-window query may run after an interrupt. It still has
 /// output limits, a deadline, and direct-child shutdown on failure.
 pub fn run_diagnostic(command: Command, timeout: Duration) -> Result<String, String> {
-    run_bounded(command, "remaining-window tree query", timeout, true)
+    run_bounded(command, "remaining-window tree query", timeout, true)?
+        .require_success("remaining-window tree query")
+}
+
+/// The same bounded runner, with exit interpretation left to an explicit refusal check.
+/// Timeouts, output failures, and interruption still return errors, never an exit result.
+pub fn run_with_status(
+    command: Command,
+    operation: &str,
+    timeout: Duration,
+) -> Result<CompletedProcess, String> {
+    run_bounded(command, operation, timeout, false)
+}
+
+#[derive(Debug)]
+pub struct CompletedProcess {
+    pub status: ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CompletedProcess {
+    fn require_success(self, operation: &str) -> Result<String, String> {
+        if !self.status.success() {
+            return Err(format!(
+                "{operation}: {}: {}",
+                self.status,
+                self.stderr.trim()
+            ));
+        }
+        Ok(self.stdout)
+    }
 }
 
 fn run_bounded(
@@ -115,7 +146,7 @@ fn run_bounded(
     operation: &str,
     timeout: Duration,
     diagnostic: bool,
-) -> Result<String, String> {
+) -> Result<CompletedProcess, String> {
     let (stdout_socket, child_stdout) = socket_pair(operation)?;
     let (stderr_socket, child_stderr) = socket_pair(operation)?;
     let mut stdout = CapturedOutput::new("stdout", stdout_socket, MAX_STDOUT_BYTES)
@@ -141,11 +172,12 @@ fn run_bounded(
         }
     };
 
-    if !status.success() {
-        let diagnostics = String::from_utf8_lossy(&stderr.bytes);
-        return Err(format!("{operation}: {status}: {}", diagnostics.trim()));
-    }
-    String::from_utf8(stdout.bytes).map_err(|_| format!("{operation}: stdout is not UTF-8"))
+    Ok(CompletedProcess {
+        status,
+        stdout: String::from_utf8(stdout.bytes)
+            .map_err(|_| format!("{operation}: stdout is not UTF-8"))?,
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
+    })
 }
 
 /// Starts a long-running helper whose stdout arrives on the returned blocking socket. Its
@@ -517,5 +549,50 @@ mod probe_tests {
                 .contains("inspect probe argv")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn default_completion_still_rejects_nonzero_status_and_retains_diagnostics() {
+        let completed = |code| CompletedProcess {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: "output".into(),
+            stderr: "reason".into(),
+        };
+        assert_eq!(completed(0).require_success("check").unwrap(), "output");
+        assert!(
+            completed(1)
+                .require_success("load")
+                .unwrap_err()
+                .contains("reason")
+        );
+        assert_eq!(completed(1).status.code(), Some(1));
+        // A signal cannot masquerade as the expected exit code.
+        assert_eq!(ExitStatus::from_raw(9).code(), None);
+    }
+
+    #[test]
+    fn capture_stream_limits_and_end_of_output_apply_without_starting_processes() {
+        let (parent, mut peer) = UnixStream::pair().unwrap();
+        let mut capture = CapturedOutput::new("stderr", parent, 3).unwrap();
+        assert!(!capture.read_chunk().unwrap());
+        peer.write_all(b"abc").unwrap();
+        assert!(capture.read_chunk().unwrap());
+        peer.write_all(b"d").unwrap();
+        assert!(
+            capture
+                .read_chunk()
+                .unwrap_err()
+                .contains("exceeded 3 bytes")
+        );
+        drop(peer);
+        assert!(capture.read_chunk().unwrap());
+        assert!(capture.closed);
     }
 }

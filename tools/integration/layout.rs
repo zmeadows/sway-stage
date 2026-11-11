@@ -181,7 +181,7 @@ pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
 /// Everything about a workspace that capture must leave unchanged: identities, geometry,
 /// actual wrappers, state flags, and current focus. Titles, urgency, marks, and focus
 /// history are not modeled, so they may change.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     container_id: i64,
     node_type: NodeType,
@@ -198,6 +198,16 @@ pub struct Signature {
     scratchpad_state: Option<ScratchpadState>,
     nodes: Vec<Signature>,
     floating_nodes: Vec<Signature>,
+}
+
+impl Signature {
+    /// Foreign preservation excludes focus, which guarded workspace switches may change.
+    pub fn ignore_focus(&mut self) {
+        self.focused = false;
+        for child in self.nodes.iter_mut().chain(&mut self.floating_nodes) {
+            child.ignore_focus();
+        }
+    }
 }
 
 pub fn signature(node: &TreeNode) -> Signature {

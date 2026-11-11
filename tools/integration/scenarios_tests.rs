@@ -69,6 +69,11 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "h(v(window1@2, window2@3)@3, window3@2)",
             "window1",
         ),
+        (
+            "occupied-workspace-refusal",
+            "h(window1@3, window2@2)",
+            "window2",
+        ),
     ];
     let expected: Vec<(&str, String, &str)> = expected
         .into_iter()

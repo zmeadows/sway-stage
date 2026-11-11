@@ -172,7 +172,7 @@ pub enum Extension {
     DuplicateFootIds,
 }
 
-/// The nine Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
+/// The ten Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use SplitAxis::{Horizontal, Vertical};
 
@@ -242,6 +242,11 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             ),
             "window1",
         ),
+        (
+            "occupied-workspace-refusal",
+            split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
+            "window2",
+        ),
     ];
 
     let mut scenarios = Vec::new();
@@ -262,6 +267,28 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         scenarios.push(scenario);
     }
     scenarios
+}
+
+/// One independently owned window kept outside every scenario's target workspace.
+pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenario {
+    let mut scenario = Scenario {
+        name: "foreign-fixture",
+        layout: window(1, 1),
+        expected_focus: "window1",
+        configured_focus: Some("window1"),
+        window_timeout_ms: WINDOW_TIMEOUT_MS,
+        extension: None,
+        skip: None,
+    };
+    use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
+    // The extended suite can outlast ordinary scenario terminals. Still bound what an
+    // aborted run leaves behind; disappearance at any point fails preservation.
+    let leaf = scenario.layout.first_leaf_mut();
+    *leaf
+        .command
+        .last_mut()
+        .expect("Foot command ends with sleep duration") = "3600".into();
+    scenario
 }
 
 /// The four optional scenarios, each to be passed to `prepare_extended` immediately before

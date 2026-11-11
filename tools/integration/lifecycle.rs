@@ -2,7 +2,7 @@
 //! A failure leaves windows alone. Only the success path enters cleanup; restoration is
 //! a separate, guarded operation. Files and the IPC helper may be dropped, never windows.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -27,10 +27,12 @@ use crate::observation::{
 use crate::ownership::{
     AcceptedWindows, ExpectedClose, bind_launches, require_quiet, verify_ownership,
 };
+use crate::preservation::ForeignWindows;
 use crate::process;
 use crate::scenarios::{
     ConfiguredNode, OptionalApplications, Scenario, configuration_yaml,
-    configure_process_execution, extended_scenarios, prepare_extended, standard_scenarios,
+    configure_process_execution, extended_scenarios, foreign_fixture_scenario, prepare_extended,
+    standard_scenarios,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -42,10 +44,15 @@ const ORIGINAL_GONE: &str =
     "Original workspace not restored: its recorded identity no longer exists.";
 
 #[derive(Debug, Parser)]
-#[command(about = "Manual load/capture checks; run only in an isolated disposable Sway session")]
+#[command(
+    about = "Manual load/capture checks on two disposable workspaces in the existing Sway session"
+)]
 pub struct Arguments {
     #[arg(long, required = true, value_parser = workspace_number)]
     workspace: String,
+    #[arg(long, required = true, value_parser = workspace_number,
+        help = "Second empty disposable workspace for the owned foreign-window fixture")]
+    foreign_workspace: String,
     #[arg(
         long,
         help = "Also test Firefox, Xterm/Xwayland, and duplicate Foot app IDs"
@@ -67,6 +74,13 @@ struct ScenarioProgress {
     accepted: AcceptedWindows,
 }
 
+struct ForeignFixture {
+    workspace: WorkspaceIdentity,
+    progress: ScenarioProgress,
+    foreign: ForeignWindows,
+    loaded_signature: Option<Signature>,
+}
+
 struct Harness {
     arguments: Arguments,
     binary: PathBuf,
@@ -79,6 +93,8 @@ struct Harness {
     disposable: Option<WorkspaceIdentity>,
     switch_attempted: bool,
     current_scenario: Option<ScenarioProgress>,
+    fixture: Option<ForeignFixture>,
+    refusal_verified: bool,
     stage: String,
     passed: usize,
     skipped: usize,
@@ -113,6 +129,12 @@ pub fn run(arguments: Arguments) -> bool {
                 &harness.run_id,
                 harness.current_scenario.as_ref(),
             );
+            if let Some(fixture) = &harness.fixture {
+                eprintln!(
+                    "  Foreign fixture workspace {:?}, id={}, last accepted={:?}; terminal lifetime 3600 seconds.",
+                    fixture.workspace.name, fixture.workspace.id, fixture.progress.accepted
+                );
+            }
             if harness.stage != "final restoration" {
                 harness.restoration = Some(match harness.restore() {
                     Ok(message) => message.to_owned(),
@@ -140,6 +162,11 @@ pub fn run(arguments: Arguments) -> bool {
         harness.passed,
         usize::from(failed),
         harness.skipped
+    );
+    println!(
+        "{} successful layout scenarios with foreign-window preservation; {} expected occupied-workspace refusal verified.",
+        harness.passed,
+        usize::from(harness.refusal_verified)
     );
     for profile in harness.retained_profiles {
         println!(
@@ -181,6 +208,8 @@ impl Harness {
             disposable: None,
             switch_attempted: false,
             current_scenario: None,
+            fixture: None,
+            refusal_verified: false,
             stage: "preflight".into(),
             passed: 0,
             skipped: 0,
@@ -191,6 +220,12 @@ impl Harness {
 
     fn execute(&mut self) -> Result<(), Failure> {
         let initial = preflight(&self.sway, &mut self.events, &self.arguments.workspace)?;
+        fixture_eligibility(&self.arguments.workspace, &self.arguments.foreign_workspace)?;
+        preflight(
+            &self.sway,
+            &mut self.events,
+            &self.arguments.foreign_workspace,
+        )?;
         self.original = Some(initial.original);
 
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
@@ -215,8 +250,9 @@ impl Harness {
             None
         };
         self.stage = "preflight".into();
+        self.prepare_fixture(&directory)?;
+        self.stage = "primary target: preflight".into();
         let ready = preflight(&self.sway, &mut self.events, &self.arguments.workspace)?;
-        self.original = Some(ready.original.clone());
         self.stage = "workspace switch".into();
         interruption_check()?;
         self.switch_attempted = true;
@@ -251,6 +287,7 @@ impl Harness {
             self.run_scenario(&directory, optional_applications.as_ref())?;
         }
 
+        self.finish_fixture()?;
         self.stage = "final restoration".into();
         let restoration = self.restore()?;
         self.restoration = Some(restoration.to_owned());
@@ -305,6 +342,19 @@ impl Harness {
         let before_load = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&before_load.window_events, None)?;
         require_empty(before_load.focused_workspace())?;
+        let fixture = self
+            .fixture
+            .as_ref()
+            .expect("fixture prepared before scenarios");
+        verify_fixture_state(
+            &before_load,
+            fixture,
+            fixture
+                .loaded_signature
+                .as_ref()
+                .expect("fixture load verified"),
+        )?;
+        let foreign = ForeignWindows::record(&before_load, before_load.focused_workspace_id)?;
         progress.preexisting_ids = Some(
             walk(&before_load.tree)
                 .iter()
@@ -331,6 +381,7 @@ impl Harness {
 
         self.stage = format!("{name}: raw-tree verification");
         let loaded = snapshot(&self.sway, &mut self.events, None)?;
+        foreign.verify(&loaded)?;
         progress.accepted =
             bind_launches(&loaded.window_events, &scenario.layout, preexisting_ids)?;
         verify_ownership(
@@ -366,12 +417,40 @@ impl Harness {
         };
         let before_capture = signature(loaded.focused_workspace());
 
+        if name == "occupied-workspace-refusal" {
+            self.stage = format!("{name}: expected refusal");
+            // A different, already checked layout has distinct selectors. A broken load
+            // cannot silently substitute its new windows for the first layout's windows.
+            let search_path = env::var_os("PATH").unwrap_or_default();
+            let mut refused = directory.refusal_command(&self.binary, &search_path)?;
+            self.sway.select_socket(&mut refused);
+
+            let before_refusal = snapshot(&self.sway, &mut self.events, None)?;
+            foreign.verify(&before_refusal)?;
+            verify_unchanged(&before_refusal, target.id, progress, &before_capture)?;
+            let revision = self.events.workspace_revision();
+            let result = process::run_with_status(refused, &self.stage, CAPTURE_TIMEOUT);
+            let output = refusal_completion(result, process::interruption_requested())?;
+            let after_refusal =
+                snapshot(&self.sway, &mut self.events, None).map_err(Failure::Uncertain)?;
+            verify_refusal(
+                &output,
+                &before_refusal,
+                &after_refusal,
+                revision != self.events.workspace_revision(),
+            )?;
+            foreign.verify(&after_refusal)?;
+            verify_unchanged(&after_refusal, target.id, progress, &before_capture)?;
+            self.refusal_verified = true;
+        }
+
         self.stage = format!("{name}: capture");
         let mut capture = Command::new(&self.binary);
         capture.arg("capture");
         self.sway.select_socket(&mut capture);
         let draft = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
         let after_capture = snapshot(&self.sway, &mut self.events, None)?;
+        foreign.verify(&after_capture)?;
         verify_unchanged(&after_capture, target.id, progress, &before_capture)?;
         let filled = verify_capture(&draft, &progress.scenario, &measurements)?;
         directory.write("captured", &filled)?;
@@ -389,12 +468,14 @@ impl Harness {
             self.sway.select_socket(&mut capture);
             let inferred = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
             let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
+            foreign.verify(&after_inferred)?;
             verify_unchanged(&after_inferred, target.id, progress, &before_capture)?;
             verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
         }
 
         self.stage = format!("{name}: cleanup");
         let context = CleanupContext {
+            foreign: &foreign,
             target,
             layout: &progress.scenario.layout,
             preexisting_ids: progress
@@ -410,6 +491,7 @@ impl Harness {
             before_capture,
         )?;
         let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        foreign.verify(&cleaned)?;
         require_quiet(&cleaned.window_events, None)?;
         require_empty(cleaned.focused_workspace())?;
         if let Some(pid) = probe_pid {
@@ -418,7 +500,12 @@ impl Harness {
         interruption_check()?;
 
         self.passed += 1;
-        println!("PASS  {name:19} hierarchy, sizing, focus, identity, capture");
+        let coverage = if name == "occupied-workspace-refusal" {
+            "hierarchy, sizing, focus, identity, capture, occupied refusal"
+        } else {
+            "hierarchy, sizing, focus, identity, capture"
+        };
+        println!("PASS  {name:19} {coverage}");
         for note in measurements.sizing_notes {
             println!("      above 1-point sizing target: {note}");
         }
@@ -426,9 +513,190 @@ impl Harness {
         Ok(())
     }
 
+    fn prepare_fixture(&mut self, directory: &TemporaryConfigurations) -> Result<(), Failure> {
+        self.stage = "foreign fixture: preflight".into();
+        let scenario = foreign_fixture_scenario(&self.run_id, &self.foot, &self.sleep);
+        directory.write(scenario.name, &configuration_yaml(&scenario))?;
+        check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
+        let ready = preflight(
+            &self.sway,
+            &mut self.events,
+            &self.arguments.foreign_workspace,
+        )?;
+        self.stage = "foreign fixture: workspace switch".into();
+        interruption_check()?;
+        self.switch_attempted = true;
+        self.sway
+            .switch_disposable(&self.arguments.foreign_workspace)?;
+        let transition = ExpectedSwitch {
+            from_id: ready.original.id,
+            destination_name: self.arguments.foreign_workspace.clone(),
+        };
+        let before = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_quiet(&before.window_events, None)?;
+        require_empty(before.focused_workspace())?;
+        if ready
+            .designated_id
+            .is_some_and(|id| id != before.focused_workspace_id)
+        {
+            return Err(Failure::Uncertain(
+                "foreign fixture workspace identity changed during switch".into(),
+            ));
+        }
+        let workspace = WorkspaceIdentity {
+            id: before.focused_workspace_id,
+            name: self.arguments.foreign_workspace.clone(),
+        };
+        let foreign = ForeignWindows::record(&before, workspace.id)?;
+        let preexisting_ids = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        self.fixture = Some(ForeignFixture {
+            workspace,
+            progress: ScenarioProgress {
+                scenario,
+                preexisting_ids: Some(preexisting_ids),
+                accepted: AcceptedWindows::new(),
+            },
+            foreign,
+            loaded_signature: None,
+        });
+        let fixture = self.fixture.as_mut().expect("just recorded fixture");
+        self.stage = "foreign fixture: load and independent verification".into();
+        let mut command = configured_command(
+            &self.binary,
+            &directory.path,
+            "load",
+            fixture.progress.scenario.name,
+        );
+        self.sway.select_socket(&mut command);
+        let output = process::run(
+            command,
+            &self.stage,
+            load_timeout(&fixture.progress.scenario),
+        )
+        .map_err(Failure::Uncertain)?;
+        if !output.trim().is_empty() {
+            return Err(Failure::Uncertain(
+                "fixture load produced unexpected stdout".into(),
+            ));
+        }
+        let loaded = snapshot(&self.sway, &mut self.events, None).map_err(Failure::Uncertain)?;
+        fixture.foreign.verify(&loaded)?;
+        let preexisting = fixture
+            .progress
+            .preexisting_ids
+            .as_ref()
+            .expect("recorded before fixture load");
+        fixture.progress.accepted = bind_launches(
+            &loaded.window_events,
+            &fixture.progress.scenario.layout,
+            preexisting,
+        )?;
+        verify_ownership(
+            &loaded.tree,
+            fixture.workspace.id,
+            &fixture.progress.scenario.layout,
+            preexisting,
+            &fixture.progress.accepted,
+        )?;
+        verify_layout(
+            loaded.focused_workspace(),
+            &fixture.progress.scenario,
+            &fixture.progress.accepted,
+        )?;
+        fixture.loaded_signature = Some(signature(loaded.focused_workspace()));
+        println!(
+            "Foreign fixture: workspace {:?}, container IDs {:?} (verified; lifetime 3600 seconds).",
+            fixture.workspace.name,
+            fixture.progress.accepted.keys().collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn finish_fixture(&mut self) -> Result<(), Failure> {
+        self.stage = "foreign fixture: verified return".into();
+        let fixture = self
+            .fixture
+            .as_ref()
+            .expect("fixture prepared before scenarios");
+        let target = self
+            .disposable
+            .as_ref()
+            .expect("scenario target established");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        require_empty(before.focused_workspace())?;
+        fixture.foreign.verify(&before)?;
+        // Prove the fixture survived the last scenario before deliberately changing focus.
+        let baseline = fixture
+            .loaded_signature
+            .as_ref()
+            .expect("fixture load verified");
+        verify_fixture_state(&before, fixture, baseline)?;
+        interruption_check()?;
+        self.sway.switch_disposable(&fixture.workspace.name)?;
+        let transition = ExpectedSwitch {
+            from_id: target.id,
+            destination_name: fixture.workspace.name.clone(),
+        };
+        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        for event in &returned.window_events {
+            if event.change == crate::ipc::WindowChange::Focus
+                && fixture.progress.accepted.contains_key(&event.container.id)
+            {
+                continue;
+            }
+            require_quiet(std::slice::from_ref(event), None)?;
+        }
+        fixture.foreign.verify(&returned)?;
+        verify_fixture_state(&returned, fixture, baseline)?;
+        if returned.focused_workspace_id != fixture.workspace.id {
+            return Err(Failure::Uncertain(
+                "foreign fixture workspace identity changed".into(),
+            ));
+        }
+        self.stage = "foreign fixture: cleanup".into();
+        let context = CleanupContext {
+            target: &fixture.workspace,
+            layout: &fixture.progress.scenario.layout,
+            preexisting_ids: fixture
+                .progress
+                .preexisting_ids
+                .as_ref()
+                .expect("recorded before fixture load"),
+            foreign: &fixture.foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &fixture.progress.accepted,
+            signature(returned.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        fixture.foreign.verify(&cleaned)?;
+        require_quiet(&cleaned.window_events, None)?;
+        require_empty(cleaned.focused_workspace())?;
+        println!("Foreign fixture preservation and verified cleanup passed.");
+        Ok(())
+    }
+
     fn restore(&mut self) -> Result<&'static str, Failure> {
         interruption_check()?;
-        let (Some(original), Some(disposable)) = (&self.original, &self.disposable) else {
+        let current = self.events.current_workspace();
+        let disposable = self
+            .disposable
+            .as_ref()
+            .filter(|target| Some(*target) == current)
+            .or_else(|| {
+                self.fixture
+                    .as_ref()
+                    .map(|fixture| &fixture.workspace)
+                    .filter(|target| Some(*target) == current)
+            });
+        let (Some(original), Some(disposable)) = (&self.original, disposable) else {
             return Ok(LOST_CONTROL);
         };
         if !controls_target(
@@ -463,6 +731,136 @@ impl Harness {
         }
         Ok(RESTORED)
     }
+}
+
+fn fixture_eligibility(target_number: &str, fixture_number: &str) -> Result<(), String> {
+    workspace_number(target_number)?;
+    workspace_number(fixture_number)?;
+    if target_number == fixture_number {
+        return Err(
+            "foreign fixture workspace must differ from the primary disposable target".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Ownership is re-established on the fixture's own workspace, never by selecting all
+/// preexisting foreign windows. Focus is checked separately around the expected switch.
+fn verify_fixture_state(
+    observed: &Snapshot,
+    fixture: &ForeignFixture,
+    baseline: &Signature,
+) -> Result<(), Failure> {
+    verify_ownership(
+        &observed.tree,
+        fixture.workspace.id,
+        &fixture.progress.scenario.layout,
+        fixture
+            .progress
+            .preexisting_ids
+            .as_ref()
+            .expect("recorded before fixture load"),
+        &fixture.progress.accepted,
+    )?;
+    let workspace = walk(&observed.tree)
+        .into_iter()
+        .map(|placed| placed.node)
+        .find(|node| node.id == fixture.workspace.id)
+        .ok_or_else(|| Failure::Uncertain("foreign fixture workspace disappeared".into()))?;
+    let mut current = signature(workspace);
+    current.ignore_focus();
+    // The stored signature has focus from creation; compare a fresh signature with the
+    // same policy without changing the authoritative baseline.
+    let mut baseline_without_focus = baseline.clone();
+    baseline_without_focus.ignore_focus();
+    if current != baseline_without_focus {
+        return Err(Failure::Uncertain(
+            "foreign fixture hierarchy/identity/geometry/state changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A timeout, failed observation stream, or interrupt cannot count as an expected
+/// refusal, even if the child printed the occupied diagnostic before it stopped.
+fn refusal_completion(
+    result: Result<process::CompletedProcess, String>,
+    interrupted: bool,
+) -> Result<process::CompletedProcess, Failure> {
+    if interrupted {
+        return Err(Failure::Uncertain(
+            "interrupted during occupied refusal".into(),
+        ));
+    }
+    result.map_err(Failure::Uncertain)
+}
+
+fn verify_refusal(
+    output: &process::CompletedProcess,
+    before: &Snapshot,
+    after: &Snapshot,
+    workspace_activity: bool,
+) -> Result<(), Failure> {
+    before.validate()?;
+    after.validate()?;
+    if before.focused_workspace().nodes.is_empty()
+        && before.focused_workspace().floating_nodes.is_empty()
+    {
+        return Err(Failure::Uncertain(
+            "occupied refusal has no occupied baseline".into(),
+        ));
+    }
+    require_quiet(&after.window_events, None)?;
+    let before_workspaces: BTreeMap<_, _> = before
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.id,
+                (&workspace.name, workspace.num, workspace.focused),
+            )
+        })
+        .collect();
+    let after_workspaces: BTreeMap<_, _> = after
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.id,
+                (&workspace.name, workspace.num, workspace.focused),
+            )
+        })
+        .collect();
+
+    // Compare the entire modeled desktop, not merely the loaded workspace: every
+    // container ID, actual wrapper, child order, view identity, geometry, and focus.
+    if workspace_activity
+        || before_workspaces != after_workspaces
+        || signature(&before.tree) != signature(&after.tree)
+        || before.focused_workspace_id != after.focused_workspace_id
+    {
+        return Err(Failure::Uncertain(
+            "occupied refusal changed desktop state or workspace event history".into(),
+        ));
+    }
+    let occupied_diagnostic = output.stderr.lines().any(|line| {
+        line.starts_with("sway-stage: prelaunch workspace=")
+            && line.contains(&format!(
+                "workspace={}: layout ",
+                before.focused_workspace_id
+            ))
+            && line.contains(
+                ": target workspace must be completely empty, including tiled/floating containers;",
+            )
+    });
+    if output.status.code() != Some(1) || !occupied_diagnostic || !output.stdout.trim().is_empty() {
+        return Err(Failure::Uncertain(format!(
+            "expected occupied-workspace prelaunch refusal (exit 1), got {}: {}",
+            output.status,
+            output.stderr.trim()
+        )));
+    }
+    Ok(())
 }
 
 fn interruption_check() -> Result<(), Failure> {
@@ -622,6 +1020,7 @@ struct CleanupContext<'a> {
     target: &'a WorkspaceIdentity,
     layout: &'a ConfiguredNode,
     preexisting_ids: &'a HashSet<i64>,
+    foreign: &'a ForeignWindows,
 }
 
 #[derive(Debug)]
@@ -648,6 +1047,7 @@ fn prepare_close(
             "cleanup requires trusted target workspace focus".into(),
         ));
     }
+    context.foreign.verify(observed)?;
     require_quiet(&observed.window_events, None)?;
     verify_ownership(
         &observed.tree,
@@ -739,6 +1139,7 @@ fn verify_close_observation(
     baseline: &Signature,
     closing_id: i64,
 ) -> Result<bool, Failure> {
+    context.foreign.verify(observed)?;
     let expected_close = ExpectedClose {
         closing_id,
         remaining: &plan.remaining,
@@ -783,7 +1184,7 @@ fn verify_close_observation(
 
 fn report_remaining(sway: &Swaymsg, run_id: &str, progress: Option<&ScenarioProgress>) {
     eprintln!(
-        "No further cleanup attempted. Test terminals expire after 300 seconds; Firefox has no lifetime limit."
+        "No further cleanup attempted. Scenario terminals expire after 300 seconds; the foreign fixture after 3600 seconds; Firefox has no lifetime limit."
     );
     let empty = AcceptedWindows::new();
     let known = progress.map_or(&empty, |progress| &progress.accepted);
@@ -874,7 +1275,8 @@ fn random_run_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Owns private YAML files and the process test cwd, never profiles or desktop windows.
+/// Owns private YAML files, the refusal notification stub, and the process test cwd;
+/// never profiles or desktop windows.
 struct TemporaryConfigurations {
     path: PathBuf,
 }
@@ -898,6 +1300,33 @@ impl TemporaryConfigurations {
             .mode(0o700)
             .create(self.path.join("process cwd"))
             .map_err(|error| format!("create private process cwd: {error}"))
+    }
+
+    /// Only the intentionally refused load intercepts notify-send. Keep its exit status,
+    /// stderr, bounded execution, and desktop verification unchanged.
+    fn refusal_command(&self, binary: &Path, search_path: &OsStr) -> Result<Command, String> {
+        let notification_bin = self.path.join("refusal-notification-bin");
+        let child_search_path = env::join_paths(
+            std::iter::once(notification_bin.clone()).chain(env::split_paths(search_path)),
+        )
+        .map_err(|error| format!("prepare refusal notification PATH: {error}"))?;
+
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&notification_bin)
+            .map_err(|error| format!("create private refusal notification directory: {error}"))?;
+        let mut stub = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(notification_bin.join("notify-send"))
+            .map_err(|error| format!("create refusal notify-send stub: {error}"))?;
+        stub.write_all(b"#!/bin/sh\nexit 0\n")
+            .map_err(|error| format!("write refusal notify-send stub: {error}"))?;
+
+        let mut command = configured_command(binary, &self.path, "load", "single-window");
+        command.env("PATH", child_search_path);
+        Ok(command)
     }
 
     fn write(&self, name: &str, contents: &str) -> Result<(), String> {

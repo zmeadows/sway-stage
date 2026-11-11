@@ -43,9 +43,16 @@ fn original_identity() -> WorkspaceIdentity {
 fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
     assert!(Arguments::try_parse_from(["integration"]).is_err());
     for workspace in ["1", "9", "999999999"] {
-        let arguments =
-            Arguments::try_parse_from(["integration", "--workspace", workspace]).unwrap();
+        let arguments = Arguments::try_parse_from([
+            "integration",
+            "--workspace",
+            workspace,
+            "--foreign-workspace",
+            "8",
+        ])
+        .unwrap();
         assert_eq!(arguments.workspace, workspace);
+        assert_eq!(arguments.foreign_workspace, "8");
         assert!(!arguments.extended);
         assert_eq!(arguments.firefox_app_id, None);
         assert_eq!(
@@ -57,6 +64,8 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         "integration",
         "--workspace",
         "9",
+        "--foreign-workspace",
+        "8",
         "--extended",
         "--firefox-app-id",
         "firefox-esr",
@@ -82,7 +91,14 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         "９",
     ] {
         assert!(
-            Arguments::try_parse_from(["integration", "--workspace", invalid]).is_err(),
+            Arguments::try_parse_from([
+                "integration",
+                "--workspace",
+                invalid,
+                "--foreign-workspace",
+                "8"
+            ])
+            .is_err(),
             "{invalid:?}"
         );
     }
@@ -92,8 +108,21 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         vec!["integration", "--workspace", "9", "extra"],
         vec!["integration", "--workspace"],
     ] {
+        let mut arguments = arguments;
+        arguments.extend(["--foreign-workspace", "8"]);
         assert!(Arguments::try_parse_from(arguments).is_err());
     }
+    assert!(Arguments::try_parse_from(["integration", "--workspace", "9"]).is_err());
+    assert!(
+        Arguments::try_parse_from([
+            "integration",
+            "--workspace",
+            "9",
+            "--foreign-workspace",
+            "08"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -216,7 +245,9 @@ fn cleanup_plan_revalidates_ownership_and_calculates_the_remaining_hierarchy() {
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
     let preexisting = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
         preexisting_ids: &preexisting,
@@ -262,7 +293,9 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
     let preexisting = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
         preexisting_ids: &preexisting,
@@ -331,7 +364,9 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
     let preexisting = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
         preexisting_ids: &preexisting,
@@ -574,6 +609,329 @@ fn private_process_directory_refuses_existing_entries_and_missing_parents() {
             .unwrap_err()
             .contains("create private process cwd")
     );
+    let path = directory.path.clone();
+    drop(directory);
+    assert!(!path.exists());
+}
+
+fn refused_output(code: i32, stderr: &str) -> process::CompletedProcess {
+    use std::os::unix::process::ExitStatusExt;
+    process::CompletedProcess {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: String::new(),
+        stderr: stderr.into(),
+    }
+}
+
+fn occupied_diagnostic() -> String {
+    format!(
+        "sway-stage: prelaunch workspace={TARGET_WORKSPACE_ID}: layout \"single-window\": target workspace must be completely empty, including tiled/floating containers; choose an empty disposable workspace; log: /private/log\n"
+    )
+}
+
+#[test]
+fn occupied_refusal_requires_the_specific_prelaunch_error_and_unchanged_desktop() {
+    let scenario = standard_scenario("occupied-workspace-refusal");
+    let before = loaded_pair(&scenario);
+    let after = loaded_pair(&scenario);
+    verify_refusal(
+        &refused_output(1, &occupied_diagnostic()),
+        &before,
+        &after,
+        false,
+    )
+    .unwrap();
+    for (code, diagnostic) in [
+        (0, occupied_diagnostic()),
+        (2, occupied_diagnostic()),
+        (1, "sway-stage: validation: unknown layout".into()),
+        (1, "sway-stage: subscribe: IPC disconnected".into()),
+        (
+            1,
+            occupied_diagnostic().replace("workspace=7", "workspace=99"),
+        ),
+        (1, occupied_diagnostic().replace("prelaunch", "launch")),
+    ] {
+        uncertain_message(verify_refusal(
+            &refused_output(code, &diagnostic),
+            &before,
+            &after,
+            false,
+        ));
+    }
+    let mut stdout = refused_output(1, &occupied_diagnostic());
+    stdout.stdout = "unexpected data".into();
+    uncertain_message(verify_refusal(&stdout, &before, &after, false));
+    // Init/empty or focus events returning to the baseline are still evidence of activity.
+    uncertain_message(verify_refusal(
+        &refused_output(1, &occupied_diagnostic()),
+        &before,
+        &after,
+        true,
+    ));
+}
+
+#[test]
+fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geometry() {
+    let scenario = standard_scenario("occupied-workspace-refusal");
+    let before = loaded_pair(&scenario);
+    let output = refused_output(1, &occupied_diagnostic());
+    for mutation in [
+        "new",
+        "id",
+        "parent",
+        "order",
+        "geometry",
+        "focus",
+        "foreign-geometry",
+    ] {
+        let mut after = loaded_pair(&scenario);
+        let workspace = &mut after.tree.nodes[1].nodes[1];
+        match mutation {
+            "new" => {
+                workspace
+                    .nodes
+                    .push(parse_tree(wayland_window(99, "extra", rect(0, 0, 10, 10))))
+            }
+            "id" => workspace.nodes[0].id = 99,
+            "parent" => {
+                let children = std::mem::take(&mut workspace.nodes);
+                let mut wrapper =
+                    parse_tree(group(30, "splith", rect(0, 0, 1920, 1080), Vec::new()));
+                wrapper.nodes = children;
+                workspace.nodes.push(wrapper);
+            }
+            "order" => workspace.nodes.reverse(),
+            "geometry" => workspace.nodes[0].rect.width -= 1,
+            "focus" => {
+                workspace.nodes[0].focused = true;
+                workspace.nodes[1].focused = false;
+            }
+            "foreign-geometry" => after.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1,
+            _ => unreachable!(),
+        }
+        uncertain_message(verify_refusal(&output, &before, &after, false));
+    }
+    for change in [
+        "new",
+        "close",
+        "focus",
+        "move",
+        "floating",
+        "fullscreen_mode",
+    ] {
+        let mut after = loaded_pair(&scenario);
+        after.window_events.push(window_event(change, 99, None));
+        assert_contains(
+            &uncertain_message(verify_refusal(&output, &before, &after, false)),
+            "unexpected window activity",
+        );
+    }
+}
+
+#[test]
+fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_cleanup() {
+    use crate::fixtures::{FOOT, SLEEP};
+    assert!(fixture_eligibility("9", "8").is_ok());
+    assert!(fixture_eligibility("9", "9").is_err());
+    assert!(fixture_eligibility("9", "8;kill").is_err());
+    // Both numbered targets independently use the existing preflight rules: occupied,
+    // original, and differently named workspaces never become fixtures.
+    assert!(preflight_eligibility(&starting_snapshot(), "1").is_err());
+    assert!(
+        preflight_eligibility(&loaded_pair(&standard_scenario("horizontal-pair")), "9").is_err()
+    );
+
+    let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
+    let selector = selector_value(&scenario, "window1");
+    let preexisting = container_ids(&starting_snapshot().tree);
+    let mut loaded = observed(
+        desktop(
+            "splith",
+            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            20,
+        ),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    loaded.window_events = vec![
+        window_event("new", 20, Some(&selector)),
+        window_event("focus", 20, Some(&selector)),
+    ];
+    let owned = bind_launches(&loaded.window_events, &scenario.layout, &preexisting).unwrap();
+    verify_ownership(
+        &loaded.tree,
+        TARGET_WORKSPACE_ID,
+        &scenario.layout,
+        &preexisting,
+        &owned,
+    )
+    .unwrap();
+    verify_layout(loaded.focused_workspace(), &scenario, &owned).unwrap();
+    loaded.window_events.clear();
+    let baseline = signature(loaded.focused_workspace());
+    let foreign = ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap();
+    let target = target_identity();
+    let context = CleanupContext {
+        target: &target,
+        layout: &scenario.layout,
+        preexisting_ids: &preexisting,
+        foreign: &foreign,
+    };
+    let plan = prepare_close(&loaded, &context, &owned, &baseline, 20, true).unwrap();
+    for closing_id in [PREEXISTING_WINDOW_ID, 99] {
+        uncertain_message(prepare_close(
+            &loaded, &context, &owned, &baseline, closing_id, true,
+        ));
+    }
+    uncertain_message(prepare_close(
+        &loaded,
+        &context,
+        &AcceptedWindows::new(),
+        &baseline,
+        20,
+        true,
+    ));
+    uncertain_message(prepare_close(
+        &loaded, &context, &owned, &baseline, 20, false,
+    ));
+    let mut changed_foreign = observed(
+        desktop(
+            "splith",
+            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            20,
+        ),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    changed_foreign.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1;
+    assert_contains(
+        &uncertain_message(prepare_close(
+            &changed_foreign,
+            &context,
+            &owned,
+            &baseline,
+            20,
+            true,
+        )),
+        "foreign window",
+    );
+    // Preservation is checked on the post-close boundary too; no later close is allowed.
+    uncertain_message(verify_close_observation(
+        &changed_foreign,
+        &context,
+        &owned,
+        &plan,
+        &baseline,
+        20,
+    ));
+    let mut cleaned = observed(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    cleaned.window_events.push(window_event("close", 20, None));
+    assert!(verify_close_observation(&cleaned, &context, &owned, &plan, &baseline, 20).unwrap());
+}
+
+#[test]
+fn interrupted_or_incomplete_second_invocation_never_authorizes_cleanup_or_restoration() {
+    refusal_completion(Ok(refused_output(1, &occupied_diagnostic())), false).unwrap();
+    for interrupted in [false, true] {
+        for reason in [
+            "deadline expired",
+            "stdout exceeded limit",
+            "output stayed open",
+            "start failed",
+            "interrupted",
+        ] {
+            uncertain_message(refusal_completion(Err(reason.into()), interrupted));
+        }
+    }
+    uncertain_message(refusal_completion(
+        Ok(refused_output(1, &occupied_diagnostic())),
+        true,
+    ));
+}
+
+#[test]
+fn fixture_creation_evidence_survives_expected_focus_changes_but_never_changed_state() {
+    use crate::fixtures::{FOOT, SLEEP};
+    let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
+    let selector = selector_value(&scenario, "window1");
+    let make_tree = |focus| {
+        desktop(
+            "splith",
+            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            focus,
+        )
+    };
+    let loaded = observed(make_tree(20), "9", TARGET_WORKSPACE_ID);
+    let baseline = signature(loaded.focused_workspace());
+    let fixture = ForeignFixture {
+        workspace: target_identity(),
+        progress: ScenarioProgress {
+            scenario,
+            preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
+            accepted: accepted(&[(20, "window1")]),
+        },
+        foreign: ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap(),
+        loaded_signature: Some(baseline.clone()),
+    };
+    let elsewhere = observed(make_tree(PREEXISTING_WINDOW_ID), "1", OTHER_WORKSPACE_ID);
+    verify_fixture_state(&elsewhere, &fixture, &baseline).unwrap();
+    verify_fixture_state(&loaded, &fixture, &baseline).unwrap();
+    let mut changed = observed(make_tree(20), "9", TARGET_WORKSPACE_ID);
+    changed.tree.nodes[1].nodes[1].nodes[0].rect.height -= 1;
+    uncertain_message(verify_fixture_state(&changed, &fixture, &baseline));
+}
+
+#[test]
+fn refusal_notification_stub_is_private_and_scoped_to_the_refusal_command() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let test_id = format!("{RUN_ID}-{}-refusal-notification", std::process::id());
+    let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
+    let original_path = env::var_os("PATH");
+    let inherited_path = OsString::from_vec(b"/tools with spaces:/non-utf8-\xff:/usr/bin".to_vec());
+    let binary = Path::new("/a path/sway-stage");
+    let refused = directory.refusal_command(binary, &inherited_path).unwrap();
+
+    let notification_bin = directory.path.join("refusal-notification-bin");
+    let stub = notification_bin.join("notify-send");
+    assert_eq!(fs::read(&stub).unwrap(), b"#!/bin/sh\nexit 0\n");
+    for path in [&notification_bin, &stub] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    let overrides: Vec<_> = refused.get_envs().collect();
+    let [(key, Some(child_path))] = overrides.as_slice() else {
+        panic!("expected only one child PATH override: {overrides:?}");
+    };
+    assert_eq!(*key, OsStr::new("PATH"));
+    assert_eq!(
+        env::split_paths(child_path).collect::<Vec<_>>(),
+        [
+            notification_bin,
+            PathBuf::from("/tools with spaces"),
+            PathBuf::from(OsString::from_vec(b"/non-utf8-\xff".to_vec())),
+            PathBuf::from("/usr/bin"),
+        ]
+    );
+    assert_eq!(env::var_os("PATH"), original_path);
+
+    let ordinary = configured_command(binary, &directory.path, "load", "single-window");
+    assert_eq!(refused.get_program(), ordinary.get_program());
+    assert_eq!(
+        refused.get_args().collect::<Vec<_>>(),
+        ordinary.get_args().collect::<Vec<_>>()
+    );
+    assert_eq!(ordinary.get_envs().count(), 0);
+    // An existing stub directory is never reused or overwritten.
+    assert!(directory.refusal_command(binary, &inherited_path).is_err());
     let path = directory.path.clone();
     drop(directory);
     assert!(!path.exists());

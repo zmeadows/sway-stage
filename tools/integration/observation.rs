@@ -44,6 +44,7 @@ pub struct Events {
     /// Cleared by any fence or snapshot consistency failure, and never restored. Unlike an
     /// ordinary failure, untrusted history forbids further fences and workspace restoration.
     focus_history_trusted: bool,
+    workspace_revision: u64,
 }
 
 impl Events {
@@ -67,7 +68,13 @@ impl Events {
             subscription,
             current_workspace: None,
             focus_history_trusted: true,
+            workspace_revision: 0,
         })
+    }
+
+    /// Counts non-urgent workspace events, including brief changes absent from trees.
+    pub fn workspace_revision(&self) -> u64 {
+        self.workspace_revision
     }
 
     pub fn current_workspace(&self) -> Option<&WorkspaceIdentity> {
@@ -141,6 +148,9 @@ impl Events {
                 }
                 Event::Workspace(workspace_event) => workspace_event,
             };
+            if workspace_event.change != WorkspaceChange::Urgent {
+                self.workspace_revision += 1;
+            }
             apply_workspace_event(
                 &workspace_event,
                 expected_switch,
@@ -279,6 +289,18 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Also used by preservation decisions on recorded snapshots in offline tests.
+    pub fn validate(&self) -> Result<(), Failure> {
+        let focused_id =
+            validate_snapshot(&self.tree, &self.workspaces, None).map_err(Failure::Uncertain)?;
+        if focused_id != self.focused_workspace_id {
+            return Err(Failure::Uncertain(
+                "snapshot focus evidence contradicts its tree".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn focused_workspace(&self) -> &TreeNode {
         walk(&self.tree)
             .into_iter()

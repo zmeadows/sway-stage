@@ -47,38 +47,77 @@ cargo build --release --locked
 cargo build --release --locked --example integration
 ```
 
-Before running, start on an existing workspace other than the target. Choose an explicit
-positive decimal workspace number (at most nine digits) that is absent or completely empty,
-including floating windows and empty containers. A number belonging to a differently named
-workspace is refused. The starting workspace name must begin with an ASCII letter/digit
+Before running, start on an existing workspace other than either disposable workspace.
+Choose two distinct explicit positive decimal workspace numbers (at most nine digits each),
+using `--workspace` for the layout target and `--foreign-workspace` for the foreign fixture.
+Both must be absent or completely empty, including floating windows and empty containers.
+A number belonging to a differently named workspace is refused. The starting workspace name must begin with an ASCII letter/digit
 and contain only ASCII letters/digits, spaces, or `_ . : + -`, allowing safe restoration.
 Preflight is repeated immediately before switching; the harness never selects an alternate
-target.
+target or fixture. Never designate a workspace containing user windows as the fixture.
 
 Run manually, one invocation at a time:
 
 ```sh
-./target/release/examples/integration --workspace 9
-./target/release/examples/integration --workspace 9 --extended
+./target/release/examples/integration --workspace 9 --foreign-workspace 8
+./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
+| `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
 | `--extended` | Append Firefox, Xterm/Xwayland, nested browser, and repeated-app-ID cases. |
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers nine Foot scenarios: single window, horizontal/vertical pairs,
+The standard run covers ten Foot scenarios: single window, horizontal/vertical pairs,
 uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
-groups, process execution, and default final focus. Each verifies raw-tree identity, order,
-hierarchy, sizing, final focus, capture, and guarded cleanup.
-Single-window and horizontal-pair cases also check inferred commands. Expect nine passes;
-extended runs expect thirteen when all optional prerequisites exist, otherwise explicit SKIPs.
+groups, process execution, default final focus, and occupied-workspace refusal. Each verifies
+raw-tree identity, order, hierarchy, sizing, final focus, capture, and guarded cleanup.
+Single-window and horizontal-pair cases also check inferred commands. Expect ten passes;
+extended runs expect fourteen when all optional prerequisites exist, otherwise explicit SKIPs.
 The process-execution case uses a private relative cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
 run-specific environment override; verified window cleanup must also observe its exit.
 No shell evaluates the test arguments.
+
+The occupied-workspace case first loads and independently verifies a two-window layout,
+then attempts a different valid layout on that occupied target. It requires exit 1 and the
+specific occupied-workspace prelaunch diagnostic. Synchronized trees must preserve every
+modeled container ID, identity, wrapper, ordering, geometry, and focus across the refusal;
+unexpected window or non-urgent workspace events fail it. A timeout, interruption, or
+unrelated error never counts as an expected refusal. The suite reports this verification
+separately from successful layouts and optional SKIPs. Only this expected-refusal invocation
+uses a private no-op `notify-send` stub on its child `PATH`, suppressing the intentional
+error notification while preserving stderr and exit-status checks. Other invocations retain
+normal notifications and the harness's environment is unchanged.
+
+Before the primary target is selected, the harness switches to the separately preflighted
+fixture workspace and loads a single Foot window with a run-unique app ID. Ordered new-window
+events and independent tree/layout checks establish ownership. It then makes an expected,
+fenced switch to the primary target. The fixture stays present throughout the suite; its
+terminal expires after 3600 seconds if left behind. It is an additional setup load, not an
+extra counted layout scenario. Its identity and location are printed on creation and failure.
+On complete scenario success, the harness verifies the fixture again, performs an expected
+switch back, and applies the ordinary exact-ID, freshly verified cleanup procedure before
+attempting original-workspace restoration. Every switch retains continuous focus history;
+there is no switch back or fixture cleanup after uncertain failures.
+
+Immediately before each load, the harness records every foreign window, including scratchpad
+windows. After load and capture, before each close, during close observation, and after cleanup,
+it compares window identities, workspace/output ancestry, parent containers, sibling ordering
+inside workspaces, geometry, and floating/fullscreen/scratchpad state. The fixture also retains
+its original creation evidence across all scenarios. Titles, urgency, marks, and incidental
+focus metadata are excluded from preservation comparisons; focus and global structural
+activity retain their separate strict event checks. Any preservation uncertainty fails the
+run and stops further closes, launches, and restoration. A preservation baseline alone never
+authorizes closing a preexisting window.
+
+Snapshots and tick fences do not provide transactional isolation. Relevant unexpected events
+fail even if a later tree returns to baseline. Harmless title/urgency/mark events are allowed.
+Changes without corresponding observable events, briefly made and restored between snapshots,
+cannot be ruled out; a pass establishes unchanged observed state plus accepted event history.
 
 Sizing above 1 percentage point is diagnostic; above 5 fails a harness scenario.
 
@@ -106,10 +145,10 @@ Read reported container IDs, selectors, PIDs, and retained paths before manual i
 diagnostic candidates do not imply ownership. Rules, gaps, minimum sizes, desktop activity,
 or version differences can explain conservative failures.
 
-Restoration is separate from cleanup. It requires trusted focus history, the target still
-focused, and the original workspace's exact identity/name still present. Otherwise it is
-skipped; a destroyed original workspace is not recreated. An ordinary check failure may
-permit guarded restoration; uncertain ownership/control or interruption does not.
+Restoration is separate from cleanup. It requires trusted focus history, a recorded disposable
+workspace still focused (the primary target or fixture workspace), and the original workspace's
+exact identity/name still present. Otherwise it is skipped; a destroyed original workspace is
+not recreated. An ordinary check failure may permit guarded restoration; uncertain ownership/control or interruption does not.
 
 After harness safety changes, manually test separate runs interrupted during load, capture,
 and cleanup with Ctrl-C or SIGINT to the harness PID only. Expect failure, remaining-window
