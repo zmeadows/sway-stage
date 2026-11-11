@@ -4,12 +4,11 @@
 //! It never sends a Sway command, launches anything, or writes a file, and it records
 //! arrangement and window selectors, with optional best-effort process arguments.
 
+use crate::command_inference::read_process_command;
 use crate::config::{MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
 use crate::observation::{self, app_id, class, proportions, sibling_dimensions};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, Read};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
@@ -19,10 +18,6 @@ use swayipc::{Connection, Floating, Node, NodeLayout, NodeType, ScratchpadState}
 
 // Bounds the complete tree query, including stalled or fragmented replies.
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
-
-// A modest per-window bound; read one extra byte to detect truncation.
-const MAX_CMDLINE_BYTES: usize = 64 * 1024;
-const MAX_FLATPAK_INFO_BYTES: usize = 64 * 1024;
 
 const INFERENCE_HEADER: &str = "\
 # Review recovered commands before executing or sharing: process arguments are
@@ -35,6 +30,46 @@ const DRAFT_HEADER: &str = "\
 # `match: null` with exactly one exact `app_id` or `class`. Weights are percentages of
 # the enclosing split. Validate the edited file with `sway-stage check NAME`.
 ";
+
+/// YAML and command counts from the same generated layout.
+#[derive(Debug, PartialEq)]
+pub struct RenderedDraft {
+    pub yaml: String,
+    pub commands: CommandCounts,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct CommandCounts {
+    pub total: usize,
+    pub inferred: usize,
+    pub inference_requested: bool,
+}
+
+impl CommandCounts {
+    pub fn unresolved(&self) -> usize {
+        self.total - self.inferred
+    }
+
+    /// Contains only counts and guidance, never recovered arguments or process metadata.
+    pub fn summary(&self) -> String {
+        let unresolved = self.unresolved();
+        if !self.inference_requested {
+            format!(
+                "Command inference disabled; unresolved commands: {unresolved}. Manual editing required."
+            )
+        } else if unresolved == 0 {
+            format!(
+                "Commands inferred: {}; unresolved: 0. Review best-effort commands before use.",
+                self.inferred
+            )
+        } else {
+            format!(
+                "Commands inferred: {}; unresolved: {unresolved}. Manual editing required.",
+                self.inferred
+            )
+        }
+    }
+}
 
 /// Complete read-only Sway state, including output ancestry, window PIDs, and focus.
 /// Acquiring it does not require a nonempty or representable layout.
@@ -92,7 +127,7 @@ impl Snapshot {
     }
 
     /// Validates and renders only saved Sway state. Process arguments remain best-effort.
-    pub fn render(&self, infer_commands: bool) -> Result<String, String> {
+    pub fn render(&self, infer_commands: bool) -> Result<RenderedDraft, String> {
         self.render_with(infer_commands, &mut read_process_command)
     }
 
@@ -100,7 +135,7 @@ impl Snapshot {
         &self,
         infer_commands: bool,
         read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
-    ) -> Result<String, String> {
+    ) -> Result<RenderedDraft, String> {
         let captured = capture_workspace(self)?;
         let mut command_for = |container_id| {
             if !infer_commands {
@@ -145,160 +180,8 @@ fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapsho
 }
 
 /// Returns a complete draft in memory, so a failed capture cannot print partial YAML.
-pub fn capture(infer_commands: bool) -> Result<String, String> {
+pub fn capture(infer_commands: bool) -> Result<RenderedDraft, String> {
     snapshot()?.render(infer_commands)
-}
-
-/// An inaccessible or vanished process is an ordinary inference miss, never a capture
-/// error. Neither I/O errors nor argument contents escape this boundary into diagnostics.
-fn read_process_command(pid: i32) -> Option<Vec<String>> {
-    if pid <= 0 {
-        return None;
-    }
-
-    let metadata = File::open(format!("/proc/{pid}/root/.flatpak-info"));
-    infer_process_command(metadata, || {
-        let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
-        read_command_line(file)
-    })
-}
-
-fn infer_process_command(
-    metadata: io::Result<impl Read>,
-    read_cmdline: impl FnOnce() -> Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    match metadata {
-        Ok(reader) => read_flatpak_command(reader),
-        // Only absence permits host argv inference. Permission and other errors leave
-        // identity uncertain; copying sandbox argv then could produce an unusable command.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => read_cmdline(),
-        Err(_) => None,
-    }
-}
-
-fn read_flatpak_command(reader: impl Read) -> Option<Vec<String>> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_FLATPAK_INFO_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAX_FLATPAK_INFO_BYTES {
-        return None;
-    }
-    flatpak_command(std::str::from_utf8(&bytes).ok()?)
-}
-
-/// Read only the identity fields of Flatpak's key file. Unsupported escapes in these
-/// fields are rejected rather than decoded or guessed; unrelated values stay opaque.
-fn flatpak_command(metadata: &str) -> Option<Vec<String>> {
-    if metadata.contains('\0') {
-        return None;
-    }
-
-    let mut section = "";
-    let mut sections = HashSet::new();
-    let mut keys = HashSet::new();
-    let mut application_id = None;
-    let mut branch = None;
-    let mut arch = None;
-    for line in metadata.lines() {
-        let line = line.trim_matches([' ', '\t', '\r']);
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') {
-            section = line.strip_prefix('[')?.strip_suffix(']')?;
-            if section.is_empty() || section.contains(['[', ']']) || !sections.insert(section) {
-                return None;
-            }
-            continue;
-        }
-
-        let (key, field_value) = line.split_once('=')?;
-        let key = key.trim_matches([' ', '\t']);
-        let field_value = field_value.trim_matches([' ', '\t']);
-        if section.is_empty() || key.is_empty() || !keys.insert((section, key)) {
-            return None;
-        }
-        match (section, key) {
-            ("Application", "name") => application_id = Some(field_value),
-            ("Instance", "branch") => branch = Some(field_value),
-            ("Instance", "arch") => arch = Some(field_value),
-            _ => {}
-        }
-    }
-
-    // Runtime-only sandboxes have [Runtime], not [Application]. Conflicting groups
-    // are ambiguous and must never turn a runtime name into an application launch.
-    let application_id = application_id?;
-    if sections.contains("Runtime") || !valid_flatpak_id(application_id) {
-        return None;
-    }
-
-    let mut command = vec!["flatpak".into(), "run".into()];
-    for (option, field_value) in [("--branch", branch), ("--arch", arch)] {
-        if let Some(field_value) = field_value {
-            // A conservative subset of reference components, with no key-file escapes,
-            // whitespace, path separators, or option-like leading punctuation.
-            if !field_value.starts_with(|c: char| c.is_ascii_alphanumeric())
-                || !field_value
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-            {
-                return None;
-            }
-            command.push(format!("{option}={field_value}"));
-        }
-    }
-    command.push(application_id.into());
-    Some(command)
-}
-
-/// Flatpak IDs have at least three nonempty ASCII components, at most 255 bytes,
-/// no leading digits, and hyphens only in the final component.
-fn valid_flatpak_id(application_id: &str) -> bool {
-    if application_id.len() > 255 {
-        return false;
-    }
-    let components: Vec<&str> = application_id.split('.').collect();
-    if components.len() < 3 {
-        return false;
-    }
-    for (component_index, component) in components.iter().enumerate() {
-        let allow_hyphen = component_index == components.len() - 1;
-        let valid_initial =
-            |c: u8| c.is_ascii_alphabetic() || c == b'_' || (allow_hyphen && c == b'-');
-        if !component.bytes().next().is_some_and(valid_initial)
-            || !component
-                .bytes()
-                .all(|c| valid_initial(c) || c.is_ascii_digit())
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn read_command_line(reader: impl Read) -> Option<Vec<String>> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_CMDLINE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_CMDLINE_BYTES || bytes.last() != Some(&0) {
-        return None;
-    }
-
-    // Remove exactly the final terminator: any other adjacent NULs are empty arguments.
-    let arguments: Vec<String> = bytes[..bytes.len() - 1]
-        .split(|byte| *byte == 0)
-        .map(|argument| String::from_utf8(argument.to_vec()))
-        .collect::<Result<_, _>>()
-        .ok()?;
-    if arguments[0].is_empty() {
-        return None;
-    }
-    Some(arguments)
 }
 
 /// The saved facts a draft is generated from.
@@ -540,9 +423,20 @@ fn render_draft(
     captured: &CapturedWorkspace,
     infer_commands: bool,
     command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
-) -> Result<String, String> {
+) -> Result<RenderedDraft, String> {
     let mut draft_ids = HashMap::new();
-    let layout = draft_node(&captured.root, None, &mut draft_ids, command_for);
+    let mut commands = CommandCounts {
+        total: 0,
+        inferred: 0,
+        inference_requested: infer_commands,
+    };
+    let layout = draft_node(
+        &captured.root,
+        None,
+        &mut draft_ids,
+        command_for,
+        &mut commands,
+    );
     let focus = draft_ids.remove(&captured.focused_id).ok_or_else(|| {
         format!(
             "focus is on container id={} rather than a window, for example after `focus parent`; focus a window and retry",
@@ -569,7 +463,10 @@ fn render_draft(
         }
     })?;
     let inference_header = if infer_commands { INFERENCE_HEADER } else { "" };
-    Ok(format!("{DRAFT_HEADER}{inference_header}{yaml}"))
+    Ok(RenderedDraft {
+        yaml: format!("{DRAFT_HEADER}{inference_header}{yaml}"),
+        commands,
+    })
 }
 
 /// `weight` is `None` only for the root, whose weight would have no effect. `draft_ids`
@@ -579,6 +476,7 @@ fn draft_node(
     weight: Option<f64>,
     draft_ids: &mut HashMap<i64, String>,
     command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
+    commands: &mut CommandCounts,
 ) -> DraftNode {
     match captured {
         CapturedNode::Window {
@@ -587,10 +485,15 @@ fn draft_node(
         } => {
             let id = format!("window{}", draft_ids.len() + 1);
             draft_ids.insert(*container_id, id.clone());
+            let command = command_for(*container_id);
+            commands.total += 1;
+            if command.is_some() {
+                commands.inferred += 1;
+            }
             DraftNode::Window {
                 id,
                 weight,
-                command: command_for(*container_id),
+                command,
                 selector: selector.clone(),
             }
         }
@@ -604,7 +507,7 @@ fn draft_node(
                 .iter()
                 .zip(child_weights)
                 .map(|(child, child_weight)| {
-                    draft_node(child, Some(child_weight), draft_ids, command_for)
+                    draft_node(child, Some(child_weight), draft_ids, command_for, commands)
                 })
                 .collect();
             DraftNode::Split {

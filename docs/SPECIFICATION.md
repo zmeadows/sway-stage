@@ -172,8 +172,13 @@ empty workspace. The [examples](../examples) show complete commands and selector
 Capture reads one Sway tree through `SWAYSOCK`, with a bounded response wait. It never
 launches applications or sends layout/focus commands. Later desktop changes cannot redirect
 or invalidate the saved structure; no freeze or ongoing event observation is attempted.
-Standalone capture writes only stdout, so the shell controls the destination (and may
-create or truncate the file even if capture fails).
+Standalone capture writes YAML exclusively to stdout; the shell controls the destination
+(and may create or truncate the file even if capture fails). After the complete draft is
+written and flushed, a concise success summary goes to stderr without a destination filename.
+It reports disabled inference and required manual editing, or the inferred and unresolved
+command counts. Unresolved commands require manual editing; fully inferred commands still
+need review and are best-effort, with no promise of recreating the original windows.
+These counts cover launch commands only, independently of `match: null` placeholders.
 
 The draft preserves split hierarchy, orientations, visual order, and focused window. IDs
 are `window1`, `window2`, … in depth-first order. Child weights are percentages of summed
@@ -244,6 +249,11 @@ cancellation remains available, and empty/unsupported capture layouts do not blo
   window, output, or focus changes during either prompt do not alter the draft. Unsupported
   capture state fails before the name prompt. `--infer-commands` runs only after Capture is
   selected, using the saved PIDs; process arguments may have changed during the wait.
+
+After a successful save, the bounded, best-effort notification includes the saved YAML path,
+inference status, and unresolved-command count. It calls for manual editing when commands
+remain unresolved, or review of best-effort commands when all were inferred. Notification
+failure does not fail the save. Cancellation and failed captures do not report success.
 
 Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at
 most 250 ASCII characters, without an extension; input is not trimmed or normalized.

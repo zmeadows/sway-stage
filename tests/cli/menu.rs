@@ -83,7 +83,7 @@ fn assert_log_preserved(fixture: &Fixture) {
     );
 }
 
-fn capture_tree() -> Value {
+pub(super) fn capture_tree() -> Value {
     let mut window = sway_node(20, "con", 1920, vec![]);
     window["shell"] = json!("xdg_shell");
     window["app_id"] = json!("editor");
@@ -307,6 +307,15 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
         assert!(notification.contains("sway-stage draft saved"));
         assert!(notification.contains(path.to_str().unwrap()));
         assert!(!notification.contains("command:"));
+        if infer_commands {
+            assert!(notification.contains("Commands inferred: 1; unresolved: 0."));
+            assert!(notification.contains("Review best-effort commands before use."));
+            let executable = std::env::current_exe().unwrap();
+            assert!(!notification.contains(executable.to_str().unwrap()));
+        } else {
+            assert!(notification.contains("Command inference disabled; unresolved commands: 1."));
+            assert!(notification.contains("Manual editing required."));
+        }
 
         // Ordinary discovery in the same environment finds the saved layout.
         let mut list = fixture.command();
@@ -745,4 +754,43 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
             "DP-1\n"
         );
     }
+}
+
+#[test]
+fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_commands() {
+    let fixture = Fixture::new();
+    setup(&fixture);
+    let mut tree = capture_tree();
+    let workspace = &mut tree["nodes"][0]["nodes"][0];
+    let mut unresolved = workspace["nodes"][0].clone();
+    unresolved["id"] = json!(21);
+    unresolved["focused"] = json!(false);
+    unresolved["pid"] = Value::Null;
+    // Missing match information must not add to the unresolved command count.
+    unresolved["app_id"] = Value::Null;
+    workspace["nodes"].as_array_mut().unwrap().push(unresolved);
+    let output = run_snapshot(
+        &fixture,
+        command(&fixture, CAPTURE, "partial\n").args([
+            "--layouts-dir",
+            ".",
+            "menu",
+            "--infer-commands",
+        ]),
+        tree,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let path = fixture.path.join("partial.yaml");
+    let draft = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        draft
+            .lines()
+            .filter(|line| line.trim() == "command: null")
+            .count(),
+        1
+    );
+    let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+    assert!(notification.contains("Commands inferred: 1; unresolved: 1. Manual editing required."));
+    assert!(notification.contains("./partial.yaml"));
+    assert!(!notification.contains(std::env::current_exe().unwrap().to_str().unwrap()));
 }

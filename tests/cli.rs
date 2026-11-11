@@ -603,7 +603,19 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
         let output = command.output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         server.join().unwrap();
-        assert!(output.stderr.is_empty(), "{output:?}");
+        let summary = String::from_utf8(output.stderr).unwrap();
+        assert!(summary.contains("capture completed."), "{summary}");
+        let expected = if infer_commands {
+            "Commands inferred: 0; unresolved: 2. Manual editing required."
+        } else {
+            "Command inference disabled; unresolved commands: 2. Manual editing required."
+        };
+        assert!(summary.contains(expected), "{summary}");
+        assert_eq!(
+            summary.contains("Command inference disabled"),
+            !infer_commands
+        );
+        assert!(!summary.contains(".yaml"));
         drafts.push(String::from_utf8(output.stdout).unwrap());
     }
     // Missing PIDs retain placeholders; only the opt-in review comment is added.
@@ -740,3 +752,48 @@ fn capture_failures_notify_without_touching_the_launch_log() {
 
 #[path = "cli/menu.rs"]
 mod menu;
+
+#[test]
+fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
+    for output_fails in [false, true] {
+        let fixture = Fixture::new();
+        let socket = fixture.path.join("capture.sock");
+        let server = serve_capture(
+            UnixListener::bind(&socket).unwrap(),
+            menu::capture_tree(),
+            None,
+        );
+        let mut command = fixture.command();
+        command
+            .env("SWAYSOCK", &socket)
+            .args(["capture", "--infer-commands"]);
+        if output_fails {
+            command.stdout(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .unwrap(),
+            );
+        }
+        let output = command.output().unwrap();
+        server.join().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if output_fails {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(stderr.contains("stdout:"));
+            assert!(!stderr.contains("capture completed"));
+        } else {
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(
+                stderr,
+                "sway-stage: capture completed. Commands inferred: 1; unresolved: 0. Review best-effort commands before use.\n"
+            );
+            let yaml = String::from_utf8(output.stdout).unwrap();
+            assert!(!yaml.contains("capture completed"));
+            fixture.file("draft.yaml", &yaml);
+            fixture.run(&["--layouts-dir", ".", "check", "draft"], 0);
+        }
+        assert!(!stderr.contains(std::env::current_exe().unwrap().to_str().unwrap()));
+        assert!(!fixture.path.join(".local").exists());
+    }
+}

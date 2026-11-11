@@ -1,7 +1,9 @@
 use super::*;
+use crate::command_inference::infer_process_command;
 use crate::config::{self, Config, LayoutNode, Matcher, NodeKind, Orientation};
 use crate::observation::fixtures::{frame, node, pair, request, send, tree};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::Path;
 use std::thread;
 
@@ -72,7 +74,9 @@ fn saved_snapshot(tree: Value) -> Result<Snapshot, String> {
 }
 
 fn capture_recorded(tree: Value) -> Result<String, String> {
-    saved_snapshot(tree)?.render_with(false, &mut |_| panic!("default reads no processes"))
+    saved_snapshot(tree)?
+        .render_with(false, &mut |_| panic!("default reads no processes"))
+        .map(|draft| draft.yaml)
 }
 
 /// The YAML after the explanatory header, which itself mentions both placeholders.
@@ -596,7 +600,7 @@ fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
     let saved = saved_snapshot(desktop.clone()).unwrap();
     assert_eq!(saved.workspace_id(), 10);
     assert_eq!(saved.tree.nodes[0].name.as_deref(), Some("DP-1"));
-    let original = saved.render(false).unwrap();
+    let original = saved.render(false).unwrap().yaml;
 
     // Simulate focus/workspace/output changes and closed, moved, or newly opened windows.
     // Rendering has no connection to ask for this later state, even during inference.
@@ -609,9 +613,10 @@ fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
             None
         })
         .unwrap();
+    let inferred = inferred.yaml;
     assert_eq!(requested_pids, [101, 102]);
     assert_eq!(desktop["nodes"][0]["nodes"][0]["nodes"][0]["id"], 99);
-    assert_eq!(saved.render(false).unwrap(), original);
+    assert_eq!(saved.render(false).unwrap().yaml, original);
     assert_eq!(
         inferred,
         original.replacen(
@@ -639,7 +644,7 @@ fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes()
 
     let saved = saved_snapshot(desktop.clone()).unwrap();
     assert_eq!(saved.workspace_id(), 77);
-    let draft = saved.render(false).unwrap();
+    let draft = saved.render(false).unwrap().yaml;
     assert!(draft.contains("app_id: right"));
     assert!(!draft.contains("app_id: left"));
 
@@ -721,75 +726,6 @@ fn failed_tree_read_produces_no_draft() {
     worker.join().unwrap();
 }
 
-#[test]
-fn command_line_reader_preserves_literal_arguments_and_empty_arguments() {
-    let arguments = [
-        "foot",
-        "--app-id",
-        "two words",
-        "'quotes'\"",
-        "雪🦀",
-        "#secret: [x]",
-        "*alias",
-        "true",
-        "null",
-        "line\nbreak",
-        "",
-        "",
-    ];
-    let bytes = arguments.join("\0") + "\0";
-    assert_eq!(read_command_line(bytes.as_bytes()).unwrap(), arguments);
-    assert_eq!(read_command_line(&b"foot\0"[..]).unwrap(), ["foot"]);
-}
-
-#[test]
-fn command_line_reader_rejects_unusable_or_incomplete_data_and_bounds_reads() {
-    for bytes in [
-        &b""[..],
-        &b"\0"[..],
-        &b"\0argument\0"[..],
-        &b"foot"[..],
-        &b"foot\0unfinished"[..],
-        &b"foot\0\xff\0"[..],
-        &b"\xff\0"[..],
-    ] {
-        assert!(read_command_line(bytes).is_none());
-    }
-
-    let mut maximum = vec![b'x'; MAX_CMDLINE_BYTES];
-    maximum[MAX_CMDLINE_BYTES - 1] = 0;
-    assert!(read_command_line(maximum.as_slice()).is_some());
-    maximum.push(0);
-    assert!(read_command_line(maximum.as_slice()).is_none());
-
-    let mut endless = std::io::repeat(b'x').take(MAX_CMDLINE_BYTES as u64 + 10);
-    assert!(read_command_line(&mut endless).is_none());
-    // The bounded reader stops even if the source has no EOF.
-    assert_eq!(endless.limit(), 9);
-}
-
-#[test]
-fn process_read_failures_are_silent_inference_misses() {
-    struct Unavailable(std::io::ErrorKind);
-    impl Read for Unavailable {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                self.0,
-                "sensitive argument must not escape",
-            ))
-        }
-    }
-    for kind in [
-        std::io::ErrorKind::NotFound,
-        std::io::ErrorKind::PermissionDenied,
-    ] {
-        assert!(read_command_line(Unavailable(kind)).is_none());
-    }
-    for pid in [i32::MIN, -1, 0] {
-        assert!(read_process_command(pid).is_none());
-    }
-}
-
 fn view_with_pid(id: i64, pid: Value) -> Value {
     let mut window = view(id, Some("shared-app"), 960, 1080);
     window["pid"] = pid;
@@ -843,6 +779,7 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
             }
         })
         .unwrap();
+    let inferred = inferred.yaml;
     assert_eq!(requested, [101, 102, 103]);
     assert!(inferred.contains(INFERENCE_HEADER));
     assert_eq!(inferred.matches("command: null").count(), 2); // Header plus failed leaf.
@@ -899,154 +836,9 @@ fn absent_or_invalid_saved_pids_leave_null_without_reading_processes() {
         let draft = saved_snapshot(desktop)
             .unwrap()
             .render_with(true, &mut |_| panic!("invalid PID must not be read"))
-            .unwrap();
+            .unwrap()
+            .yaml;
         assert!(draft.contains("  command: null"));
-    }
-}
-
-#[test]
-fn flatpak_metadata_builds_host_commands_from_application_and_instance_fields() {
-    let application = "# generated by Flatpak\n[Application]\nname=com.mastermindzh.tidal-hifi\n\
-                       runtime=org.freedesktop.Platform/x86_64/24.08\n";
-    assert_eq!(
-        flatpak_command(application).unwrap(),
-        ["flatpak", "run", "com.mastermindzh.tidal-hifi"]
-    );
-    let instance = format!(
-        "{application}[Instance]\nbranch=beta\narch=x86_64\n\
-         extra-args=--filesystem=host;--env=EXAMPLE=value;\n"
-    );
-    assert_eq!(
-        flatpak_command(&instance).unwrap(),
-        [
-            "flatpak",
-            "run",
-            "--branch=beta",
-            "--arch=x86_64",
-            "com.mastermindzh.tidal-hifi"
-        ]
-    );
-    for (field, option) in [
-        ("branch=stable", "--branch=stable"),
-        ("arch=aarch64", "--arch=aarch64"),
-    ] {
-        assert_eq!(
-            flatpak_command(&format!("{application}[Instance]\n{field}\n")).unwrap(),
-            ["flatpak", "run", option, "com.mastermindzh.tidal-hifi"]
-        );
-    }
-    // Old or unrelated fields must not be confused with the current [Instance] fields.
-    assert_eq!(
-        flatpak_command(&format!("{application}branch=ignored\narch=ignored\n")).unwrap(),
-        ["flatpak", "run", "com.mastermindzh.tidal-hifi"]
-    );
-}
-
-#[test]
-fn flatpak_metadata_rejects_missing_ambiguous_and_malformed_identity() {
-    for metadata in [
-        "",
-        "[Instance]\narch=x86_64",
-        "[Runtime]\nname=org.example.Runtime",
-        "[Application]\nruntime=org.example.Runtime/x86_64/stable",
-        "[Application]\nname=",
-        "[Application\nname=org.example.App",
-        "name=org.example.App",
-        "[Application]\nname=org.example.App\ninvalid line",
-        "[Application]\nname=org.example.App\nname=org.example.Other",
-        "[Application]\nname=org.example.App\n[Application]\nname=org.example.Other",
-        "[Application]\nname=org.example.App\n[Runtime]\nname=org.example.Runtime",
-        "[Application]\nname=org.example.App\0",
-    ] {
-        assert!(flatpak_command(metadata).is_none(), "{metadata:?}");
-    }
-    for application_id in [
-        "org.example",
-        "org..App",
-        ".org.example.App",
-        "org.example.App.",
-        "org.1example.App",
-        "org.example.1App",
-        "org.ex-ample.App",
-        "--command=sh",
-        "org.example.App;sh",
-        "org.example.$(sh)",
-        "org.example.App/extra",
-        "org.example.App --command=sh",
-        "org.example.App\\sargument",
-        "org.example.雪",
-    ] {
-        assert!(flatpak_command(&format!("[Application]\nname={application_id}")).is_none());
-    }
-    assert!(!valid_flatpak_id(&format!(
-        "org.example.{}",
-        "x".repeat(244)
-    )));
-    assert!(valid_flatpak_id(&format!(
-        "org.example.{}",
-        "x".repeat(243)
-    )));
-    assert!(valid_flatpak_id("org.example._App-2"));
-
-    for field in ["branch", "arch"] {
-        for invalid in ["", "--command=sh", "x/y", "x y", "x;sh", "x\\sy", "$(sh)"] {
-            let metadata =
-                format!("[Application]\nname=org.example.App\n[Instance]\n{field}={invalid}");
-            assert!(flatpak_command(&metadata).is_none());
-        }
-        let duplicate =
-            format!("[Application]\nname=org.example.App\n[Instance]\n{field}=a\n{field}=b");
-        assert!(flatpak_command(&duplicate).is_none());
-    }
-}
-
-#[test]
-fn flatpak_metadata_reads_are_bounded_and_fail_closed() {
-    let mut metadata = b"[Application]\nname=org.example.App\n#".to_vec();
-    metadata.resize(MAX_FLATPAK_INFO_BYTES, b'x');
-    assert!(read_flatpak_command(metadata.as_slice()).is_some());
-    metadata.push(b'x');
-    assert!(read_flatpak_command(metadata.as_slice()).is_none());
-    assert!(read_flatpak_command(&b"[Application]\nname=org.example.\xff"[..]).is_none());
-
-    let mut endless = io::repeat(b'x').take(MAX_FLATPAK_INFO_BYTES as u64 + 10);
-    assert!(read_flatpak_command(&mut endless).is_none());
-    assert_eq!(endless.limit(), 9);
-    struct Unreadable;
-    impl Read for Unreadable {
-        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::PermissionDenied.into())
-        }
-    }
-    assert!(read_flatpak_command(Unreadable).is_none());
-    for kind in [
-        io::ErrorKind::PermissionDenied,
-        io::ErrorKind::NotADirectory,
-        io::ErrorKind::Other,
-    ] {
-        let metadata: io::Result<&[u8]> = Err(kind.into());
-        assert!(
-            infer_process_command(metadata, || panic!("uncertain identity must not read argv"))
-                .is_none()
-        );
-    }
-    let missing: io::Result<&[u8]> = Err(io::ErrorKind::NotFound.into());
-    assert_eq!(
-        infer_process_command(missing, || read_command_line(
-            &b"host-app\0two words\0\0"[..]
-        ))
-        .unwrap(),
-        ["host-app", "two words", ""]
-    );
-    for metadata in [
-        "[Application]\nname=org.example.App",
-        "[Application]\nname=",
-        "[Runtime]\nname=org.example.Runtime",
-    ] {
-        // Even unusable metadata must suppress sandbox-internal /app argv.
-        let _ = infer_process_command(Ok(metadata.as_bytes()), || {
-            panic!("must not reuse /app argv")
-        });
     }
 }
 
@@ -1072,7 +864,7 @@ fn flatpak_inference_preserves_pid_association_and_window_matchers_in_yaml() {
             })
         })
         .unwrap();
-    let parsed = filled(&draft);
+    let parsed = filled(&draft.yaml);
     let NodeKind::Split { children, .. } = &parsed.layout.value.kind else {
         panic!("expected split")
     };
@@ -1097,14 +889,77 @@ fn flatpak_inference_preserves_pid_association_and_window_matchers_in_yaml() {
     }
     let unresolved = saved
         .render_with(true, &mut |_| {
-            flatpak_command("[Application]\nname=partial")
+            infer_process_command(Ok("[Application]\nname=partial".as_bytes()), || None)
         })
-        .unwrap();
+        .unwrap()
+        .yaml;
     assert_eq!(unresolved.matches("  command: null").count(), 2);
     let default = saved
         .render_with(false, &mut |_| {
             panic!("default must not inspect Flatpak metadata")
         })
-        .unwrap();
+        .unwrap()
+        .yaml;
     assert_eq!(default.matches("  command: null").count(), 2);
+}
+
+#[test]
+fn command_counts_follow_generated_leaves_independently_of_match_placeholders() {
+    let mut unidentified = view_with_pid(22, json!(103));
+    unidentified["app_id"] = Value::Null;
+    let desktop = workspace(
+        "splith",
+        vec![
+            view_with_pid(20, json!(101)),
+            view_with_pid(21, json!(102)),
+            unidentified,
+        ],
+        20,
+    );
+    let saved = saved_snapshot(desktop).unwrap();
+    for (inference_requested, inferred_count) in [(false, 0), (true, 2), (true, 3)] {
+        let rendered = saved
+            .render_with(inference_requested, &mut |pid| {
+                assert!(
+                    inference_requested,
+                    "disabled inference must not inspect processes"
+                );
+                if pid == 103 && inferred_count == 2 {
+                    None
+                } else {
+                    Some(vec![
+                        "sensitive-executable".into(),
+                        "secret-argument".into(),
+                    ])
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            rendered.commands,
+            CommandCounts {
+                total: 3,
+                inferred: inferred_count,
+                inference_requested,
+            }
+        );
+        assert_eq!(rendered.commands.unresolved(), 3 - inferred_count);
+        assert_eq!(
+            rendered
+                .yaml
+                .lines()
+                .filter(|line| line.trim() == "match: null")
+                .count(),
+            1
+        );
+        let summary = rendered.commands.summary();
+        assert!(!summary.contains("sensitive-executable"));
+        assert!(!summary.contains("secret-argument"));
+        let expected = match inferred_count {
+            0 => "Command inference disabled; unresolved commands: 3. Manual editing required.",
+            2 => "Commands inferred: 2; unresolved: 1. Manual editing required.",
+            3 => "Commands inferred: 3; unresolved: 0. Review best-effort commands before use.",
+            _ => unreachable!(),
+        };
+        assert_eq!(summary, expected);
+    }
 }

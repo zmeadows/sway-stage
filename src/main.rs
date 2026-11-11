@@ -1,4 +1,5 @@
 mod capture;
+mod command_inference;
 mod config;
 mod diagnostics;
 mod discovery;
@@ -156,9 +157,16 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
     let draft = capture::capture(infer_commands)?;
     let mut stdout = io::stdout().lock();
     stdout
-        .write_all(draft.as_bytes())
+        .write_all(draft.yaml.as_bytes())
         .and_then(|()| stdout.flush())
-        .map_err(|error| format!("stdout: {error}"))
+        .map_err(|error| format!("stdout: {error}"))?;
+
+    let _ = writeln!(
+        io::stderr().lock(),
+        "sway-stage: capture completed. {}",
+        draft.commands.summary()
+    );
+    Ok(())
 }
 
 fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {

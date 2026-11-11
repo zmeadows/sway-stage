@@ -63,8 +63,8 @@ pub fn capture_draft(
     };
 
     let layouts_directory = discovery::Directory::resolve(layouts_dir)?;
-    let path = save_draft(&layouts_directory.path, &name, &draft)?;
-    diagnostics::notify_draft_saved(&path);
+    let path = save_draft(&layouts_directory.path, &name, &draft.yaml)?;
+    diagnostics::notify_draft_saved(&path, &draft.commands);
     Ok(())
 }
 
