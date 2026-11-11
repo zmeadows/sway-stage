@@ -69,11 +69,17 @@ Run manually, one invocation at a time:
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers six Foot scenarios: single window, horizontal/vertical pairs,
-uneven siblings, mixed nesting, and deep nesting (including same-axis groups). Each verifies
-raw-tree identity, order, hierarchy, sizing, final focus, capture, and guarded cleanup.
-Single-window and horizontal-pair cases also check inferred commands. Expect six passes;
-extended runs expect ten when all optional prerequisites exist, otherwise explicit SKIPs.
+The standard run covers nine Foot scenarios: single window, horizontal/vertical pairs,
+uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
+groups, process execution, and default final focus. Each verifies raw-tree identity, order,
+hierarchy, sizing, final focus, capture, and guarded cleanup.
+Single-window and horizontal-pair cases also check inferred commands. Expect nine passes;
+extended runs expect thirteen when all optional prerequisites exist, otherwise explicit SKIPs.
+The process-execution case uses a private relative cwd and a bounded harness helper as
+Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
+run-specific environment override; verified window cleanup must also observe its exit.
+No shell evaluates the test arguments.
+
 Sizing above 1 percentage point is diagnostic; above 5 fails a harness scenario.
 
 Extended prerequisites:

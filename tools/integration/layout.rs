@@ -279,10 +279,10 @@ pub fn verify_layout(
         )));
     }
 
-    let Some(&focus_id) = container_ids.get(scenario.focus) else {
+    let Some(&focus_id) = container_ids.get(scenario.expected_focus) else {
         return Err(Failure::Uncertain(format!(
             "no accepted window for focus {}",
-            scenario.focus
+            scenario.expected_focus
         )));
     };
     let focused_ids: Vec<i64> = placed_nodes
@@ -293,7 +293,7 @@ pub fn verify_layout(
     if focused_ids != [focus_id] {
         return Err(Failure::Uncertain(format!(
             "final focus differs: expected {} id={focus_id}, observed {}",
-            scenario.focus,
+            scenario.expected_focus,
             outline(workspace)
         )));
     }

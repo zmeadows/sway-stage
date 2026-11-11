@@ -16,6 +16,11 @@ use std::process::ExitCode;
 use clap::Parser;
 
 fn main() -> ExitCode {
+    // A terminal child used only by process-execution. It never connects to Sway.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(process::PROBE_FLAG)) {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        return ExitCode::SUCCESS;
+    }
     let arguments = lifecycle::Arguments::parse();
     if lifecycle::run(arguments) {
         ExitCode::SUCCESS

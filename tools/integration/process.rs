@@ -319,3 +319,203 @@ mod tests {
         }
     }
 }
+
+/// Private terminal-child mode; deliberately bypasses the desktop harness entry point.
+pub const PROBE_FLAG: &str = "--integration-process-probe";
+
+/// Inspect only direct children of the independently owned terminal, across all its
+/// threads. Never search unrelated processes or infer that the terminal retains child
+/// argv/cwd. Inspection errors fail the scenario without granting any signal authority.
+pub fn verify_probe(
+    proc_root: &Path,
+    terminal_pid: i32,
+    leaf: &crate::scenarios::ConfiguredWindow,
+    layouts_directory: &Path,
+) -> Result<i32, String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        check_interruption()?;
+        let children = terminal_children(proc_root, terminal_pid)?;
+        if !children.is_empty() {
+            if children.len() != 1 {
+                return Err("process probe requires exactly one direct terminal child".into());
+            }
+            let pid = children[0];
+            verify_probe_state(proc_root, pid, leaf, layouts_directory)?;
+            return Ok(pid);
+        }
+        if Instant::now() >= deadline {
+            return Err("process probe child did not appear within two seconds".into());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn terminal_children(proc_root: &Path, terminal_pid: i32) -> Result<Vec<i32>, String> {
+    if terminal_pid <= 0 {
+        return Err("process probe has invalid terminal PID".into());
+    }
+    let tasks = fs::read_dir(proc_root.join(format!("{terminal_pid}/task")))
+        .map_err(|error| format!("inspect terminal threads: {error}"))?;
+    let mut children = std::collections::BTreeSet::new();
+    for task in tasks {
+        let task = task.map_err(|error| format!("inspect terminal thread: {error}"))?;
+        let text = fs::read_to_string(task.path().join("children"))
+            .map_err(|error| format!("inspect terminal children: {error}"))?;
+        for child in text.split_whitespace() {
+            let pid = child
+                .parse::<i32>()
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or("invalid terminal child PID")?;
+            children.insert(pid);
+        }
+    }
+    Ok(children.into_iter().collect())
+}
+
+fn verify_probe_state(
+    proc_root: &Path,
+    pid: i32,
+    leaf: &crate::scenarios::ConfiguredWindow,
+    layouts_directory: &Path,
+) -> Result<(), String> {
+    let process_directory = proc_root.join(pid.to_string());
+    let argv = fs::read(process_directory.join("cmdline"))
+        .map_err(|error| format!("inspect probe argv: {error}"))?;
+    let expected_argv: Vec<u8> = leaf.command[2..]
+        .iter()
+        .flat_map(|argument| argument.bytes().chain(std::iter::once(0)))
+        .collect();
+    if argv != expected_argv {
+        return Err("probe literal argument boundaries or contents differ".into());
+    }
+
+    let cwd = fs::read_link(process_directory.join("cwd"))
+        .map_err(|error| format!("inspect probe cwd: {error}"))?;
+    let expected_cwd = layouts_directory.join(leaf.cwd.as_ref().ok_or("probe cwd missing")?);
+    let expected_cwd =
+        fs::canonicalize(expected_cwd).map_err(|error| format!("resolve probe cwd: {error}"))?;
+    if cwd != expected_cwd {
+        return Err("probe working directory differs from layout-relative cwd".into());
+    }
+
+    let environment = fs::read(process_directory.join("environ"))
+        .map_err(|error| format!("inspect probe environment override: {error}"))?;
+    for (key, value) in &leaf.env {
+        let expected = format!("{key}={value}");
+        let prefix = format!("{key}=");
+        let matching: Vec<&[u8]> = environment
+            .split(|byte| *byte == 0)
+            .filter(|entry| entry.starts_with(prefix.as_bytes()))
+            .collect();
+        if matching != [expected.as_bytes()] {
+            return Err("probe environment override differs".into());
+        }
+    }
+    Ok(())
+}
+
+/// Window cleanup must finish first. Observe exit only; never signal a discovered PID.
+pub fn wait_probe_exit(pid: i32) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        check_interruption()?;
+        match fs::symlink_metadata(format!("/proc/{pid}")) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("inspect probe exit: {error}")),
+            Ok(_) if Instant::now() >= deadline => {
+                return Err("probe still exists after verified window cleanup".into());
+            }
+            Ok(_) => thread::sleep(POLL_INTERVAL),
+        }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::fixtures::standard_scenario;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn probe_inspection_checks_only_the_terminal_child_and_test_values() {
+        let root = env::temp_dir().join(format!("sway-stage-probe-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let proc_root = root.join("proc");
+        let child = proc_root.join("42");
+        fs::create_dir_all(&child).unwrap();
+        let task = proc_root.join("41/task/41");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("children"), "42 ").unwrap();
+        fs::create_dir(root.join("process cwd")).unwrap();
+        let mut scenario = standard_scenario("process-execution");
+        crate::scenarios::configure_process_execution(
+            &mut scenario,
+            Path::new("/test/helper"),
+            "unique",
+        )
+        .unwrap();
+        let leaf = scenario.layout.leaves()[0];
+        let argv: Vec<u8> = leaf.command[2..]
+            .iter()
+            .flat_map(|arg| arg.bytes().chain([0]))
+            .collect();
+        fs::write(child.join("cmdline"), &argv).unwrap();
+        fs::write(
+            child.join("environ"),
+            b"UNRELATED=private\0SWAY_STAGE_IT_unique=unique override\0",
+        )
+        .unwrap();
+        symlink(root.join("process cwd"), child.join("cwd")).unwrap();
+        assert_eq!(verify_probe(&proc_root, 41, leaf, &root).unwrap(), 42);
+        assert!(
+            verify_probe(&proc_root, 99, leaf, &root)
+                .unwrap_err()
+                .contains("terminal threads")
+        );
+        fs::write(task.join("children"), "42 43").unwrap();
+        assert!(
+            verify_probe(&proc_root, 41, leaf, &root)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        fs::write(task.join("children"), "invalid").unwrap();
+        assert!(
+            terminal_children(&proc_root, 41)
+                .unwrap_err()
+                .contains("invalid")
+        );
+
+        fs::write(child.join("cmdline"), argv.strip_suffix(&[0]).unwrap()).unwrap();
+        assert!(
+            verify_probe_state(&proc_root, 42, leaf, &root)
+                .unwrap_err()
+                .contains("argument boundaries")
+        );
+        fs::write(child.join("cmdline"), argv).unwrap();
+        fs::write(child.join("environ"), b"UNRELATED=private\0").unwrap();
+        let error = verify_probe_state(&proc_root, 42, leaf, &root).unwrap_err();
+        assert!(error.contains("environment override"));
+        assert!(!error.contains("private"));
+        fs::remove_file(child.join("environ")).unwrap();
+        assert!(
+            verify_probe_state(&proc_root, 42, leaf, &root)
+                .unwrap_err()
+                .contains("inspect probe environment")
+        );
+        fs::remove_file(child.join("cwd")).unwrap();
+        assert!(
+            verify_probe_state(&proc_root, 42, leaf, &root)
+                .unwrap_err()
+                .contains("inspect probe cwd")
+        );
+        fs::remove_file(child.join("cmdline")).unwrap();
+        assert!(
+            verify_probe_state(&proc_root, 42, leaf, &root)
+                .unwrap_err()
+                .contains("inspect probe argv")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

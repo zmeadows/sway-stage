@@ -553,3 +553,28 @@ fn foot_and_sleep_keep_their_path_names_through_symlinks() {
 
     fs::remove_dir_all(&scratch).unwrap();
 }
+
+#[test]
+fn private_process_directory_refuses_existing_entries_and_missing_parents() {
+    let test_id = format!("{RUN_ID}-{}-process-cwd", std::process::id());
+    let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
+    assert!(TemporaryConfigurations::new(&directory.path.join("missing"), "nested").is_err());
+    directory.create_process_cwd().unwrap();
+    assert_eq!(
+        fs::metadata(directory.path.join("process cwd"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(
+        directory
+            .create_process_cwd()
+            .unwrap_err()
+            .contains("create private process cwd")
+    );
+    let path = directory.path.clone();
+    drop(directory);
+    assert!(!path.exists());
+}

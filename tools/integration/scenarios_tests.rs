@@ -31,7 +31,13 @@ fn all_scenarios() -> Vec<Scenario> {
 fn standard_scenarios_keep_their_structures_weights_and_focus() {
     let summaries: Vec<(&str, String, &str)> = standard_scenarios(RUN_ID, FOOT, SLEEP)
         .iter()
-        .map(|scenario| (scenario.name, outline(&scenario.layout), scenario.focus))
+        .map(|scenario| {
+            (
+                scenario.name,
+                outline(&scenario.layout),
+                scenario.expected_focus,
+            )
+        })
         .collect();
     let expected = [
         ("single-window", "window1", "window1"),
@@ -51,6 +57,17 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "deep-nesting",
             "v(h(window1@2, h(window2@2, v(window3@3, window4@2)@3)@3)@3, window5@2)",
             "window4",
+        ),
+        (
+            "sibling-nested-groups",
+            "h(v(window1@2, window2@3)@3, v(window3@3, window4@1)@2)",
+            "window3",
+        ),
+        ("process-execution", "window1", "window1"),
+        (
+            "default-focus",
+            "h(v(window1@2, window2@3)@3, window3@2)",
+            "window1",
         ),
     ];
     let expected: Vec<(&str, String, &str)> = expected
@@ -74,7 +91,7 @@ fn extended_scenarios_keep_their_structures_timeouts_and_extensions() {
             (
                 scenario.name,
                 outline(&scenario.layout),
-                scenario.focus,
+                scenario.expected_focus,
                 scenario.window_timeout_ms,
                 scenario.extension,
             )
@@ -136,7 +153,7 @@ fn leaves_are_sequential_and_focus_selects_one_of_them() {
             .collect();
         assert_eq!(layout_ids, sequential, "{}", scenario.name);
         assert!(
-            layout_ids.iter().any(|id| id == scenario.focus),
+            layout_ids.iter().any(|id| id == scenario.expected_focus),
             "{}",
             scenario.name
         );
@@ -577,4 +594,53 @@ fn firefox_app_id_failures_still_retain_the_created_profile() {
         scenario.layout.first_leaf_mut().selector,
         Selector::AppId("org.mozilla.firefox".into())
     );
+}
+
+#[test]
+fn process_settings_preserve_literals_and_relative_cwd() {
+    let mut scenario = standard_scenario("process-execution");
+    configure_process_execution(&mut scenario, Path::new("/private/harness"), RUN_ID).unwrap();
+    let leaf = scenario.layout.leaves()[0];
+    assert_eq!(leaf.cwd.as_deref(), Some("process cwd"));
+    assert_eq!(leaf.command[2], "/private/harness");
+    assert_eq!(leaf.command[3], crate::process::PROBE_FLAG);
+    assert_eq!(leaf.command[4], format!("{RUN_ID} two words"));
+    assert_eq!(
+        leaf.command[5],
+        format!("{RUN_ID} $HOME ; $(literal) * ' \"")
+    );
+    assert_eq!(leaf.command[6], "");
+    assert_eq!(
+        leaf.env,
+        [(
+            format!("SWAY_STAGE_IT_{RUN_ID}"),
+            format!("{RUN_ID} override")
+        )]
+    );
+    let yaml = configuration_yaml(&scenario);
+    assert!(yaml.contains("cwd: \"process cwd\""));
+    assert!(yaml.contains(&format!(
+        "env: {{\"SWAY_STAGE_IT_{RUN_ID}\": \"{RUN_ID} override\"}}"
+    )));
+    assert!(yaml.contains(&json_sequence(&leaf.command)));
+    assert!(leaf.requires_process_evidence);
+    assert!(!diagnostic_yaml(&scenario).contains("override"));
+    assert!(!diagnostic_yaml(&scenario).contains("$HOME"));
+}
+
+#[test]
+fn omitted_focus_still_has_an_independent_expected_leaf_and_capture_focus() {
+    let scenario = standard_scenario("default-focus");
+    assert_eq!(scenario.configured_focus, None);
+    assert_eq!(scenario.expected_focus, "window1");
+    assert_eq!(
+        scenario.layout.leaves()[0].layout_id,
+        scenario.expected_focus
+    );
+    assert_ne!(
+        scenario.layout.leaves().last().unwrap().layout_id,
+        scenario.expected_focus
+    );
+    assert!(!configuration_yaml(&scenario).contains("focus:"));
+    assert!(diagnostic_yaml(&scenario).contains("focus: window1"));
 }

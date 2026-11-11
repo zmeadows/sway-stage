@@ -467,3 +467,96 @@ fn outline_names_identities_and_layouts_without_titles() {
     assert_eq!(outline, "7:splith(20:app, 30:splitv(21:Class, 22:none))");
     assert!(!outline.contains("title"));
 }
+
+#[test]
+fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
+    let scenario = standard_scenario("sibling-nested-groups");
+    let window =
+        |id, name: &str, rectangle| wayland_window(id, &selector_value(&scenario, name), rectangle);
+    let left = group(
+        30,
+        "splitv",
+        rect(0, 0, 600, 1000),
+        vec![
+            window(20, "window1", rect(0, 0, 600, 400)),
+            window(21, "window2", rect(0, 400, 600, 600)),
+        ],
+    );
+    let right = group(
+        31,
+        "splitv",
+        rect(600, 0, 400, 1000),
+        vec![
+            window(22, "window3", rect(600, 0, 400, 750)),
+            window(23, "window4", rect(600, 750, 400, 250)),
+        ],
+    );
+    let tree = desktop("splith", vec![left, right], 22);
+    let owned = accepted(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+    ]);
+    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    assert_eq!(
+        measurements.shares,
+        BTreeMap::from([
+            (vec![0], 60.0),
+            (vec![1], 40.0),
+            (vec![0, 0], 40.0),
+            (vec![0, 1], 60.0),
+            (vec![1, 0], 75.0),
+            (vec![1, 1], 25.0),
+        ])
+    );
+    let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
+    crate::capture::verify_capture(&draft, &scenario, &measurements).unwrap();
+    let mut swapped = tree.clone();
+    node_mut(&mut swapped, 31)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    assert!(verify(swapped, &scenario, &owned).is_err());
+    let mut wrong_size = tree;
+    node_mut(&mut wrong_size, 22)["rect"]["height"] = json!(400);
+    assert!(check_message(verify(wrong_size, &scenario, &owned)).contains("sizing exceeds"));
+
+    let scenario = standard_scenario("default-focus");
+    let column = group(
+        30,
+        "splitv",
+        rect(0, 0, 600, 1000),
+        vec![
+            wayland_window(
+                20,
+                &selector_value(&scenario, "window1"),
+                rect(0, 0, 600, 400),
+            ),
+            wayland_window(
+                21,
+                &selector_value(&scenario, "window2"),
+                rect(0, 400, 600, 600),
+            ),
+        ],
+    );
+    let mut tree = desktop(
+        "splith",
+        vec![
+            column,
+            wayland_window(
+                22,
+                &selector_value(&scenario, "window3"),
+                rect(600, 0, 400, 1000),
+            ),
+        ],
+        20,
+    );
+    let owned = accepted(&[(20, "window1"), (21, "window2"), (22, "window3")]);
+    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
+    assert!(draft.contains("focus: window1"));
+    crate::capture::verify_capture(&draft, &scenario, &measurements).unwrap();
+    set_focus(&mut tree, 22);
+    assert!(uncertain_message(verify(tree, &scenario, &owned)).contains("final focus differs"));
+}

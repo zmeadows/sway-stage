@@ -3,7 +3,7 @@
 //!
 //! Configured layouts are the harness's own description of what sway-stage should build,
 //! independent of the production `LayoutNode` and configuration parser. Definitions are
-//! pure; only `prepare_extended` inspects the environment, creates files, or runs a probe.
+//! pure; preparation configures executable paths, creates private files, or runs a probe.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -103,6 +103,8 @@ pub struct ConfiguredWindow {
     pub selector: Selector,
     /// Environment overrides for this window's process only, in configuration order.
     pub env: Vec<(String, String)>,
+    /// Optional YAML cwd, kept relative to exercise resolution against the layout file.
+    pub cwd: Option<String>,
     /// The selector alone cannot attribute the window to this launch, so ownership also
     /// requires Sway's PID to show this command's literal arguments.
     pub requires_process_evidence: bool,
@@ -149,8 +151,10 @@ impl ConfiguredNode {
 pub struct Scenario {
     pub name: &'static str,
     pub layout: ConfiguredNode,
-    /// The layout ID of the window sway-stage must focus last, always written explicitly.
-    pub focus: &'static str,
+    /// Independent expected final focus, including when YAML omits focus.
+    pub expected_focus: &'static str,
+    /// Optional top-level focus field to write into the input YAML.
+    pub configured_focus: Option<&'static str>,
     pub window_timeout_ms: u64,
     /// What an extended scenario tests beyond plain Foot windows; `None` for standard ones.
     pub extension: Option<Extension>,
@@ -168,7 +172,7 @@ pub enum Extension {
     DuplicateFootIds,
 }
 
-/// The six Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
+/// The nine Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use SplitAxis::{Horizontal, Vertical};
 
@@ -213,6 +217,31 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             split(Vertical, 1, vec![deep_outer_row, window(5, 2)]),
             "window4",
         ),
+        (
+            "sibling-nested-groups",
+            split(
+                Horizontal,
+                1,
+                vec![
+                    split(Vertical, 3, vec![window(1, 2), window(2, 3)]),
+                    split(Vertical, 2, vec![window(3, 3), window(4, 1)]),
+                ],
+            ),
+            "window3",
+        ),
+        ("process-execution", window(1, 1), "window1"),
+        (
+            "default-focus",
+            split(
+                Horizontal,
+                1,
+                vec![
+                    split(Vertical, 3, vec![window(1, 2), window(2, 3)]),
+                    window(3, 2),
+                ],
+            ),
+            "window1",
+        ),
     ];
 
     let mut scenarios = Vec::new();
@@ -220,12 +249,16 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         let mut scenario = Scenario {
             name,
             layout,
-            focus,
+            expected_focus: focus,
+            configured_focus: Some(focus),
             window_timeout_ms: WINDOW_TIMEOUT_MS,
             extension: None,
             skip: None,
         };
         use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
+        if name == "default-focus" {
+            scenario.configured_focus = None;
+        }
         scenarios.push(scenario);
     }
     scenarios
@@ -282,7 +315,8 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         let mut scenario = Scenario {
             name,
             layout,
-            focus,
+            expected_focus: focus,
+            configured_focus: Some(focus),
             window_timeout_ms,
             extension: Some(extension),
             skip: None,
@@ -309,6 +343,7 @@ fn window(number: u32, weight: u32) -> ConfiguredNode {
         command: Vec::new(),
         selector: Selector::AppId(String::new()),
         env: Vec::new(),
+        cwd: None,
         requires_process_evidence: false,
     })
 }
@@ -669,10 +704,15 @@ enum Rendering<'a> {
 /// One fixed layout of sway-stage's format; capture's serializer uses the same field
 /// order and indentation, so a draft can be compared with it line by line.
 fn render_yaml(scenario: &Scenario, rendering: &Rendering) -> Result<String, String> {
-    let mut lines = vec![
-        "version: 1".to_owned(),
-        format!("focus: {}", scenario.focus),
-    ];
+    let mut lines = vec!["version: 1".to_owned()];
+    let focus = if matches!(rendering, Rendering::Configuration) {
+        scenario.configured_focus
+    } else {
+        Some(scenario.expected_focus)
+    };
+    if let Some(focus) = focus {
+        lines.push(format!("focus: {focus}"));
+    }
     if !matches!(rendering, Rendering::Draft(_)) {
         lines.push(format!("window_timeout_ms: {}", scenario.window_timeout_ms));
     }
@@ -730,6 +770,11 @@ fn emit_node(
                 window.selector.kind(),
                 window.selector.value()
             ));
+            if matches!(rendering, Rendering::Configuration)
+                && let Some(cwd) = &window.cwd
+            {
+                fields.push(format!("cwd: {}", json_string(cwd)));
+            }
             if matches!(rendering, Rendering::Configuration) && !window.env.is_empty() {
                 fields.push(format!("env: {}", json_mapping(&window.env)));
             }
@@ -785,6 +830,34 @@ fn json_mapping(entries: &[(String, String)]) -> String {
 /// YAML double-quoted scalars accept every JSON string escape.
 fn json_string(text: &str) -> String {
     Value::from(text).to_string()
+}
+
+/// Prepare the process scenario before validation. The helper is this harness executable,
+/// invoked by Foot directly; no shell parses the deliberately awkward literal arguments.
+pub fn configure_process_execution(
+    scenario: &mut Scenario,
+    helper: &Path,
+    run_id: &str,
+) -> Result<(), String> {
+    if scenario.name != "process-execution" {
+        return Ok(());
+    }
+    let leaf = scenario.layout.first_leaf_mut();
+    leaf.command.truncate(2);
+    leaf.command.extend([
+        utf8(helper)?.to_owned(),
+        crate::process::PROBE_FLAG.into(),
+        format!("{run_id} two words"),
+        format!("{run_id} $HOME ; $(literal) * ' \""),
+        String::new(),
+    ]);
+    leaf.cwd = Some("process cwd".into());
+    leaf.env = vec![(
+        format!("SWAY_STAGE_IT_{run_id}"),
+        format!("{run_id} override"),
+    )];
+    leaf.requires_process_evidence = true;
+    Ok(())
 }
 
 #[cfg(test)]

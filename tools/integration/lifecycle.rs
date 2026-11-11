@@ -29,8 +29,8 @@ use crate::ownership::{
 };
 use crate::process;
 use crate::scenarios::{
-    ConfiguredNode, OptionalApplications, Scenario, configuration_yaml, extended_scenarios,
-    prepare_extended, standard_scenarios,
+    ConfiguredNode, OptionalApplications, Scenario, configuration_yaml,
+    configure_process_execution, extended_scenarios, prepare_extended, standard_scenarios,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -195,7 +195,11 @@ impl Harness {
 
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
         let mut scenarios = standard_scenarios(&self.run_id, &self.foot, &self.sleep);
-        for scenario in &scenarios {
+        let helper =
+            env::current_exe().map_err(|error| format!("locate process probe: {error}"))?;
+        directory.create_process_cwd()?;
+        for scenario in &mut scenarios {
+            configure_process_execution(scenario, &helper, &self.run_id)?;
             self.stage = format!("{}: initial check", scenario.name);
             directory.write(scenario.name, &configuration_yaml(scenario))?;
             check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
@@ -337,6 +341,29 @@ impl Harness {
             &progress.accepted,
         )?;
         let measurements = verify_layout(loaded.focused_workspace(), scenario, &progress.accepted)?;
+        let probe_pid = if name == "process-execution" {
+            self.stage = format!("{name}: child process verification");
+            let leaf = scenario.layout.leaves()[0];
+            let window_id = *progress
+                .accepted
+                .keys()
+                .next()
+                .expect("verified single window");
+            let terminal = walk(&loaded.tree)
+                .into_iter()
+                .find(|placed| placed.node.id == window_id)
+                .expect("ownership verified window")
+                .node;
+            let terminal_pid = terminal
+                .pid
+                .ok_or_else(|| Failure::Uncertain("process scenario has no terminal PID".into()))?;
+            Some(
+                process::verify_probe(Path::new("/proc"), terminal_pid, leaf, &directory.path)
+                    .map_err(Failure::Uncertain)?,
+            )
+        } else {
+            None
+        };
         let before_capture = signature(loaded.focused_workspace());
 
         self.stage = format!("{name}: capture");
@@ -385,6 +412,9 @@ impl Harness {
         let cleaned = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&cleaned.window_events, None)?;
         require_empty(cleaned.focused_workspace())?;
+        if let Some(pid) = probe_pid {
+            process::wait_probe_exit(pid)?;
+        }
         interruption_check()?;
 
         self.passed += 1;
@@ -844,7 +874,7 @@ fn random_run_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Owns only YAML files, never Firefox profiles or desktop windows.
+/// Owns private YAML files and the process test cwd, never profiles or desktop windows.
 struct TemporaryConfigurations {
     path: PathBuf,
 }
@@ -861,6 +891,13 @@ impl TemporaryConfigurations {
                 format!("create private YAML directory {}: {error}", path.display())
             })?;
         Ok(Self { path })
+    }
+
+    fn create_process_cwd(&self) -> Result<(), String> {
+        DirBuilder::new()
+            .mode(0o700)
+            .create(self.path.join("process cwd"))
+            .map_err(|error| format!("create private process cwd: {error}"))
     }
 
     fn write(&self, name: &str, contents: &str) -> Result<(), String> {
