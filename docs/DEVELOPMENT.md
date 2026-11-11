@@ -203,6 +203,19 @@ rounding/sizing differences (aim within 1 percentage point). Confirm floating, f
 tabbed/stacked, and structural-container focus refuse capture without YAML. Capture must
 leave desktop state and the launch log unchanged.
 
+For Flatpak acceptance, manually open TIDAL Hi-Fi (or another installed Flatpak app) tiled
+on a disposable workspace and keep it focused while running
+`./target/release/sway-stage capture --infer-commands > /tmp/flatpak-draft.yaml`.
+Expect separate command elements `flatpak`, `run`, optional `--branch=...`/`--arch=...`,
+and `com.mastermindzh.tidal-hifi`; no internal `/app/...` executable. The match must remain
+`app_id: com.mastermindzh.tidal-hifi`. Compare a capture without inference: commands must
+remain null and arrangement/selectors must agree. Review the draft, fill any other nulls,
+and run `check` using a temporary layouts directory. To test relaunch, manually load the
+reviewed draft on another empty disposable workspace and verify the matching application
+opens. This optional procedure requires Flatpak; standard offline checks and the independent
+Foot harness require neither Flatpak nor TIDAL. The harness's Foot argv/ownership checks
+remain specific to its test-owned launches and should not be generalized for this scenario.
+
 For menu acceptance, use a keybinding or delayed invocation with a temporary layouts
 directory. Check normal Load sizing/focus, occupied-target refusal, both Escape cancellations,
 invalid/colliding names, saved draft discovery, placeholder rejection, and edited-draft

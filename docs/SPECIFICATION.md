@@ -190,11 +190,29 @@ or malformed nodes, nonpositive split-axis extents, ambiguous/absent focus, focu
 rather than a window, and layouts exceeding the format's depth/node limits. The workspace's
 own fullscreen flag is not treated as a fullscreen window.
 
-`--infer-commands` optionally reads saved window PIDs' Linux `/proc/PID/cmdline`: at most
+`--infer-commands` uses each saved window's actual PID. It first reads
+`/proc/PID/root/.flatpak-info` (at most 64 KiB, valid UTF-8). A valid `[Application]`
+`name` produces `[flatpak, run, APPLICATION_ID]`, with separate `--branch=...` and
+`--arch=...` arguments before the ID when valid fields are present in `[Instance]`.
+These select the running reference rather than Flatpak's current default. Window matchers
+still reflect Sway's actual app ID or Xwayland class, independently of the launch command.
+Runtime-only sandboxes, malformed/ambiguous metadata, invalid identity fields, and metadata
+access errors leave `command: null`; sandbox-internal argv is never used in these cases.
+Identity fields use a conservative ASCII subset; unsupported key-file escapes are rejected.
+
+Only when `.flatpak-info` is missing does inference read `/proc/PID/cmdline`: at most
 64 KiB per window, requiring valid UTF-8, a nonempty executable, and NUL-terminated arguments.
-Argument boundaries and empty arguments are preserved. Unavailable or malformed data leaves
-that window's command null without failing capture. No parent/process-name searches,
-environment capture, command rewriting, or application-specific recovery is attempted.
+Argument boundaries, embedded spaces, and empty arguments are preserved. Unavailable or
+malformed data leaves that window's command null without failing capture or extra warnings.
+No parent/process-name searches or environment capture are attempted. Flatpak inference
+recovers a conventional host launch, not the original installation, permission overrides,
+application arguments, or session. In particular, metadata `extra-args` describes sandbox
+options, not the application's argv, and is ignored. Flatpak must be available on host `PATH`.
+
+The metadata layout and reference selection follow Flatpak's
+[metadata documentation](https://github.com/flatpak/flatpak/blob/main/doc/flatpak-metadata.xml),
+[metadata writer](https://github.com/flatpak/flatpak/blob/main/common/flatpak-run.c), and
+[run command documentation](https://github.com/flatpak/flatpak/blob/main/doc/flatpak-run.xml).
 
 **Review inferred commands before executing or sharing.** They may contain secrets and may
 not reproduce the application. Process exit, PID reuse, or argument changes can race with
