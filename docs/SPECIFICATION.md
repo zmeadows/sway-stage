@@ -189,6 +189,11 @@ Selectors prefer nonempty Wayland app IDs, then Xwayland classes, otherwise `mat
 Commands default to `command: null`. Workspace names, outputs, titles, container IDs, PIDs,
 cwd, and environment are not serialized.
 
+Inferred commands use compact flow sequences such as `command: [foot, --app-id=term]`
+when the YAML-escaped line, including indentation, fits within 120 characters. Longer
+commands use block sequences. Layout `children` remain block sequences, and unresolved
+commands remain `command: null`. Both command styles are accepted by `check` and `load`.
+
 Capture refuses empty workspaces, floating containers, fullscreen windows/groups,
 scratchpad content (even shown), tabbed/stacked containers (even with one child), unsupported
 or malformed nodes, nonpositive split-axis extents, ambiguous/absent focus, focus on a group

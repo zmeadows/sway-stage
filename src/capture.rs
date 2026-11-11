@@ -411,10 +411,42 @@ enum DraftNode {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
-        command: Option<Vec<String>>,
+        command: Option<DraftCommand>,
         #[serde(rename = "match")]
         selector: Option<Selector>,
     },
+}
+
+/// Only launch arguments may use flow style; layout children remain ordinary sequences.
+struct DraftCommand {
+    arguments: Vec<String>,
+    indent: usize,
+}
+
+impl Serialize for DraftCommand {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let flow = serde_saphyr::FlowSeq(&self.arguments);
+        let flow_yaml = serde_saphyr::to_string_with_options(&flow, draft_options())
+            .map_err(serde::ser::Error::custom)?;
+        let sequence = flow_yaml.trim_end_matches('\n');
+        let line_length = self.indent + "command: ".len() + sequence.chars().count();
+
+        // Measure YAML quoting and escapes, not raw argv. Unexpected multiline output
+        // also falls back to the established block representation.
+        if !sequence.contains('\n') && line_length <= 120 {
+            flow.serialize(serializer)
+        } else {
+            self.arguments.serialize(serializer)
+        }
+    }
+}
+
+fn draft_options() -> serde_saphyr::SerializerOptions {
+    // Keep every scalar on one line and indent sequences like the example layouts.
+    serde_saphyr::ser_options! {
+        prefer_block_scalars: false,
+        compact_list_indent: false,
+    }
 }
 
 /// Names windows `window1`, `window2`, ... in depth-first (visual and launch) order and
@@ -433,6 +465,7 @@ fn render_draft(
     let layout = draft_node(
         &captured.root,
         None,
+        2,
         &mut draft_ids,
         command_for,
         &mut commands,
@@ -449,12 +482,7 @@ fn render_draft(
         focus,
         layout,
     };
-    // Keep every scalar on one line and indent sequences like the example layouts.
-    let options = serde_saphyr::ser_options! {
-        prefer_block_scalars: false,
-        compact_list_indent: false,
-    };
-    let yaml = serde_saphyr::to_string_with_options(&draft, options).map_err(|error| {
+    let yaml = serde_saphyr::to_string_with_options(&draft, draft_options()).map_err(|error| {
         // Serializer errors must not echo recovered arguments into notifications.
         if infer_commands {
             "serialize draft: YAML serialization failed".to_owned()
@@ -474,6 +502,7 @@ fn render_draft(
 fn draft_node(
     captured: &CapturedNode,
     weight: Option<f64>,
+    indent: usize,
     draft_ids: &mut HashMap<i64, String>,
     command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
     commands: &mut CommandCounts,
@@ -493,7 +522,7 @@ fn draft_node(
             DraftNode::Window {
                 id,
                 weight,
-                command,
+                command: command.map(|arguments| DraftCommand { arguments, indent }),
                 selector: selector.clone(),
             }
         }
@@ -507,7 +536,15 @@ fn draft_node(
                 .iter()
                 .zip(child_weights)
                 .map(|(child, child_weight)| {
-                    draft_node(child, Some(child_weight), draft_ids, command_for, commands)
+                    // Each child adds a two-space sequence indent and a two-space dash.
+                    draft_node(
+                        child,
+                        Some(child_weight),
+                        indent + 4,
+                        draft_ids,
+                        command_for,
+                        commands,
+                    )
                 })
                 .collect();
             DraftNode::Split {

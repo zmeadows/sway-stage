@@ -242,6 +242,39 @@ fn inferred_capture_accepts_either_app_id_argument_form() {
 }
 
 #[test]
+fn inferred_capture_accepts_mixed_command_styles_with_literal_arguments() {
+    let scenario = standard_scenario("horizontal-pair");
+    let first = vec![
+        "/usr/bin/foot".to_owned(),
+        format!("--app-id={}", app_id("horizontal-pair", "window1")),
+        "literal: [a,b] # 'quote' \\ $HOME\nnext".to_owned(),
+        "".to_owned(),
+        "null".to_owned(),
+    ];
+    let second = foot_command(&[&format!(
+        "--app-id={}",
+        app_id("horizontal-pair", "window2")
+    )]);
+    let inferred = pair_draft()
+        .replacen(
+            "      command: null\n",
+            &format!(
+                "      command: {}\n",
+                serde_json::to_string(&first).unwrap()
+            ),
+            1,
+        )
+        .replacen(
+            "      command: null\n",
+            &format!("      command:\n{second}"),
+            1,
+        );
+    verify_inferred_capture(&inferred, &pair_draft(), &scenario.layout).unwrap();
+    let commands = inferred_commands(&inferred, &pair_draft()).unwrap();
+    assert_eq!(commands[0], first);
+}
+
+#[test]
 fn inferred_capture_mismatches_fail_without_revealing_arguments() {
     let scenario = standard_scenario("horizontal-pair");
     let window1 = app_id("horizontal-pair", "window1");

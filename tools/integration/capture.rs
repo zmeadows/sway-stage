@@ -188,7 +188,7 @@ fn strip_quotes(scalar: &str) -> &str {
 }
 
 /// Compares an `--infer-commands` draft with the already verified default draft. Only the
-/// serializer's block command sequences are recognized; with each replaced by
+/// serializer's flow and block command sequences are recognized; with each replaced by
 /// `command: null`, the drafts must agree exactly, so inference changed no hierarchy, order,
 /// sizing, selector, ID, or focus. Each recovered Foot command must carry its leaf's app ID,
 /// as `--app-id=ID` or as `--app-id ID`. Shared selectors also require the corresponding
@@ -338,24 +338,31 @@ fn inferred_commands(
             continue;
         }
 
-        if field != "command:" {
+        let command_value = field.strip_prefix("command:").unwrap().trim();
+        if !command_value.is_empty() && !command_value.starts_with('[') {
             return Err("inferred capture lacks a command array".into());
         }
         let indent = " ".repeat(line.len() - field.len());
         normalized_lines.push(format!("{indent}command: null"));
         line_index += 1;
 
-        let argument_prefix = format!("{indent}  - ");
-        let mut arguments = Vec::new();
-        while let Some(scalar) = lines
-            .get(line_index)
-            .and_then(|next_line| next_line.strip_prefix(argument_prefix.as_str()))
-        {
-            let argument: String = serde_saphyr::from_str(scalar)
-                .map_err(|_| "inferred capture has a malformed command argument")?;
-            arguments.push(argument);
-            line_index += 1;
-        }
+        let arguments = if command_value.is_empty() {
+            let argument_prefix = format!("{indent}  - ");
+            let mut arguments = Vec::new();
+            while let Some(scalar) = lines
+                .get(line_index)
+                .and_then(|next_line| next_line.strip_prefix(argument_prefix.as_str()))
+            {
+                let argument: String = serde_saphyr::from_str(scalar)
+                    .map_err(|_| "inferred capture has a malformed command argument")?;
+                arguments.push(argument);
+                line_index += 1;
+            }
+            arguments
+        } else {
+            serde_saphyr::from_str::<Vec<String>>(command_value)
+                .map_err(|_| "inferred capture has a malformed command array")?
+        };
         if arguments
             .first()
             .is_none_or(|executable| executable.is_empty())

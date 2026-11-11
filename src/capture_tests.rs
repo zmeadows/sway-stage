@@ -782,6 +782,9 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
     let inferred = inferred.yaml;
     assert_eq!(requested, [101, 102, 103]);
     assert!(inferred.contains(INFERENCE_HEADER));
+    assert!(inferred.contains("  children:\n    - id: window1\n"));
+    assert!(inferred.contains("      children:\n        - id: window2\n"));
+    assert!(!inferred.contains("children: ["));
     assert_eq!(inferred.matches("command: null").count(), 2); // Header plus failed leaf.
 
     let inferred_config = filled(&inferred);
@@ -862,8 +865,105 @@ fn desktop_launcher_command_serializes_as_three_literal_arguments() {
         panic!("expected window");
     };
     assert_eq!(command, &expected);
+    assert!(draft.yaml.contains("  command: [gio, launch,"));
     assert_eq!(draft.commands.inferred, 1);
     assert!(!draft.commands.summary().contains("/private"));
+}
+
+#[test]
+fn command_styles_preserve_special_arguments_through_strict_parsing() {
+    let saved =
+        saved_snapshot(workspace("splith", vec![view_with_pid(20, json!(101))], 20)).unwrap();
+    let special_arguments = [
+        "",
+        "two words",
+        " lead",
+        "trail ",
+        "line\nbreak",
+        "tab\there",
+        "a,b",
+        "[x]",
+        "a: b",
+        "#comment",
+        "x #y",
+        "'quote'",
+        "\"quote\"",
+        "back\\slash",
+        "null",
+        "true",
+        "123",
+        "*alias",
+        "!tag",
+        "$(touch /tmp/no); $HOME | & > * ? `cmd`",
+        "雪🦀",
+    ];
+    for special in special_arguments {
+        for use_block in [false, true] {
+            let mut expected = vec!["app".to_owned(), special.to_owned()];
+            if use_block {
+                expected.push("long argument ".repeat(12));
+            }
+            let draft = saved
+                .render_with(true, &mut |_| Some(expected.clone()))
+                .unwrap();
+            if use_block {
+                assert!(
+                    draft.yaml.contains("  command:\n    - app\n"),
+                    "{}",
+                    draft.yaml
+                );
+            } else {
+                assert!(draft.yaml.contains("  command: [app, "), "{}", draft.yaml);
+            }
+
+            let parsed = config::parse(&draft.yaml, Path::new("draft.yaml")).unwrap();
+            let NodeKind::Window { command, .. } = &parsed.layout.value.kind else {
+                panic!("expected window");
+            };
+            assert_eq!(command, &expected);
+        }
+    }
+}
+
+#[test]
+fn command_line_limit_counts_yaml_escaping_and_indentation() {
+    // A root command has two spaces of indentation; each nested child adds four more.
+    for (levels, argument_length) in [(1, 102), (2, 98), (3, 94)] {
+        let saved = saved_snapshot(nested(levels)).unwrap();
+        let captured = capture_workspace(&saved).unwrap();
+        for extra in [0, 1] {
+            let expected = vec!["app".to_owned(), "x".repeat(argument_length + extra)];
+            let draft = render_draft(&captured, true, &mut |id| {
+                (id == 2000).then(|| expected.clone())
+            })
+            .unwrap();
+            let command_line = draft
+                .yaml
+                .lines()
+                .find(|line| line.trim_start().starts_with("command:"))
+                .unwrap();
+            if extra == 0 {
+                assert!(command_line.trim_start().starts_with("command: ["));
+                assert_eq!(command_line.chars().count(), 120);
+            } else {
+                assert_eq!(command_line.trim(), "command:");
+            }
+            filled(&draft.yaml);
+        }
+    }
+
+    let saved =
+        saved_snapshot(workspace("splith", vec![view_with_pid(20, json!(101))], 20)).unwrap();
+    let expected = vec!["app".to_owned(), "\n".repeat(60)];
+    let draft = saved
+        .render_with(true, &mut |_| Some(expected.clone()))
+        .unwrap();
+    assert!(draft.yaml.contains("  command:\n    - app\n"));
+    let parsed = config::parse(&draft.yaml, Path::new("draft.yaml")).unwrap();
+    let NodeKind::Window { command, .. } = &parsed.layout.value.kind else {
+        panic!("expected window");
+    };
+    assert_eq!(command, &expected);
 }
 
 #[test]
