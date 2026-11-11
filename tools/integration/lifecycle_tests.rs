@@ -936,3 +936,164 @@ fn refusal_notification_stub_is_private_and_scoped_to_the_refusal_command() {
     drop(directory);
     assert!(!path.exists());
 }
+
+#[test]
+fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evidence() {
+    let scenario = standard_scenario("horizontal-pair");
+    let loaded = loaded_pair(&scenario);
+    let foreign = ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap();
+    let make_progress = || ScenarioProgress {
+        scenario: scenario.clone(),
+        preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
+        accepted: accepted(&[(20, "window1"), (21, "window2")]),
+    };
+    let empty = || {
+        observed(
+            desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+            "9",
+            TARGET_WORKSPACE_ID,
+        )
+    };
+    let mut activity = empty();
+    activity
+        .window_events
+        .push(window_event("move", PREEXISTING_WINDOW_ID, None));
+    let mut changed_foreign = empty();
+    changed_foreign.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1;
+    // An incomplete cleanup (one survivor), unexpected history, or changed foreign
+    // window cannot authorize the transition to another construction cycle.
+    let mut survivor = loaded_pair(&scenario);
+    survivor.tree.nodes[1].nodes[1].nodes.remove(0);
+    for incomplete in [loaded, survivor, activity, changed_foreign] {
+        let mut progress = make_progress();
+        let mut retired = HashSet::new();
+        assert!(
+            progress
+                .prepare_replay(&incomplete, &foreign, scenario.clone(), &mut retired)
+                .is_err()
+        );
+        assert_eq!(
+            progress.accepted,
+            accepted(&[(20, "window1"), (21, "window2")])
+        );
+        assert!(progress.preexisting_ids.is_some());
+        assert!(retired.is_empty());
+    }
+    let mut progress = make_progress();
+    let mut retired = HashSet::new();
+    progress
+        .prepare_replay(&empty(), &foreign, scenario, &mut retired)
+        .unwrap();
+    assert_eq!(retired, HashSet::from([20, 21]));
+    assert!(progress.accepted.is_empty());
+    assert!(progress.preexisting_ids.is_none());
+}
+
+#[test]
+fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() {
+    let scenario = standard_scenario("horizontal-pair");
+    let first = loaded_pair(&scenario);
+    let target = target_identity();
+    let foreign = ForeignWindows::record(&first, target.id).unwrap();
+    let mut progress = ScenarioProgress {
+        scenario: scenario.clone(),
+        preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
+        accepted: accepted(&[(20, "window1"), (21, "window2")]),
+    };
+    let first_baseline = signature(first.focused_workspace());
+    let first_context = CleanupContext {
+        target: &target,
+        foreign: &foreign,
+        layout: &scenario.layout,
+        preexisting_ids: progress.preexisting_ids.as_ref().unwrap(),
+    };
+    prepare_close(
+        &first,
+        &first_context,
+        &progress.accepted,
+        &first_baseline,
+        20,
+        true,
+    )
+    .unwrap();
+    assert!(
+        prepare_close(
+            &first,
+            &first_context,
+            &progress.accepted,
+            &first_baseline,
+            40,
+            true
+        )
+        .is_err()
+    );
+
+    let mut empty = observed(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    let mut retired = HashSet::new();
+    progress
+        .prepare_replay(&empty, &foreign, scenario.clone(), &mut retired)
+        .unwrap();
+    // A newly present foreign window must be included in the *fresh* identity set.
+    empty.tree.nodes[1].nodes[0]
+        .nodes
+        .push(parse_tree(wayland_window(
+            99,
+            "new-foreign",
+            rect(0, 0, 10, 10),
+        )));
+    progress.begin_cycle(&empty, &retired).unwrap();
+    let preexisting = progress.preexisting_ids.as_ref().unwrap();
+    assert!(preexisting.contains(&99));
+    assert!(preexisting.contains(&20) && preexisting.contains(&21));
+    assert!(progress.accepted.is_empty());
+
+    let mut second = loaded_pair(&scenario);
+    second.tree.nodes[1].nodes[1].nodes[0].id = 40;
+    second.tree.nodes[1].nodes[1].nodes[1].id = 41;
+    let second_baseline = signature(second.focused_workspace());
+    let context = CleanupContext {
+        target: &target,
+        foreign: &foreign,
+        layout: &scenario.layout,
+        preexisting_ids: preexisting,
+    };
+    // Failed/incomplete second loads leave no accepted evidence, so no close is legal.
+    assert!(
+        prepare_close(
+            &second,
+            &context,
+            &progress.accepted,
+            &second_baseline,
+            40,
+            true
+        )
+        .is_err()
+    );
+    let new_events = |first, second| {
+        vec![
+            window_event("new", first, None),
+            window_event("new", second, None),
+        ]
+    };
+    assert!(bind_launches(&new_events(20, 21), &scenario.layout, preexisting).is_err());
+    assert!(bind_launches(&new_events(40, 99), &scenario.layout, preexisting).is_err());
+    assert!(bind_launches(&new_events(40, 40), &scenario.layout, preexisting).is_err());
+    let owned = bind_launches(&new_events(40, 41), &scenario.layout, preexisting).unwrap();
+    verify_ownership(
+        &second.tree,
+        target.id,
+        &scenario.layout,
+        preexisting,
+        &owned,
+    )
+    .unwrap();
+    verify_layout(second.focused_workspace(), &scenario, &owned).unwrap();
+    prepare_close(&second, &context, &owned, &second_baseline, 40, true).unwrap();
+    assert!(prepare_close(&second, &context, &owned, &second_baseline, 20, true).is_err());
+    assert!(prepare_close(&second, &context, &owned, &second_baseline, 41, false).is_err());
+    assert!(prepare_close(&second, &context, &owned, &first_baseline, 40, true).is_err());
+}

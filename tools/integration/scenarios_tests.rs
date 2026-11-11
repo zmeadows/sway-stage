@@ -74,6 +74,11 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "h(window1@3, window2@2)",
             "window2",
         ),
+        (
+            "capture-reload-roundtrip",
+            "h(window1@4, v(window2@3, window3@2)@3, window4@3)",
+            "window3",
+        ),
     ];
     let expected: Vec<(&str, String, &str)> = expected
         .into_iter()

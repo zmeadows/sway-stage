@@ -560,3 +560,33 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
     set_focus(&mut tree, 22);
     assert!(uncertain_message(verify(tree, &scenario, &owned)).contains("final focus differs"));
 }
+
+#[test]
+fn replay_geometry_is_judged_against_captured_weights_instead_of_original_weights() {
+    let scenario = standard_scenario("horizontal-pair");
+    let measurements = LayoutMeasurements {
+        shares: BTreeMap::from([(vec![0], 70.0), (vec![1], 30.0)]),
+        sizing_notes: Vec::new(),
+    };
+    let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
+    let (_, replay) = crate::capture::executable_capture(&draft, &scenario, &measurements).unwrap();
+    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let tree = horizontal_pair_desktop(&scenario, (700, 300), 21);
+    assert!(verify(tree.clone(), &scenario, &owned).is_err());
+    verify(tree, &replay, &owned).unwrap();
+    // Small differences from captured geometry retain the ordinary five-point tolerance.
+    verify(
+        horizontal_pair_desktop(&scenario, (710, 290), 21),
+        &replay,
+        &owned,
+    )
+    .unwrap();
+    assert!(
+        verify(
+            horizontal_pair_desktop(&scenario, (760, 240), 21),
+            &replay,
+            &owned
+        )
+        .is_err()
+    );
+}

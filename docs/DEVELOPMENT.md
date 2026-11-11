@@ -71,16 +71,37 @@ Run manually, one invocation at a time:
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers ten Foot scenarios: single window, horizontal/vertical pairs,
+The standard run covers eleven Foot scenarios: single window, horizontal/vertical pairs,
 uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
-groups, process execution, default final focus, and occupied-workspace refusal. Each verifies
-raw-tree identity, order, hierarchy, sizing, final focus, capture, and guarded cleanup.
-Single-window and horizontal-pair cases also check inferred commands. Expect ten passes;
-extended runs expect fourteen when all optional prerequisites exist, otherwise explicit SKIPs.
+groups, process execution, default final focus, occupied-workspace refusal, and capture/reload
+round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
+capture, and guarded cleanup.
+Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
+commands. Expect eleven passes; extended runs expect fifteen when all optional prerequisites
+exist, otherwise explicit SKIPs.
 The process-execution case uses a private relative cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
 run-specific environment override; verified window cleanup must also observe its exit.
 No shell evaluates the test arguments.
+
+The `capture-reload-roundtrip` case builds four uniquely identified Foot windows with nested
+horizontal/vertical splits, unequal weights, and interior-leaf focus. After full capture
+comparison, it fills only the actual captured YAML's null commands with the corresponding
+literal launch arrays and runs `check`. The replay file retains captured weights, selectors,
+IDs, hierarchy, and focus. Only successful exact-ID cleanup and an empty, preserved desktop
+permit the second load. A fresh synchronized baseline and new launch bindings replace the
+first cycle's evidence; retired container IDs are refused. The reconstructed layout is
+independently checked against the captured weights with the ordinary sizing tolerance,
+then captured and safely cleaned again. Failure reports the initial/replay phase and leaves
+remaining windows alone; no speculative cleanup or retry follows.
+
+For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
+the correct distinct run-specific title argument from each leaf's original launch array.
+Swapped, duplicate, or missing titles fail, even though both selectors agree. Titles reported
+by Sway are never ownership evidence. Normalizing only the inferred command arrays must
+reproduce the verified default capture exactly; tree, event-history, and foreign-window
+checks also establish that inference left the observed desktop unchanged. Recovered commands
+are never printed in diagnostics.
 
 The occupied-workspace case first loads and independently verifies a two-window layout,
 then attempts a different valid layout on that occupied target. It requires exit 1 and the

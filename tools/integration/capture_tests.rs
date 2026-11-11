@@ -331,3 +331,199 @@ fn inferred_capture_needs_one_command_per_window() {
     let error = verify_inferred_capture(&inferred, &default_draft, &pair.layout).unwrap_err();
     assert_eq!(error, "inferred command count differs");
 }
+
+#[test]
+fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
+    let mut scenario = standard_scenario("horizontal-pair");
+    scenario.layout.first_leaf_mut().command.extend([
+        "two words".into(),
+        "quotes ' \" and \\ newline\n $HOME ; $(literal) *".into(),
+        String::new(),
+    ]);
+    let draft = pair_draft().replace("id: window1", "id: 'window1'");
+    let (yaml, replay) = executable_capture(&draft, &scenario, &pair_measurements()).unwrap();
+    let mut normalized = yaml.clone();
+    for leaf in scenario.layout.leaves() {
+        let serialized = json_sequence(&leaf.command);
+        normalized = normalized.replacen(&format!("command: {serialized}"), "command: null", 1);
+    }
+    // Comments, quoted IDs and measured decimal weights are from the capture itself.
+    assert_eq!(normalized, draft);
+    let commands: Vec<Vec<String>> = yaml
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("command: ")
+                .map(|scalar| serde_json::from_str(scalar).unwrap())
+        })
+        .collect();
+    assert_eq!(
+        commands,
+        scenario
+            .layout
+            .leaves()
+            .iter()
+            .map(|leaf| leaf.command.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(replay.layout.leaves()[0].weight, 5990);
+    assert_eq!(replay.layout.leaves()[1].weight, 4010);
+    assert_eq!(scenario.layout.leaves()[0].weight, 3);
+    assert_eq!(replay.expected_focus, "window2");
+    assert_eq!(replay.configured_focus, Some("window2"));
+    assert_eq!(
+        replay.layout.leaves()[0].selector,
+        scenario.layout.leaves()[0].selector
+    );
+    assert!(!yaml.contains("command: [\"true\"]"));
+}
+
+#[test]
+fn replay_rejects_missing_extra_relocated_or_misassociated_placeholders() {
+    let scenario = standard_scenario("horizontal-pair");
+    for draft in [
+        pair_draft().replacen("      command: null\n", "", 1),
+        pair_draft() + "command: null\n",
+        pair_draft().replacen("      command: null", "    command: null", 1),
+        pair_draft().replace(
+            "      weight: 59.9\n      command: null",
+            "      command: null\n      weight: 59.9",
+        ),
+        pair_draft().replacen("id: window1", "id: window2", 1),
+        pair_draft().replacen(
+            &app_id("horizontal-pair", "window1"),
+            &app_id("horizontal-pair", "window2"),
+            1,
+        ),
+        pair_draft().replacen("      command: null", "      command: [\"true\"]", 1),
+    ] {
+        assert!(executable_capture(&draft, &scenario, &pair_measurements()).is_err());
+    }
+    let mut no_command = scenario;
+    no_command.layout.first_leaf_mut().command.clear();
+    assert!(executable_capture(&pair_draft(), &no_command, &pair_measurements()).is_err());
+}
+
+#[test]
+fn nested_replay_retains_focus_shape_and_every_captured_weight() {
+    let scenario = standard_scenario("capture-reload-roundtrip");
+    let measurements = LayoutMeasurements {
+        shares: BTreeMap::from([
+            (vec![0], 40.01),
+            (vec![1], 30.02),
+            (vec![1, 0], 59.98),
+            (vec![1, 1], 40.02),
+            (vec![2], 29.97),
+        ]),
+        sizing_notes: Vec::new(),
+    };
+    let draft = expected_draft(&scenario, &measurements.shares).unwrap();
+    let (yaml, replay) = executable_capture(&draft, &scenario, &measurements).unwrap();
+    let ConfiguredNode::Split { axis, children, .. } = &replay.layout else {
+        panic!("root split")
+    };
+    assert_eq!(*axis, crate::scenarios::SplitAxis::Horizontal);
+    assert_eq!(
+        children
+            .iter()
+            .map(ConfiguredNode::weight)
+            .collect::<Vec<_>>(),
+        [4001, 3002, 2997]
+    );
+    let ConfiguredNode::Split { axis, children, .. } = &children[1] else {
+        panic!("nested split")
+    };
+    assert_eq!(*axis, crate::scenarios::SplitAxis::Vertical);
+    assert_eq!(
+        children
+            .iter()
+            .map(ConfiguredNode::weight)
+            .collect::<Vec<_>>(),
+        [5998, 4002]
+    );
+    assert_eq!(replay.expected_focus, "window3");
+    assert_eq!(replay.configured_focus, Some("window3"));
+    for (original, replayed) in scenario.layout.leaves().iter().zip(replay.layout.leaves()) {
+        assert_eq!(original.layout_id, replayed.layout_id);
+        assert_eq!(original.selector, replayed.selector);
+        assert_eq!(original.command, replayed.command);
+    }
+    assert_eq!(
+        yaml.lines()
+            .filter(|line| line.trim_start().starts_with("weight:"))
+            .collect::<Vec<_>>(),
+        draft
+            .lines()
+            .filter(|line| line.trim_start().starts_with("weight:"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
+    let scenario = crate::fixtures::extended_scenario("duplicate-foot-ids");
+    let shares = BTreeMap::from([(vec![0], 59.9), (vec![1], 40.1)]);
+    let default = expected_draft(&scenario, &shares).unwrap();
+    let leaves = scenario.layout.leaves();
+    let shared_id = leaves[0].selector.value();
+    let titles: Vec<_> = leaves
+        .iter()
+        .map(|leaf| option_values(&leaf.command, "--title")[0])
+        .collect();
+    assert_ne!(titles[0], titles[1]);
+    let first = foot_command(&[
+        &format!("--app-id={shared_id}"),
+        &format!("--title={}", titles[0]),
+    ]);
+    let second = foot_command(&["--app-id", shared_id, "--title", titles[1]]);
+    let inferred = default
+        .replacen(
+            "      command: null\n",
+            &format!("      command:\n{first}"),
+            1,
+        )
+        .replacen(
+            "      command: null\n",
+            &format!("      command:\n{second}"),
+            1,
+        );
+    verify_inferred_capture(&inferred, &default, &scenario.layout).unwrap();
+    for invalid in [
+        inferred
+            .replace(titles[0], "temporary-marker")
+            .replace(titles[1], titles[0])
+            .replace("temporary-marker", titles[1]),
+        inferred.replace(titles[1], titles[0]),
+        inferred.replace(&format!("        - --title={}\n", titles[0]), ""),
+        inferred.replace("        - --title\n", ""),
+        inferred.replace(&format!("--app-id={shared_id}"), "--app-id=wrong"),
+        inferred.replace(
+            &format!("--title={}", titles[0]),
+            &format!("--title={} --title={}", titles[0], titles[1]),
+        ),
+        inferred.replace("        - /usr/bin/foot", "        - [not, a, string]"),
+        inferred.replace("        - /usr/bin/foot", "        - {bad: mapping}"),
+        inferred.replace("        - /usr/bin/foot", "        - null"),
+        inferred.replace("        - /usr/bin/foot", "        - \"unterminated"),
+    ] {
+        let error = verify_inferred_capture(&invalid, &default, &scenario.layout).unwrap_err();
+        assert!(!error.contains(shared_id) && !titles.iter().any(|title| error.contains(title)));
+        assert!(!error.contains("/usr/bin"));
+    }
+    for (original, replacement) in [
+        ("split: horizontal", "split: vertical"),
+        ("weight: 59.9", "weight: 59.91"),
+        ("id: window1", "id: other"),
+        ("focus: window2", "focus: window1"),
+        ("app_id:", "class:"),
+    ] {
+        assert!(
+            verify_inferred_capture(
+                &inferred.replacen(original, replacement, 1),
+                &default,
+                &scenario.layout
+            )
+            .is_err()
+        );
+    }
+}

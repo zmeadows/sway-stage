@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use crate::capture::{verify_capture, verify_inferred_capture};
+use crate::capture::{executable_capture, verify_capture, verify_inferred_capture};
 use crate::ipc::{IPC_TIMEOUT, Swaymsg, TreeNode, validate_restoration_name, workspace_number};
 use crate::layout::{
     Shape, Signature, class, is_window, observed_identifier, outline, remove_from_shape, shape,
@@ -72,6 +72,48 @@ struct ScenarioProgress {
     scenario: Scenario,
     preexisting_ids: Option<HashSet<i64>>,
     accepted: AcceptedWindows,
+}
+
+impl ScenarioProgress {
+    /// Called only after guarded cleanup succeeds, never from a failure handler.
+    fn prepare_replay(
+        &mut self,
+        cleaned: &Snapshot,
+        foreign: &ForeignWindows,
+        replay: Scenario,
+        retired_ids: &mut HashSet<i64>,
+    ) -> Result<(), Failure> {
+        cleaned.validate()?;
+        foreign.verify(cleaned)?;
+        require_quiet(&cleaned.window_events, None)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        retired_ids.extend(self.accepted.keys().copied());
+        self.accepted.clear();
+        self.preexisting_ids = None;
+        self.scenario = replay;
+        Ok(())
+    }
+
+    /// Record a synchronized empty baseline for each load. Never carry accepted IDs
+    /// into another load, even when its selectors and launch commands agree.
+    fn begin_cycle(
+        &mut self,
+        before: &Snapshot,
+        retired_ids: &HashSet<i64>,
+    ) -> Result<(), Failure> {
+        require_quiet(&before.window_events, None)?;
+        require_empty(before.focused_workspace())?;
+        self.accepted.clear();
+        let mut preexisting_ids: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        // A replay must create new containers; retired IDs cannot prove a new launch.
+        preexisting_ids.extend(retired_ids);
+        self.preexisting_ids = Some(preexisting_ids);
+        Ok(())
+    }
 }
 
 struct ForeignFixture {
@@ -337,178 +379,226 @@ impl Harness {
         directory.write(name, &configuration_yaml(scenario))?;
         check_configuration(&self.binary, &directory.path, name, &self.stage)?;
 
-        // Preparation and check can take time. Refresh history and all preexisting IDs
-        // immediately before load, refusing activity during preparation too.
-        let before_load = snapshot(&self.sway, &mut self.events, None)?;
-        require_quiet(&before_load.window_events, None)?;
-        require_empty(before_load.focused_workspace())?;
-        let fixture = self
-            .fixture
-            .as_ref()
-            .expect("fixture prepared before scenarios");
-        verify_fixture_state(
-            &before_load,
-            fixture,
-            fixture
-                .loaded_signature
+        let mut replay_cycle = false;
+        let mut retired_ids = HashSet::new();
+        let mut previous_foreign: Option<ForeignWindows> = None;
+        loop {
+            let cycle_name = if replay_cycle {
+                format!("{name}: replay")
+            } else {
+                format!("{name}: initial")
+            };
+            self.stage = format!("{cycle_name}: fresh baseline");
+            // Preparation and check can take time. Refresh history and all preexisting IDs
+            // immediately before load, refusing activity during preparation too.
+            let before_load = snapshot(&self.sway, &mut self.events, None)?;
+            require_quiet(&before_load.window_events, None)?;
+            require_empty(before_load.focused_workspace())?;
+            let fixture = self
+                .fixture
                 .as_ref()
-                .expect("fixture load verified"),
-        )?;
-        let foreign = ForeignWindows::record(&before_load, before_load.focused_workspace_id)?;
-        progress.preexisting_ids = Some(
-            walk(&before_load.tree)
-                .iter()
-                .map(|placed| placed.node.id)
-                .collect(),
-        );
-        let preexisting_ids = progress
-            .preexisting_ids
-            .as_ref()
-            .expect("just recorded IDs");
-        let target = self
-            .disposable
-            .as_ref()
-            .expect("successful switch established target");
-
-        self.stage = format!("{name}: load");
-        interruption_check()?;
-        let mut load = configured_command(&self.binary, &directory.path, "load", name);
-        self.sway.select_socket(&mut load);
-        let output = process::run(load, &self.stage, load_timeout(scenario))?;
-        if !output.trim().is_empty() {
-            return Err(Failure::Check("load produced unexpected stdout".into()));
-        }
-
-        self.stage = format!("{name}: raw-tree verification");
-        let loaded = snapshot(&self.sway, &mut self.events, None)?;
-        foreign.verify(&loaded)?;
-        progress.accepted =
-            bind_launches(&loaded.window_events, &scenario.layout, preexisting_ids)?;
-        verify_ownership(
-            &loaded.tree,
-            target.id,
-            &scenario.layout,
-            preexisting_ids,
-            &progress.accepted,
-        )?;
-        let measurements = verify_layout(loaded.focused_workspace(), scenario, &progress.accepted)?;
-        let probe_pid = if name == "process-execution" {
-            self.stage = format!("{name}: child process verification");
-            let leaf = scenario.layout.leaves()[0];
-            let window_id = *progress
-                .accepted
-                .keys()
-                .next()
-                .expect("verified single window");
-            let terminal = walk(&loaded.tree)
-                .into_iter()
-                .find(|placed| placed.node.id == window_id)
-                .expect("ownership verified window")
-                .node;
-            let terminal_pid = terminal
-                .pid
-                .ok_or_else(|| Failure::Uncertain("process scenario has no terminal PID".into()))?;
-            Some(
-                process::verify_probe(Path::new("/proc"), terminal_pid, leaf, &directory.path)
-                    .map_err(Failure::Uncertain)?,
-            )
-        } else {
-            None
-        };
-        let before_capture = signature(loaded.focused_workspace());
-
-        if name == "occupied-workspace-refusal" {
-            self.stage = format!("{name}: expected refusal");
-            // A different, already checked layout has distinct selectors. A broken load
-            // cannot silently substitute its new windows for the first layout's windows.
-            let search_path = env::var_os("PATH").unwrap_or_default();
-            let mut refused = directory.refusal_command(&self.binary, &search_path)?;
-            self.sway.select_socket(&mut refused);
-
-            let before_refusal = snapshot(&self.sway, &mut self.events, None)?;
-            foreign.verify(&before_refusal)?;
-            verify_unchanged(&before_refusal, target.id, progress, &before_capture)?;
-            let revision = self.events.workspace_revision();
-            let result = process::run_with_status(refused, &self.stage, CAPTURE_TIMEOUT);
-            let output = refusal_completion(result, process::interruption_requested())?;
-            let after_refusal =
-                snapshot(&self.sway, &mut self.events, None).map_err(Failure::Uncertain)?;
-            verify_refusal(
-                &output,
-                &before_refusal,
-                &after_refusal,
-                revision != self.events.workspace_revision(),
+                .expect("fixture prepared before scenarios");
+            verify_fixture_state(
+                &before_load,
+                fixture,
+                fixture
+                    .loaded_signature
+                    .as_ref()
+                    .expect("fixture load verified"),
             )?;
-            foreign.verify(&after_refusal)?;
-            verify_unchanged(&after_refusal, target.id, progress, &before_capture)?;
-            self.refusal_verified = true;
-        }
-
-        self.stage = format!("{name}: capture");
-        let mut capture = Command::new(&self.binary);
-        capture.arg("capture");
-        self.sway.select_socket(&mut capture);
-        let draft = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
-        let after_capture = snapshot(&self.sway, &mut self.events, None)?;
-        foreign.verify(&after_capture)?;
-        verify_unchanged(&after_capture, target.id, progress, &before_capture)?;
-        let filled = verify_capture(&draft, &progress.scenario, &measurements)?;
-        directory.write("captured", &filled)?;
-        check_configuration(
-            &self.binary,
-            &directory.path,
-            "captured",
-            "check filled capture",
-        )?;
-
-        if matches!(name, "single-window" | "horizontal-pair") {
-            self.stage = format!("{name}: inferred capture");
-            let mut capture = Command::new(&self.binary);
-            capture.args(["capture", "--infer-commands"]);
-            self.sway.select_socket(&mut capture);
-            let inferred = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
-            let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
-            foreign.verify(&after_inferred)?;
-            verify_unchanged(&after_inferred, target.id, progress, &before_capture)?;
-            verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
-        }
-
-        self.stage = format!("{name}: cleanup");
-        let context = CleanupContext {
-            foreign: &foreign,
-            target,
-            layout: &progress.scenario.layout,
-            preexisting_ids: progress
+            if let Some(foreign) = &previous_foreign {
+                foreign.verify(&before_load)?;
+            }
+            let foreign = ForeignWindows::record(&before_load, before_load.focused_workspace_id)?;
+            progress.begin_cycle(&before_load, &retired_ids)?;
+            let scenario = &progress.scenario;
+            let preexisting_ids = progress
                 .preexisting_ids
                 .as_ref()
-                .expect("recorded before load"),
-        };
-        cleanup(
-            &self.sway,
-            &mut self.events,
-            &context,
-            &progress.accepted,
-            before_capture,
-        )?;
-        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
-        foreign.verify(&cleaned)?;
-        require_quiet(&cleaned.window_events, None)?;
-        require_empty(cleaned.focused_workspace())?;
-        if let Some(pid) = probe_pid {
-            process::wait_probe_exit(pid)?;
+                .expect("just recorded IDs");
+            let target = self
+                .disposable
+                .as_ref()
+                .expect("successful switch established target");
+
+            self.stage = format!("{cycle_name}: load");
+            interruption_check()?;
+            let mut load = configured_command(
+                &self.binary,
+                &directory.path,
+                "load",
+                if replay_cycle { "replay" } else { name },
+            );
+            self.sway.select_socket(&mut load);
+            let output = process::run(load, &self.stage, load_timeout(scenario))
+                .map_err(Failure::Uncertain)?;
+            if !output.trim().is_empty() {
+                return Err(Failure::Check("load produced unexpected stdout".into()));
+            }
+
+            self.stage = format!("{cycle_name}: raw-tree verification");
+            let loaded = snapshot(&self.sway, &mut self.events, None)?;
+            foreign.verify(&loaded)?;
+            progress.accepted =
+                bind_launches(&loaded.window_events, &scenario.layout, preexisting_ids)?;
+            verify_ownership(
+                &loaded.tree,
+                target.id,
+                &scenario.layout,
+                preexisting_ids,
+                &progress.accepted,
+            )?;
+            let measurements =
+                verify_layout(loaded.focused_workspace(), scenario, &progress.accepted)?;
+            let probe_pid = if name == "process-execution" {
+                self.stage = format!("{cycle_name}: child process verification");
+                let leaf = scenario.layout.leaves()[0];
+                let window_id = *progress
+                    .accepted
+                    .keys()
+                    .next()
+                    .expect("verified single window");
+                let terminal = walk(&loaded.tree)
+                    .into_iter()
+                    .find(|placed| placed.node.id == window_id)
+                    .expect("ownership verified window")
+                    .node;
+                let terminal_pid = terminal.pid.ok_or_else(|| {
+                    Failure::Uncertain("process scenario has no terminal PID".into())
+                })?;
+                Some(
+                    process::verify_probe(Path::new("/proc"), terminal_pid, leaf, &directory.path)
+                        .map_err(Failure::Uncertain)?,
+                )
+            } else {
+                None
+            };
+            let before_capture = signature(loaded.focused_workspace());
+
+            if name == "occupied-workspace-refusal" {
+                self.stage = format!("{cycle_name}: expected refusal");
+                // A different, already checked layout has distinct selectors. A broken load
+                // cannot silently substitute its new windows for the first layout's windows.
+                let search_path = env::var_os("PATH").unwrap_or_default();
+                let mut refused = directory.refusal_command(&self.binary, &search_path)?;
+                self.sway.select_socket(&mut refused);
+
+                let before_refusal = snapshot(&self.sway, &mut self.events, None)?;
+                foreign.verify(&before_refusal)?;
+                verify_unchanged(&before_refusal, target.id, progress, &before_capture)?;
+                let revision = self.events.workspace_revision();
+                let result = process::run_with_status(refused, &self.stage, CAPTURE_TIMEOUT);
+                let output = refusal_completion(result, process::interruption_requested())?;
+                let after_refusal =
+                    snapshot(&self.sway, &mut self.events, None).map_err(Failure::Uncertain)?;
+                verify_refusal(
+                    &output,
+                    &before_refusal,
+                    &after_refusal,
+                    revision != self.events.workspace_revision(),
+                )?;
+                foreign.verify(&after_refusal)?;
+                verify_unchanged(&after_refusal, target.id, progress, &before_capture)?;
+                self.refusal_verified = true;
+            }
+
+            self.stage = format!("{cycle_name}: capture");
+            let mut capture = Command::new(&self.binary);
+            capture.arg("capture");
+            self.sway.select_socket(&mut capture);
+            let draft = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
+            let after_capture = snapshot(&self.sway, &mut self.events, None)?;
+            foreign.verify(&after_capture)?;
+            verify_unchanged(&after_capture, target.id, progress, &before_capture)?;
+            let filled = verify_capture(&draft, &progress.scenario, &measurements)?;
+            directory.write("captured", &filled)?;
+            check_configuration(
+                &self.binary,
+                &directory.path,
+                "captured",
+                "check filled capture",
+            )?;
+
+            if matches!(
+                name,
+                "single-window" | "horizontal-pair" | "duplicate-foot-ids"
+            ) {
+                self.stage = format!("{cycle_name}: inferred capture");
+                let mut capture = Command::new(&self.binary);
+                capture.args(["capture", "--infer-commands"]);
+                self.sway.select_socket(&mut capture);
+                let inferred = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
+                let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
+                foreign.verify(&after_inferred)?;
+                verify_unchanged(&after_inferred, target.id, progress, &before_capture)?;
+                verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
+            }
+
+            let replay = if name == "capture-reload-roundtrip" && !replay_cycle {
+                self.stage = format!("{cycle_name}: executable capture check");
+                let (yaml, replay) = executable_capture(&draft, &progress.scenario, &measurements)?;
+                directory.write("replay", &yaml)?;
+                check_configuration(&self.binary, &directory.path, "replay", &self.stage)?;
+                Some(replay)
+            } else {
+                None
+            };
+
+            self.stage = format!("{cycle_name}: cleanup");
+            let context = CleanupContext {
+                foreign: &foreign,
+                target,
+                layout: &progress.scenario.layout,
+                preexisting_ids: progress
+                    .preexisting_ids
+                    .as_ref()
+                    .expect("recorded before load"),
+            };
+            cleanup(
+                &self.sway,
+                &mut self.events,
+                &context,
+                &progress.accepted,
+                before_capture,
+            )?;
+            let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+            foreign.verify(&cleaned)?;
+            require_quiet(&cleaned.window_events, None)?;
+            require_empty(cleaned.focused_workspace())?;
+            if let Some(pid) = probe_pid {
+                process::wait_probe_exit(pid)?;
+            }
+            interruption_check()?;
+
+            for note in measurements.sizing_notes {
+                println!("      {cycle_name}: above 1-point sizing target: {note}");
+            }
+            if let Some(replay) = replay {
+                // Reached only after exact-ID cleanup, a synchronized empty tree, and
+                // foreign preservation. Any earlier error returns without another launch.
+                self.stage = format!("{cycle_name}: prepare replay");
+                progress.prepare_replay(&cleaned, &foreign, replay, &mut retired_ids)?;
+                previous_foreign = Some(foreign);
+                replay_cycle = true;
+                continue;
+            }
+            break;
         }
-        interruption_check()?;
 
         self.passed += 1;
         let coverage = if name == "occupied-workspace-refusal" {
             "hierarchy, sizing, focus, identity, capture, occupied refusal"
+        } else if name == "capture-reload-roundtrip" {
+            "hierarchy, sizing, focus, identity, capture/reload round-trip"
+        } else if matches!(
+            name,
+            "single-window" | "horizontal-pair" | "duplicate-foot-ids"
+        ) {
+            "hierarchy, sizing, focus, identity, capture, inferred commands"
         } else {
             "hierarchy, sizing, focus, identity, capture"
         };
         println!("PASS  {name:19} {coverage}");
-        for note in measurements.sizing_notes {
-            println!("      above 1-point sizing target: {note}");
-        }
         self.stage = "scenario preparation".into();
         Ok(())
     }

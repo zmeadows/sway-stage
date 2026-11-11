@@ -82,7 +82,7 @@ impl Selector {
 
 /// A configured split or window: what a scenario asks sway-stage to build. Distinct from
 /// `ipc::TreeNode`, an observed Sway container.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ConfiguredNode {
     Window(ConfiguredWindow),
     Split {
@@ -92,7 +92,7 @@ pub enum ConfiguredNode {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConfiguredWindow {
     /// `window1`, `window2`, ... in depth-first order, so it is also the ID `capture`
     /// assigns to this window.
@@ -148,6 +148,7 @@ impl ConfiguredNode {
 }
 
 /// One integration scenario: a layout for sway-stage to build, and what to verify.
+#[derive(Clone)]
 pub struct Scenario {
     pub name: &'static str,
     pub layout: ConfiguredNode,
@@ -172,7 +173,7 @@ pub enum Extension {
     DuplicateFootIds,
 }
 
-/// The ten Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
+/// The Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use SplitAxis::{Horizontal, Vertical};
 
@@ -246,6 +247,19 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             "occupied-workspace-refusal",
             split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
             "window2",
+        ),
+        (
+            "capture-reload-roundtrip",
+            split(
+                Horizontal,
+                1,
+                vec![
+                    window(1, 4),
+                    split(Vertical, 3, vec![window(2, 3), window(3, 2)]),
+                    window(4, 3),
+                ],
+            ),
+            "window3",
         ),
     ];
 
@@ -840,7 +854,7 @@ pub fn describe_path(path: &[usize]) -> String {
 }
 
 /// A JSON array, which is also a YAML flow sequence, with `", "` between items.
-fn json_sequence(items: &[String]) -> String {
+pub fn json_sequence(items: &[String]) -> String {
     let items: Vec<String> = items.iter().map(|item| json_string(item)).collect();
     format!("[{}]", items.join(", "))
 }

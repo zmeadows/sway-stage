@@ -1,12 +1,13 @@
 //! Verification of `sway-stage capture` drafts against the verified arrangement.
 //!
-//! This is a narrow comparison with capture's one known serializer format, not a YAML
-//! parser: a format change fails visibly, and `check` on the filled draft supplies the
-//! authoritative syntax and semantic validation. Recovered command arguments from
+//! This is a narrow structural comparison with capture's one known serializer format:
+//! only command argument scalars use YAML decoding. A format change fails visibly, and
+//! `check` on the filled draft supplies authoritative syntax and semantic validation.
+//! Recovered command arguments from
 //! `--infer-commands` stay in memory: they never appear in messages or files.
 
 use crate::layout::LayoutMeasurements;
-use crate::scenarios::{ConfiguredNode, Scenario, Selector, expected_draft};
+use crate::scenarios::{ConfiguredNode, Scenario, Selector, expected_draft, json_sequence};
 
 /// A captured weight is the measured share rounded to hundredths.
 const WEIGHT_TOLERANCE: f64 = 0.02;
@@ -104,6 +105,83 @@ pub fn verify_capture(
     Ok(filled_lines.join("\n") + "\n")
 }
 
+/// Builds replay YAML only by editing the fully verified capture's null commands.
+/// The independent model keeps the proven shape, selectors and focus, but takes every
+/// non-root weight from the captured text. Integer hundredths preserve capture's precision
+/// without changing the harness's integer-weight model or regenerating the replay YAML.
+pub fn executable_capture(
+    draft: &str,
+    scenario: &Scenario,
+    measurements: &LayoutMeasurements,
+) -> Result<(String, Scenario), String> {
+    verify_capture(draft, scenario, measurements)?;
+
+    let leaves = scenario.layout.leaves();
+    let mut commands = leaves.iter();
+    let mut replay_lines = Vec::new();
+    let mut captured_weights = Vec::new();
+    for line in draft.lines() {
+        let field = line.trim_start();
+        if field == "command: null" {
+            let leaf = commands.next().ok_or("extra replay placeholder")?;
+            if leaf.command.first().is_none_or(String::is_empty) {
+                return Err(format!("missing replay command for {}", leaf.layout_id));
+            }
+            let indent = &line[..line.len() - field.len()];
+            replay_lines.push(format!("{indent}command: {}", json_sequence(&leaf.command)));
+        } else {
+            if let Some(scalar) = field.strip_prefix("weight: ") {
+                let weight: f64 = scalar.parse().map_err(|_| "invalid replay weight")?;
+                let hundredths = (weight * 100.0).round();
+                // Allow binary floating-point noise, but never discard decimal precision.
+                if weight <= 0.0 || weight > 100.0 || (weight * 100.0 - hundredths).abs() > 1e-6 {
+                    return Err("replay weight is not a positive percentage in hundredths".into());
+                }
+                captured_weights.push(hundredths as u32);
+            }
+            replay_lines.push(line.to_owned());
+        }
+    }
+    if commands.next().is_some() {
+        return Err("missing replay placeholder".into());
+    }
+
+    let mut replay = scenario.clone();
+    let mut weights = captured_weights.into_iter();
+    apply_captured_weights(&mut replay.layout, true, &mut weights)?;
+    if weights.next().is_some() {
+        return Err("extra captured weight".into());
+    }
+    replay.configured_focus = Some(scenario.expected_focus);
+    Ok((replay_lines.join("\n") + "\n", replay))
+}
+
+fn apply_captured_weights(
+    configured: &mut ConfiguredNode,
+    is_root: bool,
+    weights: &mut std::vec::IntoIter<u32>,
+) -> Result<(), String> {
+    let weight = if is_root {
+        1
+    } else {
+        weights.next().ok_or("missing captured weight")?
+    };
+    match configured {
+        ConfiguredNode::Window(window) => window.weight = weight,
+        ConfiguredNode::Split {
+            weight: group_weight,
+            children,
+            ..
+        } => {
+            *group_weight = weight;
+            for child in children {
+                apply_captured_weights(child, false, weights)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Removes one leading and one trailing quote of either kind, independently.
 fn strip_quotes(scalar: &str) -> &str {
     let scalar = scalar.strip_prefix('"').unwrap_or(scalar);
@@ -116,7 +194,8 @@ fn strip_quotes(scalar: &str) -> &str {
 /// serializer's block command sequences are recognized; with each replaced by
 /// `command: null`, the drafts must agree exactly, so inference changed no hierarchy, order,
 /// sizing, selector, ID, or focus. Each recovered Foot command must carry its leaf's app ID,
-/// as `--app-id=ID` or as `--app-id ID`. Other arguments stay opaque.
+/// as `--app-id=ID` or as `--app-id ID`. Shared selectors also require the corresponding
+/// literal title option from the independently configured launch, never Sway's title.
 pub fn verify_inferred_capture(
     inferred_draft: &str,
     default_draft: &str,
@@ -124,7 +203,7 @@ pub fn verify_inferred_capture(
 ) -> Result<(), String> {
     let lines = capture_lines(inferred_draft);
     let mut normalized_lines = Vec::new();
-    let mut commands: Vec<Vec<&str>> = Vec::new();
+    let mut commands: Vec<Vec<String>> = Vec::new();
     let mut line_index = 0;
     while line_index < lines.len() {
         let line = lines[line_index];
@@ -148,7 +227,9 @@ pub fn verify_inferred_capture(
             .get(line_index)
             .and_then(|next_line| next_line.strip_prefix(argument_prefix.as_str()))
         {
-            arguments.push(strip_matching_quotes(scalar));
+            let argument: String = serde_saphyr::from_str(scalar)
+                .map_err(|_| "inferred capture has a malformed command argument")?;
+            arguments.push(argument);
             line_index += 1;
         }
         if arguments
@@ -170,40 +251,51 @@ pub fn verify_inferred_capture(
     if commands.len() != leaves.len() {
         return Err("inferred command count differs".into());
     }
-    for (arguments, leaf) in commands.iter().zip(leaves) {
+    for (arguments, leaf) in commands.iter().zip(&leaves) {
         let Selector::AppId(app_id) = &leaf.selector else {
             return Err(format!(
                 "inferred command checks need an app ID selector: {}",
                 leaf.layout_id
             ));
         };
-        let combined = format!("--app-id={app_id}");
-        let has_combined = arguments.contains(&combined.as_str());
-        let has_pair = arguments
-            .windows(2)
-            .any(|pair| pair[0] == "--app-id" && pair[1] == app_id);
-        if !has_combined && !has_pair {
+        if option_values(arguments, "--app-id") != [app_id.as_str()] {
             return Err(format!(
                 "inferred command does not identify the correct Foot window: {}",
                 leaf.layout_id
             ));
         }
+        let shared_selector = leaves
+            .iter()
+            .filter(|other| other.selector == leaf.selector)
+            .count()
+            > 1;
+        if shared_selector {
+            let expected_titles = option_values(&leaf.command, "--title");
+            let titles = option_values(arguments, "--title");
+            if expected_titles.len() != 1 || titles != expected_titles {
+                return Err(format!(
+                    "inferred command has incorrect instance title: {}",
+                    leaf.layout_id
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-/// Removes one pair of matching surrounding quotes. Only the simple, generated `--app-id`
-/// tokens are interpreted; escapes are left alone.
-fn strip_matching_quotes(scalar: &str) -> &str {
-    for quote in ['"', '\''] {
-        if let Some(inner) = scalar
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
-            return inner;
+/// Compare complete option arguments, accepting Foot's combined and paired forms.
+/// Repeated options are retained so duplicates cannot masquerade as a correct value.
+fn option_values<'a>(arguments: &'a [String], option: &str) -> Vec<&'a str> {
+    let prefix = format!("{option}=");
+    let mut values = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if let Some(value) = argument.strip_prefix(&prefix) {
+            values.push(value);
+        } else if argument == option {
+            values.push(arguments.get(index + 1).map(String::as_str).unwrap_or(""));
         }
     }
-    scalar
+    values
 }
 
 #[cfg(test)]
