@@ -843,6 +843,30 @@ fn absent_or_invalid_saved_pids_leave_null_without_reading_processes() {
 }
 
 #[test]
+fn desktop_launcher_command_serializes_as_three_literal_arguments() {
+    let saved =
+        saved_snapshot(workspace("splith", vec![view_with_pid(20, json!(101))], 20)).unwrap();
+    let expected = vec![
+        "gio".to_owned(),
+        "launch".to_owned(),
+        "/private/path with spaces/application.desktop".to_owned(),
+    ];
+    let draft = saved
+        .render_with(true, &mut |pid| {
+            assert_eq!(pid, 101);
+            Some(expected.clone())
+        })
+        .unwrap();
+    let parsed = filled(&draft.yaml);
+    let NodeKind::Window { command, .. } = &parsed.layout.value.kind else {
+        panic!("expected window");
+    };
+    assert_eq!(command, &expected);
+    assert_eq!(draft.commands.inferred, 1);
+    assert!(!draft.commands.summary().contains("/private"));
+}
+
+#[test]
 fn flatpak_inference_preserves_pid_association_and_window_matchers_in_yaml() {
     let desktop = workspace(
         "splith",

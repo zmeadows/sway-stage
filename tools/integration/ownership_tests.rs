@@ -416,7 +416,10 @@ fn process_evidence_reads_the_windows_process_arguments() {
         &window_of_this_process(Some(5_000_000)),
         leaf,
     ));
-    assert_contains(&message, "cannot verify process argv: pid=5000000");
+    assert_contains(
+        &message,
+        "cannot verify process argv: container=20 pid=5000000",
+    );
 }
 
 #[test]
@@ -438,4 +441,85 @@ fn ownership_requires_process_evidence_for_repeated_app_ids() {
         &message,
         "process argv does not prove this launch: container=20",
     );
+}
+
+#[test]
+fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
+    use crate::scenarios::configure_desktop_launcher;
+    let directory = env::temp_dir().join(format!(
+        "sway-stage-desktop-evidence-{}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let process_directory = directory.join("101");
+    fs::create_dir(&process_directory).unwrap();
+    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
+    configure_desktop_launcher(&mut scenario, &directory).unwrap();
+    let leaf = scenario.layout.leaves()[0];
+    let fixture = leaf.desktop_launcher.as_ref().unwrap();
+    let argv = fixture.foot_command.join("\0") + "\0";
+    fs::write(process_directory.join("cmdline"), &argv).unwrap();
+    let environment = format!(
+        "PRIVATE=\u{00ff}\0GIO_LAUNCHED_DESKTOP_FILE={}\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0",
+        fixture.path.display()
+    );
+    fs::write(process_directory.join("environ"), &environment).unwrap();
+    verify_process_evidence(&process_directory, 101, leaf).unwrap();
+    for bad_environment in [
+        environment.replace("PID=101", "PID=102"),
+        environment.replace("PID=101", "PID=bad"),
+        environment.replace("PID=101\0", "PID=101"),
+        environment.replace(fixture.path.to_str().unwrap(), "/foreign.desktop"),
+        format!("{environment}GIO_LAUNCHED_DESKTOP_FILE_PID=101\0"),
+        format!("{environment}GIO_LAUNCHED_DESKTOP_FILE\0"),
+        "PRIVATE=secret\0".into(),
+    ] {
+        fs::write(process_directory.join("environ"), &bad_environment).unwrap();
+        let error = verify_process_evidence(&process_directory, 101, leaf).unwrap_err();
+        assert_eq!(
+            error,
+            "desktop launcher metadata does not prove this launch"
+        );
+        assert!(!error.contains("secret"));
+    }
+    fs::write(process_directory.join("environ"), &environment).unwrap();
+    // The intermediary argv cannot substitute for the observed Foot process's argv.
+    fs::write(
+        process_directory.join("cmdline"),
+        leaf.command.join("\0") + "\0",
+    )
+    .unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, leaf),
+        Err("process argv does not prove this launch")
+    );
+    fs::write(process_directory.join("cmdline"), &argv).unwrap();
+    fs::write(&fixture.path, "changed").unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, leaf),
+        Err("private desktop fixture changed")
+    );
+    fs::write(&fixture.path, &fixture.contents).unwrap();
+    fs::remove_file(process_directory.join("environ")).unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, leaf),
+        Err("cannot verify desktop launcher environment")
+    );
+    fs::write(process_directory.join("environ"), vec![b'x'; 65537]).unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, leaf),
+        Err("cannot verify desktop launcher environment")
+    );
+
+    // Even the exact run-unique app ID and ordered event binding do not authorize a
+    // close when independent process provenance cannot be read.
+    let window = wayland_window(20, leaf.selector.value(), rect(0, 0, 1920, 1080));
+    let tree = desktop("splith", vec![window], 20);
+    let message = uncertain_message(check_ownership(
+        tree,
+        &scenario,
+        &accepted(&[(20, "window1")]),
+    ));
+    assert_contains(&message, "cannot verify process argv");
+    fs::remove_dir_all(directory).unwrap();
 }

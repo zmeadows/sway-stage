@@ -1,5 +1,262 @@
 use super::*;
 
+struct DesktopFixture(std::path::PathBuf);
+
+impl DesktopFixture {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "sway-stage-launcher-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(
+            path.join("private launcher.desktop"),
+            "[Desktop Entry]\nType=Application\n",
+        )
+        .unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.0.join("private launcher.desktop")
+    }
+
+    fn environment(&self, pid: &str) -> Vec<u8> {
+        format!(
+            "GIO_LAUNCHED_DESKTOP_FILE={}\0GIO_LAUNCHED_DESKTOP_FILE_PID={pid}\0",
+            self.path().display()
+        )
+        .into_bytes()
+    }
+}
+
+impl Drop for DesktopFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn verified_desktop_launcher_precedes_argv_and_preserves_path_boundaries() {
+    let fixture = DesktopFixture::new();
+    let mut environment = fixture.environment("101");
+    environment.extend_from_slice(b"SECRET=must not escape\0BINARY=\xff\xfe\0OTHER=a=b\0");
+    let expected = vec![
+        "gio".into(),
+        "launch".into(),
+        fixture.path().to_str().unwrap().into(),
+    ];
+    assert_eq!(
+        infer_host_command(101, Ok(environment.as_slice()), || panic!(
+            "must prefer launcher"
+        )),
+        Some(expected)
+    );
+}
+
+#[test]
+fn absent_and_inherited_launcher_evidence_allow_literal_argv_fallback() {
+    let fixture = DesktopFixture::new();
+    for environment in [
+        Vec::new(),
+        b"UNRELATED=\xff\0UNRELATED=duplicate ignored\0".to_vec(),
+        fixture.environment("102"),
+        b"GIO_LAUNCHED_DESKTOP_FILE_PID=102\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE=\xff\0GIO_LAUNCHED_DESKTOP_FILE_PID=102\0".to_vec(),
+    ] {
+        assert_eq!(
+            read_desktop_launcher(environment.as_slice(), 101),
+            LauncherEvidence::Absent
+        );
+        assert_eq!(
+            infer_host_command(101, Ok(environment.as_slice()), || read_command_line(
+                b"host\0two words\0\0".as_slice()
+            )),
+            Some(vec!["host".into(), "two words".into(), "".into()])
+        );
+    }
+}
+
+#[test]
+fn recognized_but_unusable_launcher_evidence_suppresses_argv() {
+    let fixture = DesktopFixture::new();
+    let mut invalid = Vec::new();
+    for pid in [
+        "",
+        "0",
+        "-1",
+        "+101",
+        " 101",
+        "101 ",
+        "101x",
+        "99999999999999999999",
+    ] {
+        invalid.push(fixture.environment(pid));
+    }
+    for path in ["", "relative.desktop", "/missing/sway-stage.desktop"] {
+        invalid.push(
+            format!("GIO_LAUNCHED_DESKTOP_FILE={path}\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0")
+                .into_bytes(),
+        );
+    }
+    for name in [
+        "directory.desktop",
+        "empty.desktop",
+        "wrong.txt",
+        "broken.desktop",
+    ] {
+        let path = fixture.0.join(name);
+        match name {
+            "directory.desktop" => std::fs::create_dir(&path).unwrap(),
+            "broken.desktop" => std::os::unix::fs::symlink("missing", &path).unwrap(),
+            "empty.desktop" => std::fs::write(&path, "").unwrap(),
+            _ => std::fs::write(&path, "[Desktop Entry]").unwrap(),
+        }
+        invalid.push(
+            format!(
+                "GIO_LAUNCHED_DESKTOP_FILE={}\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0",
+                path.display()
+            )
+            .into_bytes(),
+        );
+    }
+    invalid.extend([
+        b"GIO_LAUNCHED_DESKTOP_FILE=/missing.desktop\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE=\xff\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE=x\0GIO_LAUNCHED_DESKTOP_FILE_PID=\xff\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE\0".to_vec(),
+        b"GIO_LAUNCHED_DESKTOP_FILE_PID\0".to_vec(),
+    ]);
+    for key in ["GIO_LAUNCHED_DESKTOP_FILE", "GIO_LAUNCHED_DESKTOP_FILE_PID"] {
+        for value in ["101", "102", ""] {
+            let mut duplicate = fixture.environment("101");
+            duplicate.extend_from_slice(format!("{key}={value}\0").as_bytes());
+            invalid.push(duplicate);
+        }
+    }
+    let mut identical_fields = fixture.environment("101");
+    identical_fields.extend_from_slice(&fixture.environment("101"));
+    invalid.push(identical_fields);
+    let mut conflicting_inherited = fixture.environment("102");
+    conflicting_inherited.extend_from_slice(b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0");
+    invalid.push(conflicting_inherited);
+    for environment in invalid {
+        assert_eq!(
+            read_desktop_launcher(environment.as_slice(), 101),
+            LauncherEvidence::Unresolved
+        );
+        assert!(
+            infer_host_command(101, Ok(environment.as_slice()), || panic!(
+                "unsafe argv fallback"
+            ))
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn environment_reads_fail_closed_without_exposing_sensitive_errors() {
+    struct SensitiveFailure;
+    impl Read for SensitiveFailure {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "SECRET=private",
+            ))
+        }
+    }
+    assert_eq!(
+        read_desktop_launcher(SensitiveFailure, 101),
+        LauncherEvidence::Unresolved
+    );
+    for kind in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied] {
+        let unavailable: io::Result<&[u8]> = Err(io::Error::new(kind, "SECRET=private"));
+        assert_eq!(
+            infer_host_command(101, unavailable, || panic!("uncertain environment")),
+            None
+        );
+    }
+    let fixture = DesktopFixture::new();
+    let mut truncated = fixture.environment("101");
+    truncated.pop();
+    assert_eq!(
+        read_desktop_launcher(truncated.as_slice(), 101),
+        LauncherEvidence::Unresolved
+    );
+    // A valid prefix does not excuse a truncated unrelated final field.
+    let mut incomplete = fixture.environment("101");
+    incomplete.extend_from_slice(b"SECRET=truncated");
+    assert_eq!(
+        read_desktop_launcher(incomplete.as_slice(), 101),
+        LauncherEvidence::Unresolved
+    );
+
+    let mut maximum = b"UNRELATED=".to_vec();
+    maximum.resize(MAX_ENVIRON_BYTES, b'x');
+    maximum[MAX_ENVIRON_BYTES - 1] = 0;
+    assert_eq!(
+        read_desktop_launcher(maximum.as_slice(), 101),
+        LauncherEvidence::Absent
+    );
+    maximum.push(0);
+    assert_eq!(
+        read_desktop_launcher(maximum.as_slice(), 101),
+        LauncherEvidence::Unresolved
+    );
+    let mut oversized_launcher = fixture.environment("101");
+    oversized_launcher.resize(MAX_ENVIRON_BYTES + 1, 0);
+    assert_eq!(
+        read_desktop_launcher(oversized_launcher.as_slice(), 101),
+        LauncherEvidence::Unresolved
+    );
+    let mut endless = io::repeat(b'x').take(MAX_ENVIRON_BYTES as u64 + 10);
+    assert_eq!(
+        read_desktop_launcher(&mut endless, 101),
+        LauncherEvidence::Unresolved
+    );
+    assert_eq!(endless.limit(), 9);
+}
+
+#[test]
+fn flatpak_evidence_precedes_even_valid_or_inherited_desktop_metadata() {
+    let fixture = DesktopFixture::new();
+    for pid in ["101", "102"] {
+        for (metadata, expected) in [
+            (
+                "[Application]\nname=org.example.App",
+                Some(vec![
+                    "flatpak".into(),
+                    "run".into(),
+                    "org.example.App".into(),
+                ]),
+            ),
+            ("[Application]\nname=partial", None),
+            ("[Runtime]\nname=org.example.Runtime", None),
+        ] {
+            let environment = fixture.environment(pid);
+            assert_eq!(
+                infer_process_command(Ok(metadata.as_bytes()), || {
+                    infer_host_command(101, Ok(environment.as_slice()), || {
+                        panic!("Flatpak must not consult argv")
+                    })
+                }),
+                expected
+            );
+        }
+    }
+    let missing: io::Result<&[u8]> = Err(io::ErrorKind::NotFound.into());
+    assert!(
+        infer_process_command(missing, || {
+            infer_host_command(101, Ok(fixture.environment("101").as_slice()), || None)
+        })
+        .is_some()
+    );
+}
+
 #[test]
 fn command_line_reader_preserves_literal_arguments_and_empty_arguments() {
     let arguments = [

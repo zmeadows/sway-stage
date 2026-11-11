@@ -3,11 +3,15 @@
 //! Ordered `window::new` events bind sequential launches to layout leaves; selectors alone
 //! never establish ownership. Later checks require those container IDs on the target
 //! workspace in safe tiled state, the exact app ID or Xwayland class, and, where selectors
-//! cannot tell launches apart, the literal launch arguments in `/proc/PID/cmdline`. Every
-//! failure here is `Uncertain`, which forbids cleanup and workspace restoration.
+//! cannot tell launches apart, the literal launch arguments in `/proc/PID/cmdline`.
+//! Desktop fixtures additionally require their expected Foot argv, unchanged launcher,
+//! and exact GLib launcher PID/path fields. Every failure here is `Uncertain`, which
+//! forbids cleanup and workspace restoration.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::Read;
+use std::path::Path;
 
 use crate::ipc::{EventContainer, Shell, TreeNode, WindowChange, WindowEvent};
 use crate::layout::{class, is_window, observed_identifier, outline};
@@ -245,8 +249,9 @@ pub fn verify_ownership(
     Ok(())
 }
 
-/// Requires Sway's PID for `window` to show `leaf`'s literal launch arguments. Recovered
-/// arguments never appear in messages.
+/// Requires Sway's PID for `window` to show the configured application's literal argv.
+/// Desktop launches require fixture provenance too, rather than comparing Foot to gio's
+/// intermediary argv. Recovered arguments never appear in messages.
 pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Result<(), Failure> {
     let Some(pid) = window.pid.filter(|pid| *pid > 0) else {
         return Err(Failure::Uncertain(format!(
@@ -255,17 +260,84 @@ pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Re
         )));
     };
 
-    let command_line = fs::read(format!("/proc/{pid}/cmdline")).map_err(|error| {
-        Failure::Uncertain(format!("cannot verify process argv: pid={pid}: {error}"))
-    })?;
-    if !command_line_proves_launch(&command_line, &leaf.command) {
-        return Err(Failure::Uncertain(format!(
-            "process argv does not prove this launch: container={} pid={pid} leaf={}; \
-             refusing cleanup",
+    verify_process_evidence(Path::new(&format!("/proc/{pid}")), pid, leaf).map_err(|reason| {
+        Failure::Uncertain(format!(
+            "{reason}: container={} pid={pid} leaf={}; refusing cleanup",
             window.id, leaf.layout_id
-        )));
+        ))
+    })
+}
+
+fn verify_process_evidence(
+    process_directory: &Path,
+    pid: i32,
+    leaf: &ConfiguredWindow,
+) -> Result<(), &'static str> {
+    let command_line = read_process_bytes(&process_directory.join("cmdline"))
+        .ok_or("cannot verify process argv")?;
+    let expected_command = if let Some(fixture) = &leaf.desktop_launcher {
+        let environment = read_process_bytes(&process_directory.join("environ"))
+            .ok_or("cannot verify desktop launcher environment")?;
+        if !launcher_environment_proves_launch(&environment, pid, &fixture.path) {
+            return Err("desktop launcher metadata does not prove this launch");
+        }
+        let contents =
+            read_process_bytes(&fixture.path).ok_or("cannot verify private desktop fixture")?;
+        if contents != fixture.contents.as_bytes() {
+            return Err("private desktop fixture changed");
+        }
+        &fixture.foot_command
+    } else {
+        &leaf.command
+    };
+    if !command_line_proves_launch(&command_line, expected_command) {
+        return Err("process argv does not prove this launch");
     }
     Ok(())
+}
+
+fn read_process_bytes(path: &Path) -> Option<Vec<u8>> {
+    const LIMIT: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= LIMIT).then_some(bytes)
+}
+
+/// Independent of production inference: compare the two exact fixture fields as bytes,
+/// rejecting duplicates, malformed entries, inherited PIDs, and incomplete observations.
+fn launcher_environment_proves_launch(environment: &[u8], pid: i32, path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    if environment.last() != Some(&0) {
+        return false;
+    }
+    let expected_pid = pid.to_string();
+    for (key, expected) in [
+        (
+            b"GIO_LAUNCHED_DESKTOP_FILE".as_slice(),
+            path.as_os_str().as_bytes(),
+        ),
+        (
+            b"GIO_LAUNCHED_DESKTOP_FILE_PID".as_slice(),
+            expected_pid.as_bytes(),
+        ),
+    ] {
+        let fields: Vec<&[u8]> = environment
+            .split(|byte| *byte == 0)
+            .filter(|entry| entry.split(|byte| *byte == b'=').next() == Some(key))
+            .collect();
+        let mut expected_entry = key.to_vec();
+        expected_entry.push(b'=');
+        expected_entry.extend_from_slice(expected);
+        if fields != [expected_entry.as_slice()] {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether raw `/proc/PID/cmdline` bytes hold exactly `command`'s arguments after the

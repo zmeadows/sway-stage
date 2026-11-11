@@ -67,7 +67,7 @@ Run manually, one invocation at a time:
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
-| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, and repeated-app-ID cases. |
+| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, and desktop-launcher replay cases. |
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
@@ -77,7 +77,7 @@ groups, process execution, default final focus, occupied-workspace refusal, and 
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
 capture, and guarded cleanup.
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect eleven passes; extended runs expect fifteen when all optional prerequisites
+commands. Expect eleven passes; extended runs expect sixteen when all optional prerequisites
 exist, otherwise explicit SKIPs.
 The process-execution case uses a private relative cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
@@ -94,6 +94,27 @@ first cycle's evidence; retired container IDs are refused. The reconstructed lay
 independently checked against the captured weights with the ordinary sizing tolerance,
 then captured and safely cleaned again. Failure reports the initial/replay phase and leaves
 remaining windows alone; no speculative cleanup or retry follows.
+
+The fifth extended case, `desktop-launcher-roundtrip`, creates one private `.desktop` file
+inside the harness's temporary directory, with a path containing spaces. Its ordinary
+`Type=Application` entry directly starts a Foot window with a run-unique app ID and a
+300-second `sleep` child, using desktop-entry argument quoting without shell wrappers.
+The initial layout launches it through `gio launch`. Ordered window events, independent
+Sway tree/layout/focus checks, exact Foot process arguments, and independently read GLib
+metadata must establish ownership: the recorded launcher PID must match Sway's window PID,
+and the path must exactly identify the unchanged private fixture. Every ownership check,
+including the checks immediately before cleanup, requires this evidence.
+
+Ordinary capture must match the structural draft; inferred capture must differ only in
+its command, exactly `[gio, launch, PRIVATE_DESKTOP_FILE_PATH]`. State, event-history, and
+foreign-window checks must remain unchanged. After verified initial cleanup, an empty
+workspace, and a fresh baseline, the harness checks and reloads the actual inferred YAML,
+without replacing its command. It independently verifies the new window's Foot argv,
+matching launcher PID/path, layout, and focus, captures again, and performs final guarded
+cleanup. This intentionally uses a single window to keep launcher provenance focused;
+the standard round-trip scenario covers nested weights. Any uncertainty stops the case
+without speculative cleanup. The private launcher and replay YAML are removed with the
+harness's temporary files; nothing is installed in XDG application directories.
 
 For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
 the correct distinct run-specific title argument from each leaf's original launch array.
@@ -151,6 +172,12 @@ Extended prerequisites:
 - Xterm coverage needs `xterm`, `Xwayland`, and `xdpyinfo` on `PATH`, and `DISPLAY` reaching
   this session's Xwayland server with the `XWAYLAND` extension. An unavailable server/probe
   skips the case; a subsequent launch or class mismatch fails it.
+- Desktop-launcher coverage needs `gio` on `PATH` and readable `/proc/PID/cmdline` and
+  `/proc/PID/environ` for Foot. Missing `gio` explicitly skips this scenario. The GLib
+  launcher must directly launch the observed Foot process with matching PID metadata;
+  wrappers, delegated server processes, or missing/contradictory metadata fail conservatively.
+  No full desktop environment is required. Fixture paths containing `%` or control
+  characters are refused because the fixture deliberately avoids desktop field codes.
 
 Firefox uses private profiles/HOME/XDG directories and no normal profile. Browser directories
 are retained and reported on success and failure: remove them manually only after all their
@@ -161,7 +188,8 @@ available applications stop the suite.
 Cleanup is an explicit success phase, never a failure handler. Each exact-ID close requires
 fresh independent ownership, event-history, state, and hierarchy evidence. Selectors alone
 are insufficient; Firefox and repeated-ID Foot additionally require literal process-argument
-evidence. Failure stops subsequent scenarios and closes, leaving remaining windows alone.
+evidence, and the desktop-launcher case requires both Foot argv and launcher metadata.
+Failure stops subsequent scenarios and closes, leaving remaining windows alone.
 Read reported container IDs, selectors, PIDs, and retained paths before manual intervention;
 diagnostic candidates do not imply ownership. Rules, gaps, minimum sizes, desktop activity,
 or version differences can explain conservative failures.

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use crate::capture::{executable_capture, verify_capture, verify_inferred_capture};
+use crate::capture::{
+    executable_capture, verify_capture, verify_desktop_launcher_capture, verify_inferred_capture,
+};
 use crate::ipc::{IPC_TIMEOUT, Swaymsg, TreeNode, validate_restoration_name, workspace_number};
 use crate::layout::{
     Shape, Signature, class, is_window, observed_identifier, outline, remove_from_shape, shape,
@@ -30,9 +32,9 @@ use crate::ownership::{
 use crate::preservation::ForeignWindows;
 use crate::process;
 use crate::scenarios::{
-    ConfiguredNode, OptionalApplications, Scenario, configuration_yaml,
-    configure_process_execution, extended_scenarios, foreign_fixture_scenario, prepare_extended,
-    standard_scenarios,
+    ConfiguredNode, Extension, OptionalApplications, Scenario, configuration_yaml,
+    configure_desktop_launcher, configure_process_execution, extended_scenarios,
+    foreign_fixture_scenario, prepare_extended, standard_scenarios,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -55,7 +57,7 @@ pub struct Arguments {
     foreign_workspace: String,
     #[arg(
         long,
-        help = "Also test Firefox, Xterm/Xwayland, and duplicate Foot app IDs"
+        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, and desktop launcher replay"
     )]
     extended: bool,
     #[arg(
@@ -374,6 +376,9 @@ impl Harness {
             println!("SKIP  {name:19} {reason}");
             return Ok(());
         }
+        if scenario.extension == Some(Extension::DesktopLauncher) {
+            configure_desktop_launcher(scenario, &directory.path)?;
+        }
 
         self.stage = format!("{name}: check");
         directory.write(name, &configuration_yaml(scenario))?;
@@ -519,9 +524,13 @@ impl Harness {
                 "check filled capture",
             )?;
 
+            let mut inferred_replay = None;
             if matches!(
                 name,
-                "single-window" | "horizontal-pair" | "duplicate-foot-ids"
+                "single-window"
+                    | "horizontal-pair"
+                    | "duplicate-foot-ids"
+                    | "desktop-launcher-roundtrip"
             ) {
                 self.stage = format!("{cycle_name}: inferred capture");
                 let mut capture = Command::new(&self.binary);
@@ -531,10 +540,27 @@ impl Harness {
                 let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
                 foreign.verify(&after_inferred)?;
                 verify_unchanged(&after_inferred, target.id, progress, &before_capture)?;
-                verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
+                if name == "desktop-launcher-roundtrip" {
+                    let fixture = progress.scenario.layout.leaves()[0]
+                        .desktop_launcher
+                        .as_ref()
+                        .expect("prepared desktop fixture");
+                    verify_desktop_launcher_capture(&inferred, &draft, fixture)?;
+                    if !replay_cycle {
+                        inferred_replay = Some(inferred);
+                    }
+                } else {
+                    verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
+                }
             }
 
-            let replay = if name == "capture-reload-roundtrip" && !replay_cycle {
+            let replay = if let Some(inferred) = inferred_replay {
+                self.stage = format!("{cycle_name}: save inferred replay");
+                // This fixture has one root window, so no measured weights need copying
+                // into the independent model. Save the actual, fully verified YAML.
+                directory.write("replay", &inferred)?;
+                Some(progress.scenario.clone())
+            } else if name == "capture-reload-roundtrip" && !replay_cycle {
                 self.stage = format!("{cycle_name}: executable capture check");
                 let (yaml, replay) = executable_capture(&draft, &progress.scenario, &measurements)?;
                 directory.write("replay", &yaml)?;
@@ -577,6 +603,9 @@ impl Harness {
                 // Reached only after exact-ID cleanup, a synchronized empty tree, and
                 // foreign preservation. Any earlier error returns without another launch.
                 self.stage = format!("{cycle_name}: prepare replay");
+                if name == "desktop-launcher-roundtrip" {
+                    check_configuration(&self.binary, &directory.path, "replay", &self.stage)?;
+                }
                 progress.prepare_replay(&cleaned, &foreign, replay, &mut retired_ids)?;
                 previous_foreign = Some(foreign);
                 replay_cycle = true;
@@ -588,6 +617,8 @@ impl Harness {
         self.passed += 1;
         let coverage = if name == "occupied-workspace-refusal" {
             "hierarchy, sizing, focus, identity, capture, occupied refusal"
+        } else if name == "desktop-launcher-roundtrip" {
+            "hierarchy, focus, ownership, GLib provenance, inferred capture/reload"
         } else if name == "capture-reload-roundtrip" {
             "hierarchy, sizing, focus, identity, capture/reload round-trip"
         } else if matches!(

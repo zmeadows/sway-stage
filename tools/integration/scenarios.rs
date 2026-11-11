@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{self, DirBuilder, File};
-use std::os::unix::fs::DirBuilderExt;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{self, Path, PathBuf};
 use std::process::Command;
 
@@ -106,8 +107,17 @@ pub struct ConfiguredWindow {
     /// Optional YAML cwd, kept relative to exercise resolution against the layout file.
     pub cwd: Option<String>,
     /// The selector alone cannot attribute the window to this launch, so ownership also
-    /// requires Sway's PID to show this command's literal arguments.
+    /// requires Sway's PID to show the expected application's literal arguments.
     pub requires_process_evidence: bool,
+    /// Independent fixture evidence when the loader command starts an intermediary.
+    pub desktop_launcher: Option<DesktopLauncher>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DesktopLauncher {
+    pub path: PathBuf,
+    pub contents: String,
+    pub foot_command: Vec<String>,
 }
 
 impl ConfiguredNode {
@@ -171,6 +181,8 @@ pub enum Extension {
     Xterm,
     /// Foot windows share one app ID, distinguished only by launch arguments.
     DuplicateFootIds,
+    /// Private GLib launcher captured and reloaded without editing its inferred command.
+    DesktopLauncher,
 }
 
 /// The Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
@@ -305,8 +317,8 @@ pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenar
     scenario
 }
 
-/// The four optional scenarios, each to be passed to `prepare_extended` immediately before
-/// it runs. Until then, Firefox and Xterm leaves are ordinary Foot windows.
+/// The five optional scenarios, each to be passed to `prepare_extended` immediately before
+/// it runs. Until then, Firefox, Xterm, and desktop-launcher leaves are ordinary Foot windows.
 pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use SplitAxis::{Horizontal, Vertical};
 
@@ -345,13 +357,21 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             "window2",
             Extension::DuplicateFootIds,
         ),
+        (
+            "desktop-launcher-roundtrip",
+            window(1, 1),
+            "window1",
+            Extension::DesktopLauncher,
+        ),
     ];
 
     let mut scenarios = Vec::new();
     for (name, layout, focus, extension) in layouts {
         let window_timeout_ms = match extension {
             Extension::Firefox => FIREFOX_TIMEOUT_MS,
-            Extension::Xterm | Extension::DuplicateFootIds => WINDOW_TIMEOUT_MS,
+            Extension::Xterm | Extension::DuplicateFootIds | Extension::DesktopLauncher => {
+                WINDOW_TIMEOUT_MS
+            }
         };
         let mut scenario = Scenario {
             name,
@@ -366,7 +386,7 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             Extension::DuplicateFootIds => {
                 use_shared_foot_app_id(&mut scenario, run_id, foot, sleep)
             }
-            Extension::Firefox | Extension::Xterm => {
+            Extension::Firefox | Extension::Xterm | Extension::DesktopLauncher => {
                 use_unique_foot_windows(&mut scenario, run_id, foot, sleep)
             }
         }
@@ -386,6 +406,7 @@ fn window(number: u32, weight: u32) -> ConfiguredNode {
         env: Vec::new(),
         cwd: None,
         requires_process_evidence: false,
+        desktop_launcher: None,
     })
 }
 
@@ -442,6 +463,7 @@ pub struct OptionalApplications {
     /// An exact native app ID to expect instead of the installation's `RemotingName`.
     firefox_app_id_override: Option<String>,
     xterm: Option<PathBuf>,
+    gio: Option<PathBuf>,
 }
 
 impl OptionalApplications {
@@ -452,6 +474,7 @@ impl OptionalApplications {
             firefox,
             firefox_app_id_override,
             xterm: process::find_on_path("xterm"),
+            gio: process::find_on_path("gio"),
         }
     }
 }
@@ -474,7 +497,7 @@ pub fn prepare_extended(
         return Ok(());
     };
 
-    // Firefox and repeated Foot app IDs need process arguments as ownership evidence.
+    // All extensions except Xterm need independent process evidence.
     let needs_process_evidence = extension != Extension::Xterm;
     if needs_process_evidence && File::open("/proc/self/cmdline").is_err() {
         scenario.skip =
@@ -534,7 +557,69 @@ pub fn prepare_extended(
         }
         // Configured with the scenario: it needs nothing beyond Foot and /proc.
         Extension::DuplicateFootIds => Ok(()),
+        Extension::DesktopLauncher => {
+            if applications.gio.is_none() {
+                scenario.skip = Some("gio is not installed".into());
+            }
+            Ok(())
+        }
     }
+}
+
+/// Create only our private fixture, leaving desktop entry interpretation to GLib.
+pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> Result<(), String> {
+    let leaf = scenario.layout.first_leaf_mut();
+    let foot_command = leaf.command.clone();
+    if foot_command
+        .first()
+        .is_none_or(|program| program.contains('='))
+    {
+        return Err("desktop fixture executable cannot contain an equal sign".into());
+    }
+    let arguments = foot_command
+        .iter()
+        .map(|argument| desktop_exec_argument(argument))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contents = format!(
+        "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={}\nTerminal=false\n",
+        arguments.join(" ")
+    );
+    let path = directory.join("private launcher.desktop");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| format!("create private desktop fixture: {error}"))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|error| format!("write private desktop fixture: {error}"))?;
+
+    leaf.command = vec!["gio".into(), "launch".into(), utf8(&path)?.into()];
+    leaf.requires_process_evidence = true;
+    leaf.desktop_launcher = Some(DesktopLauncher {
+        path,
+        contents,
+        foot_command,
+    });
+    Ok(())
+}
+
+fn desktop_exec_argument(argument: &str) -> Result<String, String> {
+    // Field codes inside quoted arguments are undefined. Refuse such unusual fixture
+    // paths, and control characters, instead of expanding the fixture's quoting scope.
+    if argument.contains('%') || argument.chars().any(char::is_control) {
+        return Err("desktop fixture argument contains unsupported characters".into());
+    }
+    let mut quoted = String::from("\"");
+    for character in argument.chars() {
+        if matches!(character, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    // The desktop string-value escape layer is decoded before Exec argument quoting.
+    Ok(quoted.replace('\\', "\\\\"))
 }
 
 /// Makes `leaf` a native Wayland Firefox window whose profile, HOME, and XDG directories

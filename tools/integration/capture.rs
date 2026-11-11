@@ -4,7 +4,8 @@
 //! only command argument scalars use YAML decoding. A format change fails visibly, and
 //! `check` on the filled draft supplies authoritative syntax and semantic validation.
 //! Recovered command arguments from
-//! `--infer-commands` stay in memory: they never appear in messages or files.
+//! `--infer-commands` never appear in messages. Only a verified private fixture
+//! command is saved for the desktop-launcher replay.
 
 use crate::layout::LayoutMeasurements;
 use crate::scenarios::{ConfiguredNode, Scenario, Selector, expected_draft, json_sequence};
@@ -201,6 +202,65 @@ pub fn verify_inferred_capture(
     default_draft: &str,
     layout: &ConfiguredNode,
 ) -> Result<(), String> {
+    let commands = inferred_commands(inferred_draft, default_draft)?;
+
+    let leaves = layout.leaves();
+    if commands.len() != leaves.len() {
+        return Err("inferred command count differs".into());
+    }
+    for (arguments, leaf) in commands.iter().zip(&leaves) {
+        let Selector::AppId(app_id) = &leaf.selector else {
+            return Err(format!(
+                "inferred command checks need an app ID selector: {}",
+                leaf.layout_id
+            ));
+        };
+        if option_values(arguments, "--app-id") != [app_id.as_str()] {
+            return Err(format!(
+                "inferred command does not identify the correct Foot window: {}",
+                leaf.layout_id
+            ));
+        }
+        let shared_selector = leaves
+            .iter()
+            .filter(|other| other.selector == leaf.selector)
+            .count()
+            > 1;
+        if shared_selector {
+            let expected_titles = option_values(&leaf.command, "--title");
+            let titles = option_values(arguments, "--title");
+            if expected_titles.len() != 1 || titles != expected_titles {
+                return Err(format!(
+                    "inferred command has incorrect instance title: {}",
+                    leaf.layout_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only this single-window fixture accepts a launcher intermediary. Its expected path
+/// comes from fixture creation, independently of both captured YAML and process metadata.
+pub fn verify_desktop_launcher_capture(
+    inferred_draft: &str,
+    default_draft: &str,
+    fixture: &crate::scenarios::DesktopLauncher,
+) -> Result<(), String> {
+    let commands = inferred_commands(inferred_draft, default_draft)?;
+    let path = fixture.path.to_str().ok_or("non-UTF-8 fixture path")?;
+    if commands != [vec!["gio".to_owned(), "launch".to_owned(), path.to_owned()]] {
+        return Err("inferred command does not identify the private desktop fixture".into());
+    }
+    Ok(())
+}
+
+/// Parse command arrays and prove that normalizing only those arrays reproduces the
+/// verified ordinary draft. No recovered arguments enter diagnostics.
+fn inferred_commands(
+    inferred_draft: &str,
+    default_draft: &str,
+) -> Result<Vec<Vec<String>>, String> {
     let lines = capture_lines(inferred_draft);
     let mut normalized_lines = Vec::new();
     let mut commands: Vec<Vec<String>> = Vec::new();
@@ -247,40 +307,7 @@ pub fn verify_inferred_capture(
         );
     }
 
-    let leaves = layout.leaves();
-    if commands.len() != leaves.len() {
-        return Err("inferred command count differs".into());
-    }
-    for (arguments, leaf) in commands.iter().zip(&leaves) {
-        let Selector::AppId(app_id) = &leaf.selector else {
-            return Err(format!(
-                "inferred command checks need an app ID selector: {}",
-                leaf.layout_id
-            ));
-        };
-        if option_values(arguments, "--app-id") != [app_id.as_str()] {
-            return Err(format!(
-                "inferred command does not identify the correct Foot window: {}",
-                leaf.layout_id
-            ));
-        }
-        let shared_selector = leaves
-            .iter()
-            .filter(|other| other.selector == leaf.selector)
-            .count()
-            > 1;
-        if shared_selector {
-            let expected_titles = option_values(&leaf.command, "--title");
-            let titles = option_values(arguments, "--title");
-            if expected_titles.len() != 1 || titles != expected_titles {
-                return Err(format!(
-                    "inferred command has incorrect instance title: {}",
-                    leaf.layout_id
-                ));
-            }
-        }
-    }
-    Ok(())
+    Ok(commands)
 }
 
 /// Compare complete option arguments, accepting Foot's combined and paired forms.

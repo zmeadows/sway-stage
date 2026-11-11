@@ -136,6 +136,13 @@ fn extended_scenarios_keep_their_structures_timeouts_and_extensions() {
             20_000,
             Some(Extension::DuplicateFootIds),
         ),
+        (
+            "desktop-launcher-roundtrip",
+            "window1",
+            "window1",
+            20_000,
+            Some(Extension::DesktopLauncher),
+        ),
     ];
     let expected: Vec<_> = expected
         .into_iter()
@@ -220,6 +227,7 @@ fn preparation_leaves_standard_and_duplicate_scenarios_runnable() {
         firefox: None,
         firefox_app_id_override: None,
         xterm: None,
+        gio: None,
     };
     let mut retained_profiles = Vec::new();
     for name in ["horizontal-pair", "duplicate-foot-ids"] {
@@ -446,6 +454,67 @@ impl Drop for ScratchDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn desktop_fixture_is_private_literal_and_requires_independent_process_evidence() {
+    let scratch = ScratchDirectory::new("desktop-launcher");
+    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
+    let foot_command = scenario.layout.leaves()[0].command.clone();
+    configure_desktop_launcher(&mut scenario, &scratch.0).unwrap();
+    let leaf = scenario.layout.leaves()[0];
+    let fixture = leaf.desktop_launcher.as_ref().unwrap();
+    assert!(fixture.path.is_absolute());
+    assert!(fixture.path.starts_with(&scratch.0));
+    assert_eq!(fixture.foot_command, foot_command);
+    assert_eq!(
+        leaf.command,
+        ["gio", "launch", fixture.path.to_str().unwrap()]
+    );
+    assert!(leaf.requires_process_evidence);
+    assert_eq!(fs::read_to_string(&fixture.path).unwrap(), fixture.contents);
+    assert_eq!(
+        fs::metadata(&fixture.path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let exec = foot_command
+        .iter()
+        .map(|argument| format!("\"{argument}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        fixture.contents,
+        format!(
+            "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={exec}\nTerminal=false\n"
+        )
+    );
+    assert!(configure_desktop_launcher(&mut scenario, &scratch.0).is_err());
+}
+
+#[test]
+fn desktop_exec_quoting_applies_both_escape_layers_without_shell_evaluation() {
+    assert_eq!(desktop_exec_argument("two words").unwrap(), "\"two words\"");
+    assert_eq!(
+        desktop_exec_argument("a\"$`\\b").unwrap(),
+        r#""a\\"\\$\\`\\\\b""#
+    );
+    for unsupported in ["%f", "line\nbreak", "nul\0", "tab\t"] {
+        assert!(desktop_exec_argument(unsupported).is_err());
+    }
+}
+
+#[test]
+fn desktop_scenario_explicitly_skips_without_gio() {
+    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
+    let applications = OptionalApplications {
+        firefox: None,
+        firefox_app_id_override: None,
+        xterm: None,
+        gio: None,
+    };
+    prepare_extended(&mut scenario, RUN_ID, SLEEP, &applications, &mut Vec::new()).unwrap();
+    assert_eq!(scenario.skip.as_deref(), Some("gio is not installed"));
+    assert!(scenario.layout.leaves()[0].desktop_launcher.is_none());
 }
 
 /// An installation like Debian's: a `bin` symlink to the executable beside its metadata.

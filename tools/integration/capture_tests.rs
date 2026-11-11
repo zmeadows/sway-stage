@@ -333,6 +333,37 @@ fn inferred_capture_needs_one_command_per_window() {
 }
 
 #[test]
+fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() {
+    let scenario = crate::fixtures::extended_scenario("desktop-launcher-roundtrip");
+    let fixture = crate::scenarios::DesktopLauncher {
+        path: "/private/test launcher.desktop".into(),
+        contents: "independent fixture".into(),
+        foot_command: scenario.layout.leaves()[0].command.clone(),
+    };
+    let default = expected_draft(&scenario, &BTreeMap::new()).unwrap();
+    let inferred = default.replace(
+        "command: null",
+        "command:\n    - gio\n    - launch\n    - /private/test launcher.desktop",
+    );
+    verify_desktop_launcher_capture(&inferred, &default, &fixture).unwrap();
+    // Preserve the existing Foot-only assertion: gio argv cannot satisfy it.
+    assert!(verify_inferred_capture(&inferred, &default, &scenario.layout).is_err());
+    for bad in [
+        inferred.replace("- gio", "- gtk-launch"),
+        inferred.replace("- launch", "- open"),
+        inferred.replace("test launcher.desktop", "different.desktop"),
+        inferred.replace("    - launch\n", ""),
+        inferred.replace("  match:", "    - secret\n  match:"),
+        inferred.replace("focus: window1", "focus: window2"),
+        inferred.replace("id: window1", "id: other"),
+        default.clone(),
+    ] {
+        let error = verify_desktop_launcher_capture(&bad, &default, &fixture).unwrap_err();
+        assert!(!error.contains("secret") && !error.contains("/private"));
+    }
+}
+
+#[test]
 fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
     let mut scenario = standard_scenario("horizontal-pair");
     scenario.layout.first_leaf_mut().command.extend([

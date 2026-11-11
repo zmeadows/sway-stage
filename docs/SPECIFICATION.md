@@ -205,23 +205,50 @@ Runtime-only sandboxes, malformed/ambiguous metadata, invalid identity fields, a
 access errors leave `command: null`; sandbox-internal argv is never used in these cases.
 Identity fields use a conservative ASCII subset; unsupported key-file escapes are rejected.
 
-Only when `.flatpak-info` is missing does inference read `/proc/PID/cmdline`: at most
-64 KiB per window, requiring valid UTF-8, a nonempty executable, and NUL-terminated arguments.
-Argument boundaries, embedded spaces, and empty arguments are preserved. Unavailable or
-malformed data leaves that window's command null without failing capture or extra warnings.
-No parent/process-name searches or environment capture are attempted. Flatpak inference
-recovers a conventional host launch, not the original installation, permission overrides,
-application arguments, or session. In particular, metadata `extra-args` describes sandbox
-options, not the application's argv, and is ignored. Flatpak must be available on host `PATH`.
+Only when `.flatpak-info` is missing does inference inspect `/proc/PID/environ` for GLib's
+`GIO_LAUNCHED_DESKTOP_FILE` and `GIO_LAUNCHED_DESKTOP_FILE_PID`. Reads are bounded to 64 KiB
+and require complete NUL-separated entries. Only these two variables are extracted;
+unrelated values, including non-UTF-8 bytes, are ignored and no environment mapping is copied into
+the draft or diagnostics. The recorded positive process PID must exactly match the window
+PID supplied by Sway. The launcher path must be valid UTF-8, absolute, end in `.desktop`,
+and refer to a readable, nonempty regular file. Verified metadata produces the host command
+`[gio, launch, /absolute/path/to/application.desktop]`, preserving the path as one argument,
+including spaces and private launchers outside XDG application directories. `gio` must be
+available on the host `PATH`. GLib interprets the launcher; sway-stage does not parse `Exec`,
+expand field codes, or reproduce terminal, working-directory, or D-Bus activation semantics.
+
+A different valid recorded PID indicates inherited metadata, which is ignored. Absent
+launcher fields or inherited metadata permit ordinary `/proc/PID/cmdline` inference.
+Duplicate identity fields, missing/malformed PIDs, and matching-PID metadata with a missing
+or unusable launcher leave `command: null`; they never silently fall back to argv.
+Inaccessible, oversized, or incomplete environment reads also leave the command unresolved.
+Valid Flatpak metadata takes precedence over GLib metadata, including inherited fields;
+unusable Flatpak metadata still suppresses both launcher and argv fallback.
+
+Ordinary cmdline reads are bounded to 64 KiB per window, requiring valid UTF-8, a nonempty
+executable, and NUL-terminated arguments. Argument boundaries, embedded spaces, and empty
+arguments are preserved. Unavailable or malformed process data leaves that window's command
+null without failing capture or extra warnings. No ancestor searches or application-name,
+executable-name, title, or app-ID heuristics identify launchers. Flatpak inference recovers
+a conventional host launch, not the original installation, permission overrides, application
+arguments, or session. Metadata `extra-args` describes sandbox options, not the application's
+argv, and is ignored. Flatpak must be available on host `PATH`.
 
 The metadata layout and reference selection follow Flatpak's
 [metadata documentation](https://github.com/flatpak/flatpak/blob/main/doc/flatpak-metadata.xml),
 [metadata writer](https://github.com/flatpak/flatpak/blob/main/common/flatpak-run.c), and
 [run command documentation](https://github.com/flatpak/flatpak/blob/main/doc/flatpak-run.xml).
+GLib launcher identity follows its
+[launch documentation](https://docs.gtk.org/gio/vfunc.AppInfo.launch.html);
+[`gio launch`](https://manpages.debian.org/testing/libglib2.0-bin/gio.1.en.html)
+accepts a desktop-file path from any location.
 
 **Review inferred commands before executing or sharing.** They may contain secrets and may
 not reproduce the application. Process exit, PID reuse, or argument changes can race with
-inference; it is best-effort, with no second process-identity check. Inferred arguments stay
+inference; it is best-effort, with no second process-identity check. Launcher files may change
+or disappear, and their validity and behavior are not established by checking the path.
+Launcher reconstruction does not recover original file/URL arguments or application state.
+Review the referenced launcher as well as the recovered command. Inferred arguments stay
 out of diagnostics and logs, appearing only in the draft sent to stdout or explicitly saved
 through the menu. Fill all remaining null placeholders and run `check` before loading.
 

@@ -3,10 +3,12 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 
 // A modest per-window bound; read one extra byte to detect truncation.
 const MAX_CMDLINE_BYTES: usize = 64 * 1024;
 const MAX_FLATPAK_INFO_BYTES: usize = 64 * 1024;
+const MAX_ENVIRON_BYTES: usize = 64 * 1024;
 
 /// An inaccessible or vanished process is an ordinary inference miss, never a capture
 /// error. Neither I/O errors nor argument contents escape this boundary into diagnostics.
@@ -17,20 +19,120 @@ pub fn read_process_command(pid: i32) -> Option<Vec<String>> {
 
     let metadata = File::open(format!("/proc/{pid}/root/.flatpak-info"));
     infer_process_command(metadata, || {
-        let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
-        read_command_line(file)
+        let environment = File::open(format!("/proc/{pid}/environ"));
+        infer_host_command(pid, environment, || {
+            let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
+            read_command_line(file)
+        })
     })
+}
+
+#[derive(Debug, PartialEq)]
+enum LauncherEvidence {
+    Absent,
+    Command(Vec<String>),
+    Unresolved,
+}
+
+fn infer_host_command(
+    pid: i32,
+    environment: io::Result<impl Read>,
+    read_cmdline: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    // Failed or incomplete reads cannot establish that launcher evidence is absent.
+    let reader = environment.ok()?;
+    match read_desktop_launcher(reader, pid) {
+        LauncherEvidence::Absent => read_cmdline(),
+        LauncherEvidence::Command(command) => Some(command),
+        LauncherEvidence::Unresolved => None,
+    }
+}
+
+fn read_desktop_launcher(reader: impl Read, pid: i32) -> LauncherEvidence {
+    let mut bytes = Vec::new();
+    if reader
+        .take(MAX_ENVIRON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_ENVIRON_BYTES
+        || (!bytes.is_empty() && bytes.last() != Some(&0))
+    {
+        return LauncherEvidence::Unresolved;
+    }
+
+    desktop_launcher(&bytes, pid)
+}
+
+/// GLib's PID field distinguishes a direct launch from metadata inherited by children.
+/// Only these two fields are decoded; unrelated environment bytes remain opaque and
+/// neither environment contents nor I/O errors leave the inference boundary.
+fn desktop_launcher(environment: &[u8], pid: i32) -> LauncherEvidence {
+    let mut desktop_file = None;
+    let mut launched_pid = None;
+    for entry in environment.split(|byte| *byte == 0) {
+        let separator = entry.iter().position(|byte| *byte == b'=');
+        let key = separator.map_or(entry, |position| &entry[..position]);
+        let destination = match key {
+            b"GIO_LAUNCHED_DESKTOP_FILE" => &mut desktop_file,
+            b"GIO_LAUNCHED_DESKTOP_FILE_PID" => &mut launched_pid,
+            _ => continue,
+        };
+        let Some(separator) = separator else {
+            return LauncherEvidence::Unresolved;
+        };
+        if destination.replace(&entry[separator + 1..]).is_some() {
+            return LauncherEvidence::Unresolved;
+        }
+    }
+
+    if desktop_file.is_none() && launched_pid.is_none() {
+        return LauncherEvidence::Absent;
+    }
+    let Some(recorded_pid) = launched_pid
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
+    else {
+        return LauncherEvidence::Unresolved;
+    };
+    if recorded_pid != pid {
+        return LauncherEvidence::Absent;
+    }
+
+    let Some(desktop_file) = desktop_file.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
+        return LauncherEvidence::Unresolved;
+    };
+    let path = Path::new(desktop_file);
+    if !path.is_absolute()
+        || path
+            .extension()
+            .is_none_or(|extension| extension != "desktop")
+        || !path.metadata().is_ok_and(|metadata| metadata.is_file())
+    {
+        return LauncherEvidence::Unresolved;
+    }
+    // Opening verifies readability without interpreting Exec or any other desktop keys.
+    // Recheck the opened file too, since the path can change between filesystem calls.
+    let usable = File::open(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
+    if !usable {
+        return LauncherEvidence::Unresolved;
+    }
+
+    LauncherEvidence::Command(vec!["gio".into(), "launch".into(), desktop_file.into()])
 }
 
 pub(super) fn infer_process_command(
     metadata: io::Result<impl Read>,
-    read_cmdline: impl FnOnce() -> Option<Vec<String>>,
+    read_host_command: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
     match metadata {
         Ok(reader) => read_flatpak_command(reader),
-        // Only absence permits host argv inference. Permission and other errors leave
+        // Only absence permits host launcher/argv inference. Other errors leave
         // identity uncertain; copying sandbox argv then could produce an unusable command.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => read_cmdline(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => read_host_command(),
         Err(_) => None,
     }
 }
