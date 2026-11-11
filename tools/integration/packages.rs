@@ -368,7 +368,7 @@ enum PackageEvidence {
     AppImage {
         image: String,
         appdir: PathBuf,
-        mounts: String,
+        mount: String,
     },
     Flatpak {
         metadata: String,
@@ -433,7 +433,7 @@ impl Ownership {
                 }
                 let appdir = fs::canonicalize(appdir).map_err(|_| "cannot resolve APPDIR mount")?;
                 let mounts = read_text(&proc_path.join("mountinfo"))?;
-                validate_image_mount(image, &appdir, &self.executable, &mounts)?;
+                let mount = validate_image_mount(image, &appdir, &self.executable, &mounts)?;
                 if file_identity(&appdir)?.device != self.executable_identity.device {
                     return Err(
                         "AppImage executable is on a different filesystem than APPDIR".into(),
@@ -450,7 +450,7 @@ impl Ownership {
                     PackageEvidence::AppImage {
                         image: observed_image,
                         appdir,
-                        mounts,
+                        mount,
                     },
                     vec![image_text.into()],
                 ))
@@ -581,12 +581,14 @@ fn environment_field(environment: &[u8], key: &str) -> Result<String, String> {
     Ok(text.into())
 }
 
+/// Retain only the unique APPDIR record. A mount covering the executable below APPDIR
+/// makes membership ambiguous, even if it happens to expose the same device.
 fn validate_image_mount(
     image: &Path,
     appdir: &Path,
     executable: &Path,
     mounts: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if image.starts_with(appdir)
         || executable == appdir
         || !executable.starts_with(appdir)
@@ -594,39 +596,67 @@ fn validate_image_mount(
     {
         return Err("AppImage executable is not within its independent APPDIR mount".into());
     }
-    let mut matching_mounts = 0;
+
+    let mut image_mount = None;
     for line in mounts.lines() {
-        let Some((mount, filesystem)) = line.split_once(" - ") else {
-            continue;
-        };
+        // Parse every record before filtering: malformed evidence cannot safely establish
+        // that a mount is unrelated to APPDIR or the executable.
+        let (mount, filesystem) = line.split_once(" - ").ok_or("malformed mount evidence")?;
         let mount_fields: Vec<_> = mount.split_whitespace().collect();
-        let filesystem_type = filesystem.split_whitespace().next().unwrap_or("");
-        if mount_fields.len() >= 6 && decode_mount_path(mount_fields[4]) == appdir {
+        let filesystem_fields: Vec<_> = filesystem.split_whitespace().collect();
+        if mount_fields.len() < 6 || filesystem_fields.len() != 3 {
+            return Err("malformed mount evidence".into());
+        }
+        let device = mount_fields[2]
+            .split_once(':')
+            .ok_or("malformed mount device")?;
+        for number in [mount_fields[0], mount_fields[1], device.0, device.1] {
+            if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("malformed mount identity".into());
+            }
+        }
+        let root = decode_mount_path(mount_fields[3])?;
+        let mountpoint = decode_mount_path(mount_fields[4])?;
+        if !root.is_absolute() || !mountpoint.is_absolute() {
+            return Err("mount evidence contains a relative path".into());
+        }
+
+        if mountpoint == appdir {
+            let filesystem_type = filesystem_fields[0];
             if !(filesystem_type.starts_with("fuse.")
                 || ["squashfs", "iso9660"].contains(&filesystem_type))
             {
                 return Err("APPDIR is not a supported image filesystem mount".into());
             }
-            matching_mounts += 1;
+            if image_mount.replace(line.to_owned()).is_some() {
+                return Err("APPDIR lacks unique AppImage mount evidence".into());
+            }
+        } else if mountpoint.starts_with(appdir) && executable.starts_with(&mountpoint) {
+            return Err("another mount obscures the AppImage executable".into());
         }
     }
-    if matching_mounts != 1 {
-        return Err("APPDIR lacks unique AppImage mount evidence".into());
-    }
-    Ok(())
+
+    image_mount.ok_or_else(|| "APPDIR lacks unique AppImage mount evidence".into())
 }
 
-fn decode_mount_path(path: &str) -> PathBuf {
-    let mut decoded = path.to_owned();
-    for (escaped, literal) in [
-        ("\\040", " "),
-        ("\\011", "\t"),
-        ("\\012", "\n"),
-        ("\\134", "\\"),
-    ] {
-        decoded = decoded.replace(escaped, literal);
+fn decode_mount_path(path: &str) -> Result<PathBuf, String> {
+    let mut decoded = String::new();
+    let mut characters = path.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escape: String = characters.by_ref().take(3).collect();
+        decoded.push(match escape.as_str() {
+            "040" => ' ',
+            "011" => '\t',
+            "012" => '\n',
+            "134" => '\\',
+            _ => return Err("malformed mount path escape".into()),
+        });
     }
-    PathBuf::from(decoded)
+    Ok(PathBuf::from(decoded))
 }
 
 /// Read the running sandbox's key file only as corroboration. Expected argv comes from

@@ -203,7 +203,7 @@ fn appimage_metadata_needs_mount_and_executable_evidence() {
         );
     }
     assert_eq!(
-        decode_mount_path("/tmp/mount\\040with\\134slash"),
+        decode_mount_path("/tmp/mount\\040with\\134slash").unwrap(),
         PathBuf::from("/tmp/mount with\\slash")
     );
     assert_eq!(
@@ -217,6 +217,59 @@ fn appimage_metadata_needs_mount_and_executable_evidence() {
         b"APPIMAGE=a",
     ] {
         assert!(environment_field(bad, "APPIMAGE").is_err());
+    }
+}
+
+#[test]
+fn appimage_revalidation_ignores_unrelated_mount_changes() {
+    let image_mount = "31 20 0:55 / /tmp/.mount_App rw - fuse.AppImage AppImage rw";
+    let evidence = |mounts: &str| {
+        validate_image_mount(
+            Path::new("/apps/AppImage"),
+            Path::new("/tmp/.mount_App"),
+            Path::new("/tmp/.mount_App/usr/bin/app"),
+            mounts,
+        )
+        .map(|mount| PackageEvidence::AppImage {
+            image: "/apps/AppImage".into(),
+            appdir: "/tmp/.mount_App".into(),
+            mount,
+        })
+    };
+    let original = evidence(image_mount).unwrap();
+    for unrelated in [
+        "",
+        "40 20 0:60 / /media/disk rw - ext4 /dev/sdb rw\n",
+        "41 20 0:61 / /tmp/.mount_Other rw - fuse.AppImage Other rw\n",
+        "42 31 0:62 / /tmp/.mount_App/share rw - tmpfs tmpfs rw\n",
+    ] {
+        assert!(evidence(&format!("{unrelated}{image_mount}\n")).unwrap() == original);
+    }
+
+    for changed in [
+        image_mount.replace("31 20", "32 20"),
+        image_mount.replace("0:55", "0:56"),
+        image_mount.replace(" / /tmp", " /subdir /tmp"),
+        image_mount.replace("AppImage rw", "DifferentImage rw"),
+        image_mount.replace("rw -", "ro -"),
+        image_mount.replace("fuse.AppImage", "squashfs"),
+    ] {
+        assert!(evidence(&changed).unwrap() != original, "{changed}");
+    }
+    for invalid in [
+        String::new(),
+        image_mount.replace("/tmp/.mount_App", "/tmp/.mount_Other"),
+        format!("{image_mount}\n{image_mount}"),
+        format!("{image_mount}\n50 31 0:55 / /tmp/.mount_App/usr rw - tmpfs tmpfs rw"),
+        format!("{image_mount}\n50 31 0:55 / /tmp/.mount_App/usr/bin/app rw - tmpfs tmpfs rw"),
+        image_mount.replace(" - ", " "),
+        image_mount.replace("31 20", "bad 20"),
+        image_mount.replace("0:55", "bad"),
+        image_mount.replace("AppImage rw", "AppImage"),
+        image_mount.replace("/tmp/.mount_App", "/tmp/.mount_App\\999"),
+        image_mount.replace("fuse.AppImage", "ext4"),
+    ] {
+        assert!(evidence(&invalid).is_err(), "{invalid}");
     }
 }
 
