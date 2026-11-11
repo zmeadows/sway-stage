@@ -236,6 +236,41 @@ pub fn verify_inferred_capture(
     Ok(())
 }
 
+/// A dynamic package fixture has exactly one root window. Decode its arbitrary observed
+/// selector as YAML rather than assuming the simple identifiers of our Foot fixtures.
+pub fn verify_package_default_capture(draft: &str, selector: &Selector) -> Result<(), String> {
+    let actual: serde_json::Value = serde_saphyr::from_str(draft)
+        .map_err(|_| "package capture is not a valid YAML document")?;
+    let expected = serde_json::json!({
+        "version": 1,
+        "focus": "window1",
+        "layout": {
+            "id": "window1", "command": null,
+            "match": { (selector.kind()): selector.value() }
+        }
+    });
+    if actual != expected {
+        return Err(
+            "ordinary package capture differs from the independently observed window".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Package commands are derived from independently observed package evidence. Exact argv
+/// equality excludes mount/sandbox executables, extra arguments, and unresolved commands.
+pub fn verify_package_capture(
+    inferred_draft: &str,
+    default_draft: &str,
+    expected_command: &[String],
+) -> Result<(), String> {
+    let commands = inferred_commands(inferred_draft, default_draft)?;
+    if commands != [expected_command] {
+        return Err("inferred command differs from independently verified package launcher".into());
+    }
+    Ok(())
+}
+
 /// Only this single-window fixture accepts a launcher intermediary. Its expected path
 /// comes from fixture creation, independently of both captured YAML and process metadata.
 pub fn verify_desktop_launcher_capture(

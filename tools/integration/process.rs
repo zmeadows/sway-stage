@@ -180,6 +180,16 @@ fn run_bounded(
     })
 }
 
+/// Launch a package fixture without collecting long-lived output or ever killing it.
+/// The success path closes only its independently verified Sway window.
+pub fn spawn_application(mut command: Command) -> Result<Child, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    spawn(command, "package launch", false)
+}
+
 /// Starts a long-running helper whose stdout arrives on the returned blocking socket. Its
 /// stdin and stderr are null. The caller owns the child and stops it with `kill_and_reap`.
 pub fn spawn_with_output(

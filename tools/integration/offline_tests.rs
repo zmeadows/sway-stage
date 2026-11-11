@@ -18,6 +18,7 @@ mod layout;
 mod lifecycle;
 mod observation;
 mod ownership;
+mod packages;
 mod preservation;
 mod process;
 mod scenarios;

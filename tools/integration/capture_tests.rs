@@ -649,3 +649,59 @@ fn ordinary_capture_mismatches_never_echo_unexpected_arguments_or_paths() {
         assert!(!error.contains("secret") && !error.contains("token"));
     }
 }
+
+#[test]
+fn package_capture_compares_exact_host_commands_and_all_other_fields() {
+    let selector = Selector::AppId("observed: app \\\"name".into());
+    let default = format!(
+        "version: 1\nfocus: window1\nlayout:\n  id: window1\n  command: null\n  match:\n    app_id: {}\n",
+        serde_json::to_string(selector.value()).unwrap()
+    );
+    verify_package_default_capture(&default, &selector).unwrap();
+    let commands = [
+        vec!["/apps/My App.AppImage".into()],
+        vec![
+            "flatpak".into(),
+            "run".into(),
+            "--branch=beta".into(),
+            "--arch=aarch64".into(),
+            "org.example.App".into(),
+        ],
+    ];
+    for expected in commands {
+        let block = format!(
+            "command:\n{}",
+            expected
+                .iter()
+                .map(|arg| format!("    - {}\n", serde_json::to_string(arg).unwrap()))
+                .collect::<String>()
+        );
+        let inferred = default.replace("command: null\n", &block);
+        verify_package_capture(&inferred, &default, &expected).unwrap();
+        for bad in [
+            inferred.replace("window1", "window2"),
+            inferred.replace("version: 1", "version: 2"),
+            inferred.replace("app_id:", "class:"),
+            default.clone(),
+            inferred.replace(
+                &serde_json::to_string(&expected[0]).unwrap(),
+                "\"/tmp/.mount_app/bin/app\"",
+            ),
+        ] {
+            assert!(verify_package_capture(&bad, &default, &expected).is_err());
+        }
+        let mut extra = expected.clone();
+        extra.push("unexpected".into());
+        assert!(verify_package_capture(&inferred, &default, &extra).is_err());
+    }
+    assert!(
+        verify_package_default_capture(
+            &default.replace("command: null", "command: [unexpected]"),
+            &selector
+        )
+        .is_err()
+    );
+    assert!(
+        verify_package_default_capture(&default.replace("window1", "window2"), &selector).is_err()
+    );
+}

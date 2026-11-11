@@ -247,6 +247,7 @@ fn cleanup_plan_revalidates_ownership_and_calculates_the_remaining_hierarchy() {
     let preexisting = container_ids(&starting_snapshot().tree);
     let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
@@ -295,6 +296,7 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
     let preexisting = container_ids(&starting_snapshot().tree);
     let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
@@ -366,6 +368,7 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
     let preexisting = container_ids(&starting_snapshot().tree);
     let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
     let context = CleanupContext {
+        package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
@@ -773,6 +776,7 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
     let foreign = ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap();
     let target = target_identity();
     let context = CleanupContext {
+        package: None,
         target: &target,
         layout: &scenario.layout,
         preexisting_ids: &preexisting,
@@ -1002,6 +1006,7 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
     };
     let first_baseline = signature(first.focused_workspace());
     let first_context = CleanupContext {
+        package: None,
         target: &target,
         foreign: &foreign,
         layout: &scenario.layout,
@@ -1056,6 +1061,7 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
     second.tree.nodes[1].nodes[1].nodes[1].id = 41;
     let second_baseline = signature(second.focused_workspace());
     let context = CleanupContext {
+        package: None,
         target: &target,
         foreign: &foreign,
         layout: &scenario.layout,
@@ -1203,5 +1209,88 @@ fn hiding_a_launcher_refuses_unverified_or_out_of_scope_files_before_capture() {
         directory
             .with_unavailable_launcher(fixture, || panic!("unverified file"))
             .is_err()
+    );
+}
+
+#[test]
+fn package_options_are_independent_and_require_extended() {
+    let base = [
+        "integration",
+        "--workspace",
+        "9",
+        "--foreign-workspace",
+        "8",
+    ];
+    for options in [
+        vec!["--appimage", "/apps/a.AppImage"],
+        vec!["--flatpak", "org.example.App"],
+        vec![
+            "--appimage",
+            "/apps/a.AppImage",
+            "--flatpak",
+            "org.example.App",
+        ],
+    ] {
+        let mut arguments = base.to_vec();
+        arguments.extend(&options);
+        assert!(Arguments::try_parse_from(&arguments).is_err());
+        arguments.push("--extended");
+        let parsed = Arguments::try_parse_from(arguments).unwrap();
+        assert_eq!(parsed.appimage.is_some(), options.contains(&"--appimage"));
+        assert_eq!(parsed.flatpak.is_some(), options.contains(&"--flatpak"));
+    }
+    let parsed = Arguments::try_parse_from(base).unwrap();
+    assert!(parsed.appimage.is_none() && parsed.flatpak.is_none());
+    for bad in ["--flatpak", "--appimage"] {
+        let mut arguments = base.to_vec();
+        arguments.extend(["--extended", bad]);
+        assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+    let mut arguments = base.to_vec();
+    arguments.extend(["--extended", "--flatpak", "org..App"]);
+    assert!(Arguments::try_parse_from(arguments).is_err());
+}
+
+#[test]
+fn dynamic_window_identity_without_package_provenance_cannot_authorize_cleanup() {
+    let before = observed(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    let foreign = ForeignWindows::record(&before, TARGET_WORKSPACE_ID).unwrap();
+    let preexisting = container_ids(&before.tree);
+    let scenario = packages::captured_scenario(
+        packages::SCENARIOS[0],
+        crate::scenarios::Selector::AppId("actual.app".into()),
+    );
+    let loaded = observed(
+        desktop(
+            "splith",
+            vec![wayland_window(20, "actual.app", rect(0, 0, 1920, 1080))],
+            20,
+        ),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    let target = target_identity();
+    let context = CleanupContext {
+        package: None,
+        target: &target,
+        layout: &scenario.layout,
+        preexisting_ids: &preexisting,
+        foreign: &foreign,
+    };
+    let baseline = signature(loaded.focused_workspace());
+    assert_contains(
+        &uncertain_message(prepare_close(
+            &loaded,
+            &context,
+            &accepted(&[(20, "window1")]),
+            &baseline,
+            20,
+            true,
+        )),
+        "requires independent package provenance",
     );
 }
