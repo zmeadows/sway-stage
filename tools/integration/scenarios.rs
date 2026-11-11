@@ -373,6 +373,12 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             "window1",
             Extension::DesktopLauncher,
         ),
+        (
+            "unresolved-launcher",
+            window(1, 1),
+            "window1",
+            Extension::DesktopLauncher,
+        ),
     ];
 
     let mut scenarios = Vec::new();
@@ -600,7 +606,11 @@ pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> 
         "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={}\nTerminal=false\n",
         arguments.join(" ")
     );
-    let data_home = directory.join("desktop data");
+    let data_home = directory.join(if scenario.name == "unresolved-launcher" {
+        "unresolved desktop data"
+    } else {
+        "desktop data"
+    });
     let applications = data_home.join("applications");
     for private_directory in [&data_home, &applications] {
         DirBuilder::new()

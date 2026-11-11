@@ -195,9 +195,14 @@ or malformed nodes, nonpositive split-axis extents, ambiguous/absent focus, focu
 rather than a window, and layouts exceeding the format's depth/node limits. The workspace's
 own fullscreen flag is not treated as a fullscreen window.
 
-`--infer-commands` uses each saved window's actual PID. It first reads
-`/proc/PID/root/.flatpak-info` (at most 64 KiB, valid UTF-8). A valid `[Application]`
-`name` produces `[flatpak, run, APPLICATION_ID]`, with separate `--branch=...` and
+`--infer-commands` uses each saved window's actual PID. Before and after inference, it
+compares the process start time from `/proc/PID/stat` (bounded to 4 KiB) and the executable's
+path, device, and inode. Missing/malformed identity observations or observed changes leave
+`command: null`. This is not atomic verification: Sway's saved PID may already be stale,
+and same-executable execs or changes made and undone between observations can escape it.
+
+Launcher selection first reads `/proc/PID/root/.flatpak-info` (at most 64 KiB, valid UTF-8).
+A valid `[Application]` `name` produces `[flatpak, run, APPLICATION_ID]`, with separate `--branch=...` and
 `--arch=...` arguments before the ID when valid fields are present in `[Instance]`.
 These select the running reference rather than Flatpak's current default. Window matchers
 still reflect Sway's actual app ID or Xwayland class, independently of the launch command.
@@ -210,6 +215,10 @@ window, bounded to 64 KiB with complete NUL-separated entries. It extracts only 
 AppImage, and Snap fields described below. Duplicate or malformed relevant entries, and
 inaccessible, oversized, or incomplete reads leave `command: null`. Unrelated values,
 including non-UTF-8 bytes, are ignored; no environment mapping or values enter diagnostics.
+Linux exposes the [initial environment of the current executable](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html),
+which need not reflect later environment changes; access restrictions can also prevent
+inference. Missing launcher fields therefore cannot establish the application's full launch
+history.
 
 GLib inference uses `GIO_LAUNCHED_DESKTOP_FILE` and `GIO_LAUNCHED_DESKTOP_FILE_PID`.
 The recorded positive process PID must exactly match the window PID supplied by Sway.
@@ -269,6 +278,11 @@ identities permits ordinary `/proc/PID/cmdline` inference. A verified GLib launc
 therefore win even when both package types are recorded; it identifies an explicit launcher
 rather than choosing a package. Malformed/duplicate relevant environment fields fail before
 this selection.
+
+Deleted process executables cannot corroborate AppImage or Snap membership, even if a new
+file exists at the former path. Filesystem checks describe only the inspected files: a
+launcher may have been updated since launch or change again before replay. No original
+launcher contents or executable format, access policy, or future launch success is verified.
 
 Package membership cannot distinguish every helper or descendant within the same package.
 Interpreted applications whose executable is a host/base-runtime interpreter, unsupported

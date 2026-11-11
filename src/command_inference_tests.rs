@@ -1059,3 +1059,132 @@ fn flatpak_metadata_reads_are_bounded_and_fail_closed() {
         });
     }
 }
+
+fn stat_fixture(pid: &str, comm: &[u8], start_time: &str) -> Vec<u8> {
+    let mut bytes = format!("{pid} (").into_bytes();
+    bytes.extend_from_slice(comm);
+    bytes.extend_from_slice(format!(") S {} {start_time} 0 0\n", ["0"; 18].join(" ")).as_bytes());
+    bytes
+}
+
+#[test]
+fn start_time_uses_the_pid_and_field_22_after_arbitrary_comm_bytes() {
+    for comm in [b"ordinary".as_slice(), b"name ) ( space\n\xff"] {
+        for ticks in [0, 123456, u64::MAX] {
+            let stat = stat_fixture("101", comm, &ticks.to_string());
+            assert_eq!(read_start_time(stat.as_slice(), 101), Some(ticks));
+        }
+    }
+    for pid in ["0", "-1", "+101", "0101", "102", "99999999999999999999"] {
+        assert!(read_start_time(stat_fixture(pid, b"app", "1").as_slice(), 101).is_none());
+    }
+    for ticks in ["", "-1", "+1", "not-a-number", "18446744073709551616"] {
+        // No trailing fields: an absent start time must not consume a later field.
+        let stat = format!("101 (app) S {} {ticks}\n", ["0"; 18].join(" "));
+        assert!(read_start_time(stat.as_bytes(), 101).is_none());
+    }
+    for stat in [
+        b"".as_slice(),
+        b"101 app) S 0\n",
+        b"101 (app S 0\n",
+        b"101 (app) S\n",
+    ] {
+        assert!(read_start_time(stat, 101).is_none());
+    }
+    let mut truncated = stat_fixture("101", b"app", "123");
+    truncated.pop();
+    assert!(read_start_time(truncated.as_slice(), 101).is_none());
+    let mut endless = io::repeat(b'x').take(MAX_STAT_BYTES as u64 + 10);
+    assert!(read_start_time(&mut endless, 101).is_none());
+    assert_eq!(endless.limit(), 9);
+}
+
+#[test]
+fn inference_discards_commands_when_process_or_executable_identity_changes() {
+    let original = ProcessIdentity {
+        start_time_ticks: 123,
+        executable: "/application".into(),
+        executable_device: 1,
+        executable_inode: 2,
+    };
+    let mut changed_start = original.clone();
+    changed_start.start_time_ticks += 1;
+    let mut changed_executable = original.clone();
+    changed_executable.executable = "/replacement".into();
+    let mut changed_device = original.clone();
+    changed_device.executable_device += 1;
+    let mut changed_inode = original.clone();
+    changed_inode.executable_inode += 1;
+    for after in [
+        None,
+        Some(changed_start),
+        Some(changed_executable),
+        Some(changed_device),
+        Some(changed_inode),
+    ] {
+        let mut observations = [Some(original.clone()), after].into_iter();
+        let command = with_stable_process(
+            || observations.next().unwrap(),
+            || Some(vec!["application".into(), "SECRET=private".into()]),
+        );
+        assert!(command.is_none());
+    }
+    let mut observations = [Some(original.clone()), Some(original)].into_iter();
+    assert!(
+        with_stable_process(|| observations.next().unwrap(), || Some(vec!["app".into()])).is_some()
+    );
+    assert!(
+        with_stable_process(
+            || None,
+            || panic!("missing identity must not inspect metadata")
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn missing_or_malformed_process_observations_remain_silent() {
+    let fixture = DesktopFixture::new();
+    assert!(read_process_identity(&fixture.0, 101).is_none());
+    std::fs::write(fixture.0.join("stat"), b"SECRET=private\n").unwrap();
+    assert!(read_process_identity(&fixture.0, 101).is_none());
+    std::fs::write(fixture.0.join("stat"), stat_fixture("101", b"app", "123")).unwrap();
+    assert!(read_process_identity(&fixture.0, 101).is_none());
+    std::os::unix::fs::symlink(fixture.path(), fixture.0.join("exe")).unwrap();
+    assert!(read_process_identity(&fixture.0, 101).is_some());
+    std::fs::remove_file(fixture.path()).unwrap();
+    assert!(read_process_identity(&fixture.0, 101).is_none());
+}
+
+#[test]
+fn deleted_package_executables_never_corroborate_an_inherited_launch() {
+    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
+    assert!(package_inference(&snap, Some("/snap/example/42/editor (deleted)".into())).is_none());
+    let fixture = AppImageFixture::new("application");
+    // Even a replacement with this literal name cannot stand in for a deleted executable.
+    let deleted = fixture.appdir.join("application (deleted)");
+    std::fs::write(&deleted, b"replacement").unwrap();
+    assert!(package_inference(&fixture.environment(), Some(deleted)).is_none());
+}
+
+#[test]
+fn a_temporarily_unavailable_desktop_launcher_never_falls_back_to_secret_argv() {
+    let fixture = DesktopFixture::new();
+    let environment = fixture.environment("101");
+    let hidden = fixture.path().with_extension("unavailable");
+    std::fs::rename(fixture.path(), &hidden).unwrap();
+    assert!(
+        infer_host_command(
+            101,
+            Ok(environment.as_slice()),
+            || None,
+            || panic!("SECRET argv must not be used")
+        )
+        .is_none()
+    );
+    std::fs::rename(hidden, fixture.path()).unwrap();
+    assert!(matches!(
+        read_desktop_launcher(environment.as_slice(), 101),
+        LauncherEvidence::Command(_)
+    ));
+}

@@ -67,7 +67,7 @@ Run manually, one invocation at a time:
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
-| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, and desktop-launcher replay cases. |
+| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, and unresolved-command cases. |
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
@@ -77,7 +77,7 @@ groups, process execution, default final focus, occupied-workspace refusal, and 
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
 capture, and guarded cleanup.
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect eleven passes; extended runs expect sixteen when all optional prerequisites
+commands. Expect eleven passes; extended runs expect seventeen when all optional prerequisites
 exist, otherwise explicit SKIPs.
 The process-execution case uses a private relative cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
@@ -122,6 +122,27 @@ This intentionally uses a single window to keep launcher provenance focused;
 the standard round-trip scenario covers nested weights. Any uncertainty stops the case
 without speculative cleanup. The private launcher and replay YAML are removed with the
 harness's temporary files; global desktop configuration is untouched.
+
+The sixth extended case, `unresolved-launcher`, uses the same private GTK/Foot launcher
+infrastructure and prerequisites, with its own unique fixture. Exact Foot argv, matching
+GLib path/PID provenance, ordered window events, layout, focus, and foreign-window checks
+first establish ownership. The harness then renames only its private `.desktop` file within
+its private directory for one bounded `capture --infer-commands` invocation. It restores the
+same file and independently checks its inode and contents before any subsequent ownership
+check or cleanup, including when capture fails or interruption is requested. A retained
+`/proc` directory descriptor and exact process evidence before and after establish that the
+original Foot process remained present across capture without following a reused PID.
+
+The capture must exit zero, retain the default draft's selectors, IDs, hierarchy, sizing,
+and focus, and leave its single `command: null`. Stdout is checked independently of stderr,
+which must report `Commands inferred: 0; unresolved: 1. Manual editing required.` No
+speculative launcher or executable may substitute for the null. Fresh snapshots and event
+history must show unchanged desktop state and foreign windows, with no additional window
+launch. Only complete success permits normal guarded cleanup. Any scenario failure stops
+the suite without retries, window cleanup, or workspace restoration. If the private file
+cannot be restored and verified, its directory is retained and reported for manual inspection;
+all windows remain untouched. This case adds no standard-suite dependencies and requires
+neither AppImage nor Snap.
 
 For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
 the correct distinct run-specific title argument from each leaf's original launch array.
@@ -181,8 +202,8 @@ Extended prerequisites:
   skips the case; a subsequent launch or class mismatch fails it.
 - Desktop-launcher coverage needs `gtk-launch` and `gio` on `PATH` and readable
   `/proc/PID/cmdline` and `/proc/PID/environ` for Foot. Missing either launcher explicitly
-  skips this optional scenario. The initial GTK launch must directly start the observed
-  Foot process with matching PID and filename metadata; wrappers, delegated server
+  skips both optional launcher scenarios. The initial GTK launch must directly start the
+  observed Foot process with matching PID and filename metadata; wrappers, delegated server
   processes, or missing/contradictory initial metadata fail conservatively. Replay uses
   independent Foot argv and window-event evidence because older gio loses the filename.
   No full desktop environment is required. Fixture paths containing `%` or control

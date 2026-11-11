@@ -1063,3 +1063,39 @@ fn command_counts_follow_generated_leaves_independently_of_match_placeholders() 
         assert_eq!(summary, expected);
     }
 }
+
+#[test]
+fn unusable_launcher_evidence_produces_a_valid_null_draft_and_unresolved_count() {
+    let saved =
+        saved_snapshot(workspace("splith", vec![view_with_pid(20, json!(101))], 20)).unwrap();
+    let default = saved.render(false).unwrap();
+    let rendered = saved
+        .render_with(true, &mut |pid| {
+            infer_host_command(
+                pid,
+                Ok(
+                    b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0SECRET=environment-only-secret\0"
+                        .as_slice(),
+                ),
+                || panic!("known unusable launcher blocks package inference"),
+                || panic!("secret argv must not be consulted"),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        rendered.yaml,
+        default.yaml.replacen(
+            DRAFT_HEADER,
+            &format!("{DRAFT_HEADER}{INFERENCE_HEADER}"),
+            1
+        )
+    );
+    assert_eq!(rendered.commands.total, 1);
+    assert_eq!(rendered.commands.inferred, 0);
+    assert_eq!(rendered.commands.unresolved(), 1);
+    assert_eq!(
+        rendered.commands.summary(),
+        "Commands inferred: 0; unresolved: 1. Manual editing required."
+    );
+    assert!(!rendered.yaml.contains("environment-only-secret"));
+}

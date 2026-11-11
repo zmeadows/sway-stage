@@ -2,12 +2,14 @@
 //! A failure leaves windows alone. Only the success path enters cleanup; restoration is
 //! a separate, guarded operation. Files and the IPC helper may be dropped, never windows.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{self, Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -17,7 +19,7 @@ use clap::Parser;
 
 use crate::capture::{
     executable_capture, verify_capture, verify_desktop_launcher_capture,
-    verify_desktop_replay_capture, verify_inferred_capture,
+    verify_desktop_replay_capture, verify_inferred_capture, verify_unresolved_capture,
 };
 use crate::ipc::{IPC_TIMEOUT, Swaymsg, TreeNode, validate_restoration_name, workspace_number};
 use crate::layout::{
@@ -29,11 +31,12 @@ use crate::observation::{
 };
 use crate::ownership::{
     AcceptedWindows, ExpectedClose, bind_launches, require_quiet, verify_ownership,
+    verify_process_evidence,
 };
 use crate::preservation::ForeignWindows;
 use crate::process;
 use crate::scenarios::{
-    ConfiguredNode, Extension, OptionalApplications, Scenario, configuration_yaml,
+    ConfiguredNode, DesktopLauncher, Extension, OptionalApplications, Scenario, configuration_yaml,
     configure_desktop_launcher, configure_process_execution, desktop_launcher_replay,
     extended_scenarios, foreign_fixture_scenario, prepare_extended, standard_scenarios,
 };
@@ -58,7 +61,7 @@ pub struct Arguments {
     foreign_workspace: String,
     #[arg(
         long,
-        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, and desktop launcher replay"
+        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, desktop launcher replay, and unresolved launcher capture"
     )]
     extended: bool,
     #[arg(
@@ -329,7 +332,18 @@ impl Harness {
                 preexisting_ids: None,
                 accepted: AcceptedWindows::new(),
             });
-            self.run_scenario(&directory, optional_applications.as_ref())?;
+            if let Err(failure) = self.run_scenario(&directory, optional_applications.as_ref()) {
+                if self
+                    .current_scenario
+                    .as_ref()
+                    .is_some_and(|progress| progress.scenario.name == "unresolved-launcher")
+                {
+                    self.events.distrust_focus_history(
+                        "unresolved-launcher failed; no restoration permitted",
+                    );
+                }
+                return Err(failure);
+            }
         }
 
         self.finish_fixture()?;
@@ -525,6 +539,57 @@ impl Harness {
                 "check filled capture",
             )?;
 
+            if name == "unresolved-launcher" {
+                self.stage = format!("{cycle_name}: unresolved inferred capture");
+                let leaf = progress.scenario.layout.leaves()[0];
+                let fixture = leaf
+                    .desktop_launcher
+                    .as_ref()
+                    .expect("prepared desktop fixture");
+                let window_id = *progress
+                    .accepted
+                    .keys()
+                    .next()
+                    .expect("verified single window");
+                let pid = walk(&after_capture.tree)
+                    .into_iter()
+                    .find(|placed| placed.node.id == window_id)
+                    .and_then(|placed| placed.node.pid)
+                    .filter(|pid| *pid > 0)
+                    .ok_or_else(|| Failure::Uncertain("launcher window lost its PID".into()))?;
+
+                // Hold this proc directory across capture. Reads through the descriptor
+                // cannot silently follow a reused PID to a replacement process.
+                let process_directory = File::open(format!("/proc/{pid}")).map_err(|_| {
+                    Failure::Uncertain("cannot retain launcher process identity".into())
+                })?;
+                let retained_process =
+                    PathBuf::from(format!("/proc/self/fd/{}", process_directory.as_raw_fd()));
+                verify_process_evidence(&retained_process, pid, leaf)
+                    .map_err(|reason| Failure::Uncertain(reason.into()))?;
+                let mut capture = Command::new(&self.binary);
+                capture.args(["capture", "--infer-commands"]);
+                self.sway.select_socket(&mut capture);
+                let revision = self.events.workspace_revision();
+                let output = directory.with_unavailable_launcher(fixture, || {
+                    process::run_with_status(capture, &self.stage, CAPTURE_TIMEOUT)
+                })?;
+
+                // Restoration and independent file verification precede ALL subsequent
+                // process/Sway ownership checks, even when the capture command failed.
+                verify_process_evidence(&retained_process, pid, leaf)
+                    .map_err(|reason| Failure::Uncertain(reason.into()))?;
+                let after_unresolved = snapshot(&self.sway, &mut self.events, None)?;
+                foreign.verify(&after_unresolved)?;
+                verify_unchanged(&after_unresolved, target.id, progress, &before_capture)?;
+                if revision != self.events.workspace_revision() {
+                    return Err(Failure::Uncertain(
+                        "workspace activity during unresolved capture".into(),
+                    ));
+                }
+                verify_unresolved_capture(&output, &draft)?;
+            }
+
             let mut inferred_replay = None;
             if matches!(
                 name,
@@ -620,6 +685,8 @@ impl Harness {
         self.passed += 1;
         let coverage = if name == "occupied-workspace-refusal" {
             "hierarchy, sizing, focus, identity, capture, occupied refusal"
+        } else if name == "unresolved-launcher" {
+            "GLib provenance, unresolved capture/reporting, restored fixture, unchanged desktop"
         } else if name == "desktop-launcher-roundtrip" {
             "hierarchy, focus, ownership, GLib provenance, inferred capture/reload"
         } else if name == "capture-reload-roundtrip" {
@@ -1403,6 +1470,7 @@ fn random_run_id() -> Result<String, String> {
 /// never profiles or desktop windows.
 struct TemporaryConfigurations {
     path: PathBuf,
+    retain: Cell<bool>,
 }
 
 impl TemporaryConfigurations {
@@ -1416,7 +1484,68 @@ impl TemporaryConfigurations {
             .map_err(|error| {
                 format!("create private YAML directory {}: {error}", path.display())
             })?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            retain: Cell::new(false),
+        })
+    }
+
+    /// Only our private launcher is hidden, only while this bounded inference runs.
+    /// Restoration is ordinary control flow and is attempted even on capture failure or
+    /// interruption. A restoration failure retains the files and forbids desktop cleanup.
+    fn with_unavailable_launcher(
+        &self,
+        fixture: &DesktopLauncher,
+        capture: impl FnOnce() -> Result<process::CompletedProcess, String>,
+    ) -> Result<process::CompletedProcess, Failure> {
+        let applications = self.path.join("unresolved desktop data/applications");
+        if fixture.path.parent() != Some(applications.as_path()) {
+            return Err(Failure::Uncertain(
+                "launcher is outside the private fixture directory".into(),
+            ));
+        }
+        let original = fs::symlink_metadata(&fixture.path)
+            .map_err(|_| Failure::Uncertain("cannot inspect private launcher".into()))?;
+        if !original.is_file() || !private_launcher_matches(fixture) {
+            return Err(Failure::Uncertain(
+                "private launcher changed before capture".into(),
+            ));
+        }
+        let hidden = fixture.path.with_extension("desktop.unavailable");
+        match fs::symlink_metadata(&hidden) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(Failure::Uncertain(
+                    "private launcher backup path is occupied or inaccessible".into(),
+                ));
+            }
+        }
+        fs::rename(&fixture.path, &hidden)
+            .map_err(|_| Failure::Uncertain("cannot hide private launcher".into()))?;
+
+        let result = capture();
+
+        // Do not overwrite an unexpected replacement, even inside our private directory.
+        let path_absent = match fs::symlink_metadata(&fixture.path) {
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            Ok(_) => false,
+        };
+        let restored = path_absent && fs::rename(&hidden, &fixture.path).is_ok();
+        let verified = restored
+            && fs::symlink_metadata(&fixture.path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.dev() == original.dev()
+                    && metadata.ino() == original.ino()
+            })
+            && private_launcher_matches(fixture);
+        if !verified {
+            self.retain.set(true);
+            return Err(Failure::Uncertain(format!(
+                "private launcher restoration failed; files retained at {}; leave windows untouched",
+                applications.display()
+            )));
+        }
+        result.map_err(Failure::Uncertain)
     }
 
     fn create_process_cwd(&self) -> Result<(), String> {
@@ -1485,8 +1614,19 @@ impl TemporaryConfigurations {
     }
 }
 
+fn private_launcher_matches(fixture: &DesktopLauncher) -> bool {
+    let Ok(file) = File::open(&fixture.path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_ok() && bytes == fixture.contents.as_bytes()
+}
+
 impl Drop for TemporaryConfigurations {
     fn drop(&mut self) {
+        if self.retain.get() {
+            return;
+        }
         if let Err(error) = fs::remove_dir_all(&self.path) {
             eprintln!(
                 "Could not remove temporary YAML directory {}: {error}",

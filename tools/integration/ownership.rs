@@ -269,7 +269,7 @@ pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Re
     })
 }
 
-fn verify_process_evidence(
+pub(super) fn verify_process_evidence(
     process_directory: &Path,
     pid: i32,
     leaf: &ConfiguredWindow,

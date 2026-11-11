@@ -30,7 +30,8 @@ pub fn capture_lines(draft: &str) -> Vec<&str> {
 /// Compares a default capture draft with the expected one, line by line: indentation and
 /// sequence arrangement, keys, identifiers, focus, `command: null` placeholders, unchanged
 /// selectors, and weights within 0.02 of the measured shares. Returns the draft with each
-/// placeholder filled with a harmless command, ready for `sway-stage check`.
+/// placeholder filled with a harmless command, ready for `sway-stage check`. Never echo
+/// captured lines: even an ordinary capture could unexpectedly contain recovered arguments.
 pub fn verify_capture(
     draft: &str,
     scenario: &Scenario,
@@ -40,33 +41,28 @@ pub fn verify_capture(
     let expected = expected_draft(scenario, &measurements.shares)?;
     let expected_lines: Vec<&str> = expected.lines().collect();
     if actual_lines.len() != expected_lines.len() {
-        return Err(format!(
-            "capture draft has unexpected fields/structure:\n{draft}"
-        ));
+        return Err("capture draft has unexpected fields/structure".into());
     }
 
     let mut placeholder_count = 0;
     let mut filled_lines = Vec::new();
     for (actual_line, expected_line) in actual_lines.into_iter().zip(expected_lines) {
-        let mismatch =
-            |problem: &str| format!("{problem}: {actual_line:?}, expected {expected_line:?}");
-
         let actual_field = actual_line.trim_start_matches([' ', '-']);
         let expected_field = expected_line.trim_start_matches([' ', '-']);
         let actual_arrangement = &actual_line[..actual_line.len() - actual_field.len()];
         let expected_arrangement = &expected_line[..expected_line.len() - expected_field.len()];
         if actual_arrangement != expected_arrangement {
-            return Err(mismatch("capture indentation/arrangement"));
+            return Err("capture indentation/arrangement".into());
         }
 
         let Some((key, actual_scalar)) = actual_field.split_once(':') else {
-            return Err(mismatch("capture field"));
+            return Err("capture field".into());
         };
         let (expected_key, expected_scalar) = expected_field
             .split_once(':')
             .unwrap_or((expected_field, ""));
         if key != expected_key {
-            return Err(mismatch("capture field"));
+            return Err("capture field".into());
         }
         let actual_scalar = actual_scalar.trim();
         let expected_scalar = expected_scalar.trim();
@@ -74,12 +70,12 @@ pub fn verify_capture(
         if key == "weight" {
             let weight: f64 = actual_scalar
                 .parse()
-                .map_err(|_| format!("capture weight is not numeric: {actual_line}"))?;
+                .map_err(|_| "capture weight is not numeric".to_owned())?;
             let expected_weight: f64 = expected_scalar
                 .parse()
-                .map_err(|_| format!("expected weight is not numeric: {expected_line}"))?;
+                .map_err(|_| "expected weight is not numeric".to_owned())?;
             if !weight.is_finite() || (weight - expected_weight).abs() > WEIGHT_TOLERANCE {
-                return Err(mismatch("capture sizing"));
+                return Err("capture sizing".into());
             }
         } else {
             let actual_value = if IDENTIFIER_KEYS.contains(&key) {
@@ -88,7 +84,7 @@ pub fn verify_capture(
                 actual_scalar
             };
             if actual_value != expected_scalar {
-                return Err(mismatch("capture value"));
+                return Err("capture value".into());
             }
         }
 
@@ -251,6 +247,25 @@ pub fn verify_desktop_launcher_capture(
     let path = fixture.path.to_str().ok_or("non-UTF-8 fixture path")?;
     if commands != [vec!["gio".to_owned(), "launch".to_owned(), path.to_owned()]] {
         return Err("inferred command does not identify the private desktop fixture".into());
+    }
+    Ok(())
+}
+
+/// The already verified default draft proves every structural field, including a single
+/// null command. Successful stderr is checked separately and never included in failures.
+pub fn verify_unresolved_capture(
+    output: &crate::process::CompletedProcess,
+    default_draft: &str,
+) -> Result<(), String> {
+    if !output.status.success() {
+        return Err("unresolved capture did not exit successfully".into());
+    }
+    if capture_lines(&output.stdout) != capture_lines(default_draft) {
+        return Err("unresolved capture changed the draft or substituted a command".into());
+    }
+    let expected_stderr = "sway-stage: capture completed. Commands inferred: 0; unresolved: 1. Manual editing required.\n";
+    if output.stderr != expected_stderr {
+        return Err("unresolved capture reporting differs".into());
     }
     Ok(())
 }

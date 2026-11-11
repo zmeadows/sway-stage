@@ -133,7 +133,7 @@ layout:
 }
 
 #[test]
-fn capture_differences_fail_with_the_offending_line() {
+fn capture_differences_report_the_failed_comparison() {
     let scenario = standard_scenario("horizontal-pair");
     let window1 = app_id("horizontal-pair", "window1");
     let cases = [
@@ -580,5 +580,72 @@ fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
             )
             .is_err()
         );
+    }
+}
+
+#[test]
+fn unresolved_capture_requires_null_commands_success_and_independent_stderr() {
+    use std::os::unix::process::ExitStatusExt;
+    let scenario = crate::fixtures::extended_scenario("unresolved-launcher");
+    let default = expected_draft(&scenario, &BTreeMap::new()).unwrap();
+    let valid = || {
+        crate::process::CompletedProcess {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: default.clone(),
+        stderr: "sway-stage: capture completed. Commands inferred: 0; unresolved: 1. Manual editing required.\n".into(),
+    }
+    };
+    verify_unresolved_capture(&valid(), &default).unwrap();
+    for (stdout, stderr, status) in [
+        (
+            default.replace("command: null", "command: [secret]"),
+            valid().stderr,
+            0,
+        ),
+        (
+            default.replace("focus: window1", "focus: secret"),
+            valid().stderr,
+            0,
+        ),
+        (default.replace("app_id:", "secret:"), valid().stderr, 0),
+        (format!("{default}secret diagnostics\n"), valid().stderr, 0),
+        (default.clone(), "secret stderr".into(), 0),
+        (
+            default.clone(),
+            valid().stderr.replace("unresolved: 1", "unresolved: 0"),
+            0,
+        ),
+        (
+            default.clone(),
+            valid().stderr.replace(" Manual editing required.", ""),
+            0,
+        ),
+        (default.clone(), valid().stderr, 1),
+    ] {
+        let output = crate::process::CompletedProcess {
+            status: std::process::ExitStatus::from_raw(status << 8),
+            stdout,
+            stderr,
+        };
+        let error = verify_unresolved_capture(&output, &default).unwrap_err();
+        assert!(!error.contains("secret"));
+    }
+}
+
+#[test]
+fn ordinary_capture_mismatches_never_echo_unexpected_arguments_or_paths() {
+    let scenario = standard_scenario("single-window");
+    let measurements = LayoutMeasurements {
+        shares: BTreeMap::new(),
+        sizing_notes: Vec::new(),
+    };
+    let default = expected_draft(&scenario, &measurements.shares).unwrap();
+    for draft in [
+        default.replace("command: null", "command: [/private/secret, token]"),
+        format!("{default}extra: /private/secret\n"),
+        default.replace("id: window1", "id: /private/secret"),
+    ] {
+        let error = verify_capture(&draft, &scenario, &measurements).unwrap_err();
+        assert!(!error.contains("secret") && !error.contains("token"));
     }
 }

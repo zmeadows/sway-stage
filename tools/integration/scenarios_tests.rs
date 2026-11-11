@@ -143,6 +143,13 @@ fn extended_scenarios_keep_their_structures_timeouts_and_extensions() {
             20_000,
             Some(Extension::DesktopLauncher),
         ),
+        (
+            "unresolved-launcher",
+            "window1",
+            "window1",
+            20_000,
+            Some(Extension::DesktopLauncher),
+        ),
     ];
     let expected: Vec<_> = expected
         .into_iter()

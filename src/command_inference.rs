@@ -3,13 +3,14 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 // A modest per-window bound; read one extra byte to detect truncation.
 const MAX_CMDLINE_BYTES: usize = 64 * 1024;
 const MAX_FLATPAK_INFO_BYTES: usize = 64 * 1024;
 const MAX_ENVIRON_BYTES: usize = 64 * 1024;
+const MAX_STAT_BYTES: usize = 4096;
 
 /// An inaccessible or vanished process is an ordinary inference miss, never a capture
 /// error. Neither I/O errors nor argument contents escape this boundary into diagnostics.
@@ -18,19 +19,87 @@ pub fn read_process_command(pid: i32) -> Option<Vec<String>> {
         return None;
     }
 
-    let metadata = File::open(format!("/proc/{pid}/root/.flatpak-info"));
-    infer_process_command(metadata, || {
-        let environment = File::open(format!("/proc/{pid}/environ"));
-        infer_host_command(
-            pid,
-            environment,
-            || std::fs::read_link(format!("/proc/{pid}/exe")).ok(),
-            || {
-                let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
-                read_command_line(file)
-            },
-        )
+    let process_directory = PathBuf::from(format!("/proc/{pid}"));
+    with_stable_process(
+        || read_process_identity(&process_directory, pid),
+        || {
+            let metadata = File::open(process_directory.join("root/.flatpak-info"));
+            infer_process_command(metadata, || {
+                let environment = File::open(process_directory.join("environ"));
+                infer_host_command(
+                    pid,
+                    environment,
+                    || std::fs::read_link(process_directory.join("exe")).ok(),
+                    || {
+                        let file = File::open(process_directory.join("cmdline")).ok()?;
+                        read_command_line(file)
+                    },
+                )
+            })
+        },
+    )
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ProcessIdentity {
+    start_time_ticks: u64,
+    executable: PathBuf,
+    executable_device: u64,
+    executable_inode: u64,
+}
+
+/// Bracket all inference reads, including Flatpak's, with the same process and executable
+/// evidence. This detects observed replacement, not a stale PID already supplied by Sway,
+/// same-executable execs, or changes made and undone between observations.
+fn with_stable_process(
+    mut read_identity: impl FnMut() -> Option<ProcessIdentity>,
+    infer_command: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let before = read_identity()?;
+    let command = infer_command()?;
+    let after = read_identity()?;
+    (before == after).then_some(command)
+}
+
+fn read_process_identity(process_directory: &Path, pid: i32) -> Option<ProcessIdentity> {
+    let start_time_ticks = read_start_time(File::open(process_directory.join("stat")).ok()?, pid)?;
+    let executable = std::fs::read_link(process_directory.join("exe")).ok()?;
+    let metadata = std::fs::metadata(process_directory.join("exe")).ok()?;
+    Some(ProcessIdentity {
+        start_time_ticks,
+        executable,
+        executable_device: metadata.dev(),
+        executable_inode: metadata.ino(),
     })
+}
+
+fn read_start_time(reader: impl Read, pid: i32) -> Option<u64> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_STAT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if pid <= 0 || bytes.len() > MAX_STAT_BYTES || bytes.last() != Some(&b'\n') {
+        return None;
+    }
+
+    // comm is parenthesized but can itself contain spaces, parentheses, newlines, and
+    // non-UTF-8 bytes. Only the numeric prefix and the fields AFTER its final ')' are text.
+    let pid_end = bytes.iter().position(|byte| *byte == b' ')?;
+    if bytes[..pid_end] != *pid.to_string().as_bytes() || bytes.get(pid_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let comm_end = bytes.iter().rposition(|byte| *byte == b')')?;
+    if comm_end <= pid_end + 1 || bytes.get(comm_end + 1) != Some(&b' ') {
+        return None;
+    }
+    let fields = std::str::from_utf8(&bytes[comm_end + 2..]).ok()?;
+    // The tail begins at field 3 (state); starttime is field 22.
+    let start_time = fields.split_ascii_whitespace().nth(19)?;
+    if start_time.is_empty() || !start_time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    start_time.parse().ok()
 }
 
 #[derive(Debug, PartialEq)]
@@ -56,11 +125,26 @@ pub(super) fn infer_host_command(
     }
 
     // Neither package identity can safely win over evidence of the other package type.
-    match (environment.has_appimage(), environment.has_snap()) {
-        (true, true) => None,
-        (true, false) => appimage_command(&environment, &read_executable()?),
-        (false, true) => snap_command(&environment, &read_executable()?),
-        (false, false) => read_cmdline(),
+    let is_appimage = match (environment.has_appimage(), environment.has_snap()) {
+        (true, true) => return None,
+        (false, false) => return read_cmdline(),
+        (true, false) => true,
+        (false, true) => false,
+    };
+    let executable = read_executable()?;
+    // procfs appends this suffix to an unlinked executable. A new file at its former
+    // path cannot corroborate the running package binary.
+    if executable
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b" (deleted)")
+    {
+        return None;
+    }
+    if is_appimage {
+        appimage_command(&environment, &executable)
+    } else {
+        snap_command(&environment, &executable)
     }
 }
 
