@@ -254,6 +254,17 @@ opens. This optional procedure requires Flatpak; standard offline checks and the
 Foot harness require neither Flatpak nor TIDAL. The harness's Foot argv/ownership checks
 remain specific to its test-owned launches and should not be generalized for this scenario.
 
+For optional AppImage or Snap acceptance, use an application already installed locally,
+opened manually on a disposable workspace. Capture with `--infer-commands`; expect a single
+persistent absolute AppImage path, or separate `snap`, `run`, and namespaced application
+arguments. Compare the default capture's arrangement/selectors and check that no temporary
+mount executable appears. For Snap, test a separately named application or parallel instance
+if already available; snapd before 2.77 lacks `SNAP_APP_NAME` and should leave null unless
+verified GLib metadata supplies a launcher. For AppImage, a different symlink invocation
+name should remain null without verified GLib metadata. Review any inferred command and
+fill nulls before optional replay on another empty disposable workspace. No packages or
+AppImages are required by offline tests or added to the harness.
+
 For menu acceptance, use a keybinding or delayed invocation with a temporary layouts
 directory. Check normal Load sizing/focus, occupied-target refusal, both Escape cancellations,
 invalid/colliding names, saved draft discovery, placeholder rejection, and edited-draft

@@ -1,5 +1,15 @@
 use super::*;
 
+fn read_desktop_launcher(reader: impl Read, pid: i32) -> LauncherEvidence {
+    let Some(bytes) = read_environment(reader) else {
+        return LauncherEvidence::Unresolved;
+    };
+    let Some(environment) = LauncherEnvironment::parse(&bytes) else {
+        return LauncherEvidence::Unresolved;
+    };
+    desktop_launcher(&environment, pid)
+}
+
 struct DesktopFixture(std::path::PathBuf);
 
 impl DesktopFixture {
@@ -39,6 +49,546 @@ impl Drop for DesktopFixture {
     }
 }
 
+struct AppImageFixture {
+    directory: DesktopFixture,
+    image: PathBuf,
+    appdir: PathBuf,
+    executable: PathBuf,
+}
+
+impl AppImageFixture {
+    fn new(name: &str) -> Self {
+        let directory = DesktopFixture::new();
+        let image = directory.0.join(name);
+        let appdir = directory.0.join(".mount_example123");
+        std::fs::create_dir(&appdir).unwrap();
+        let executable = appdir.join("application");
+        for path in [&image, &executable] {
+            // Production checks filesystem properties, not the package's binary format.
+            std::fs::write(path, b"fixture executable").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self {
+            directory,
+            image,
+            appdir,
+            executable,
+        }
+    }
+
+    fn environment(&self) -> Vec<u8> {
+        format!(
+            "APPIMAGE={}\0APPDIR={}\0ARGV0={}\0",
+            self.image.display(),
+            self.appdir.display(),
+            self.image.display()
+        )
+        .into_bytes()
+    }
+}
+
+fn environment_with_field(environment: &[u8], key: &str, value: Option<&str>) -> Vec<u8> {
+    let mut entries: Vec<&str> = std::str::from_utf8(environment)
+        .unwrap()
+        .split_terminator('\0')
+        .filter(|entry| entry.split_once('=').unwrap().0 != key)
+        .collect();
+    let replacement = value.map(|value| format!("{key}={value}"));
+    if let Some(entry) = &replacement {
+        entries.push(entry);
+    }
+    format!("{}\0", entries.join("\0")).into_bytes()
+}
+
+fn package_inference(environment: &[u8], executable: Option<PathBuf>) -> Option<Vec<String>> {
+    infer_host_command(
+        101,
+        Ok(environment),
+        || executable,
+        || panic!("recognized package must not fall back to internal argv"),
+    )
+}
+
+fn snap_environment(instance: &str, application: &str, package: &str, mount: &str) -> Vec<u8> {
+    format!(
+        "SNAP_INSTANCE_NAME={instance}\0SNAP_APP_NAME={application}\0\
+         SNAP_NAME={package}\0SNAP={mount}\0"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn appimage_inference_preserves_the_persistent_path_as_one_argument() {
+    for name in [
+        "Example.AppImage",
+        "application without extension",
+        "雪 app",
+    ] {
+        let fixture = AppImageFixture::new(name);
+        let expected = Some(vec![fixture.image.to_str().unwrap().to_owned()]);
+        for invocation in [None, Some(name), Some(&format!("./{name}"))] {
+            let mut environment =
+                environment_with_field(&fixture.environment(), "ARGV0", invocation);
+            environment.extend_from_slice(b"SECRET=private\0BINARY=\xff\0");
+            assert_eq!(
+                package_inference(&environment, Some(fixture.executable.clone())),
+                expected
+            );
+        }
+        assert_eq!(
+            package_inference(&fixture.environment(), Some(fixture.executable.clone())),
+            expected
+        );
+    }
+}
+
+#[test]
+fn appimage_requires_a_usable_host_file_and_mounted_process_evidence() {
+    let fixture = AppImageFixture::new("application");
+    let environment = fixture.environment();
+    for key in ["APPIMAGE", "APPDIR"] {
+        for invalid in [None, Some(""), Some("relative"), Some("/missing/package")] {
+            assert_eq!(
+                package_inference(
+                    &environment_with_field(&environment, key, invalid),
+                    Some(fixture.executable.clone())
+                ),
+                None
+            );
+        }
+    }
+    for (name, mode, contents) in [("nonexecutable", 0o644, "contents"), ("empty", 0o755, "")] {
+        let path = fixture.directory.0.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let environment = environment_with_field(&environment, "ARGV0", None);
+        assert_eq!(
+            package_inference(
+                &environment_with_field(&environment, "APPIMAGE", path.to_str()),
+                Some(fixture.executable.clone())
+            ),
+            None
+        );
+    }
+    for path in [&fixture.appdir, &fixture.executable] {
+        let environment = environment_with_field(&environment, "ARGV0", None);
+        assert_eq!(
+            package_inference(
+                &environment_with_field(&environment, "APPIMAGE", path.to_str()),
+                Some(fixture.executable.clone())
+            ),
+            None
+        );
+    }
+    let symlink = fixture.directory.0.join("symlink");
+    std::os::unix::fs::symlink(&fixture.image, &symlink).unwrap();
+    assert_eq!(
+        package_inference(
+            &environment_with_field(&environment, "APPIMAGE", symlink.to_str()),
+            Some(fixture.executable.clone())
+        ),
+        None
+    );
+    for executable in [
+        None,
+        Some(fixture.image.clone()), // Unrelated descendant inheriting the environment.
+        Some(fixture.appdir.clone()),
+        Some(fixture.appdir.with_extension("other").join("application")),
+        Some(fixture.appdir.join("vanished")),
+        Some(PathBuf::from("relative")),
+    ] {
+        assert_eq!(package_inference(&environment, executable), None);
+    }
+    assert_eq!(
+        package_inference(
+            &environment_with_field(&environment, "APPDIR", fixture.image.to_str()),
+            Some(fixture.executable.clone())
+        ),
+        None
+    );
+}
+
+#[test]
+fn appimage_rejects_temporary_host_paths_and_ambiguous_invocation_names() {
+    let fixture = AppImageFixture::new("application");
+    for invocation in [
+        "",
+        "other-name",
+        "/other/application",
+        "../application",
+        "directory/application",
+        "application/",
+        "./application/.",
+        "././application",
+    ] {
+        assert_eq!(
+            package_inference(
+                &environment_with_field(&fixture.environment(), "ARGV0", Some(invocation)),
+                Some(fixture.executable.clone())
+            ),
+            None
+        );
+    }
+    // A real symlink with a different basename still cannot select the same AppRun behavior.
+    let invocation = fixture.directory.0.join("another-binary");
+    std::os::unix::fs::symlink(&fixture.image, &invocation).unwrap();
+    assert_eq!(
+        package_inference(
+            &environment_with_field(&fixture.environment(), "ARGV0", invocation.to_str()),
+            Some(fixture.executable.clone())
+        ),
+        None
+    );
+    let nested_mount = fixture.directory.0.join(".mount_outer");
+    std::fs::create_dir(&nested_mount).unwrap();
+    let temporary_image = nested_mount.join("inner-image");
+    std::fs::copy(&fixture.image, &temporary_image).unwrap();
+    let environment = environment_with_field(&fixture.environment(), "ARGV0", None);
+    assert_eq!(
+        package_inference(
+            &environment_with_field(&environment, "APPIMAGE", temporary_image.to_str()),
+            Some(fixture.executable.clone())
+        ),
+        None
+    );
+}
+
+#[test]
+fn snap_reconstructs_documented_commands_and_retains_parallel_instances() {
+    for (instance, application, expected) in [
+        ("example", "example", "example"),
+        ("example", "editor", "example.editor"),
+        ("example_foo", "example", "example_foo"),
+        ("example_foo", "editor", "example_foo.editor"),
+        (
+            "example_a123456789",
+            "Editor-2",
+            "example_a123456789.Editor-2",
+        ),
+    ] {
+        for root in ["/snap", "/var/lib/snapd/snap"] {
+            for revision in ["42", "x1"] {
+                for mounted_package in ["example", instance] {
+                    let mount = format!("{root}/{mounted_package}/{revision}");
+                    let environment = snap_environment(instance, application, "example", &mount);
+                    for executable_package in ["example", instance] {
+                        let executable = PathBuf::from(format!(
+                            "{root}/{executable_package}/{revision}/usr/bin/unrelated-basename"
+                        ));
+                        assert_eq!(
+                            package_inference(&environment, Some(executable)),
+                            Some(vec!["snap".into(), "run".into(), expected.into()])
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for (instance, key) in [("example", ""), ("example_foo", "foo")] {
+        let environment = snap_environment(instance, "example", "example", "/snap/example/42");
+        assert!(
+            package_inference(
+                &environment_with_field(&environment, "SNAP_INSTANCE_KEY", Some(key)),
+                Some("/snap/example/42/application".into())
+            )
+            .is_some()
+        );
+    }
+}
+
+#[test]
+fn snap_missing_or_inconsistent_identities_never_guess_an_application() {
+    let environment = snap_environment("example_foo", "editor", "example", "/snap/example/42");
+    for key in ["SNAP_INSTANCE_NAME", "SNAP_APP_NAME", "SNAP_NAME", "SNAP"] {
+        // Older snapd lacks SNAP_APP_NAME. Neither argv nor the package name substitutes.
+        for value in [None, Some("")] {
+            assert_eq!(
+                package_inference(
+                    &environment_with_field(&environment, key, value),
+                    Some("/snap/example/42/editor".into())
+                ),
+                None
+            );
+        }
+    }
+    for (key, values) in [
+        (
+            "SNAP_INSTANCE_NAME",
+            vec![
+                "other_foo",
+                "example_",
+                "example_FOO",
+                "example_foo_bar",
+                "example_12345678901",
+            ],
+        ),
+        (
+            "SNAP_NAME",
+            vec![
+                "other",
+                "example_foo",
+                "x",
+                "123",
+                "Example",
+                "-example",
+                "exam--ple",
+                "example-",
+            ],
+        ),
+        (
+            "SNAP_APP_NAME",
+            vec![
+                "-editor",
+                "--shell",
+                "editor-",
+                "edit--or",
+                "example.editor",
+                "editor_name",
+                "editor/other",
+                "editor other",
+                "$(sh)",
+                "雪",
+            ],
+        ),
+        (
+            "SNAP",
+            vec![
+                "relative",
+                "/snap/other/42",
+                "/snap/example_away/42",
+                "/snap/example/current",
+                "/snap/example/0",
+                "/snap/example/x",
+                "/snap/example/42/extra",
+                "/snap/example/../42",
+                "/arbitrary/example/42",
+            ],
+        ),
+        ("SNAP_INSTANCE_KEY", vec!["", "other", "FOO"]),
+    ] {
+        for value in values {
+            assert_eq!(
+                package_inference(
+                    &environment_with_field(&environment, key, Some(value)),
+                    Some("/snap/example/42/editor".into())
+                ),
+                None,
+                "invalid field {key}"
+            );
+        }
+    }
+    for key in ["SNAP_NAME", "SNAP_INSTANCE_NAME", "SNAP_APP_NAME"] {
+        for value in [
+            "--help",
+            "app;sh",
+            "app\nname",
+            "app name",
+            "app/name",
+            ".app",
+        ] {
+            assert_eq!(
+                package_inference(
+                    &environment_with_field(&environment, key, Some(value)),
+                    Some("/snap/example/42/editor".into())
+                ),
+                None
+            );
+        }
+    }
+    assert!(!valid_snap_name(&"a".repeat(41)));
+    assert!(valid_snap_name(&"a".repeat(40)));
+}
+
+#[test]
+fn snap_requires_process_evidence_from_the_identified_package_revision() {
+    let environment = snap_environment("example_foo", "editor", "example", "/snap/example/42");
+    for executable in [
+        None,
+        Some("/usr/bin/editor"), // Host descendant inheriting Snap metadata.
+        Some("/snap/other/42/editor"),
+        Some("/snap/example_other/42/editor"),
+        Some("/snap/example/43/editor"),
+        Some("/snap/example/42-other/editor"),
+        Some("/snap/example/42"),
+        Some("/snap/example/42/../editor"),
+        Some("relative"),
+    ] {
+        assert_eq!(
+            package_inference(&environment, executable.map(PathBuf::from)),
+            None
+        );
+    }
+}
+
+#[test]
+fn package_environment_fields_fail_closed_when_malformed_or_incomplete() {
+    let fixture = AppImageFixture::new("application");
+    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
+    for (environment, executable, keys) in [
+        (
+            fixture.environment(),
+            fixture.executable.clone(),
+            vec!["APPIMAGE", "APPDIR", "ARGV0"],
+        ),
+        (
+            snap,
+            PathBuf::from("/snap/example/42/editor"),
+            vec![
+                "SNAP",
+                "SNAP_NAME",
+                "SNAP_INSTANCE_NAME",
+                "SNAP_APP_NAME",
+                "SNAP_INSTANCE_KEY",
+            ],
+        ),
+    ] {
+        for key in keys {
+            let mut invalid_utf8 = environment_with_field(&environment, key, None);
+            invalid_utf8.extend_from_slice(format!("{key}=").as_bytes());
+            invalid_utf8.extend_from_slice(b"\xff\0");
+            assert_eq!(
+                package_inference(&invalid_utf8, Some(executable.clone())),
+                None
+            );
+
+            let mut missing_separator = environment_with_field(&environment, key, None);
+            missing_separator.extend_from_slice(format!("{key}\0").as_bytes());
+            assert_eq!(
+                package_inference(&missing_separator, Some(executable.clone())),
+                None
+            );
+
+            let complete = if key == "SNAP_INSTANCE_KEY" {
+                environment_with_field(&environment, key, Some(""))
+            } else {
+                environment.clone()
+            };
+            assert!(package_inference(&complete, Some(executable.clone())).is_some());
+            let original_value = std::str::from_utf8(&complete)
+                .unwrap()
+                .split_terminator('\0')
+                .filter_map(|entry| entry.split_once('='))
+                .find(|(entry_key, _)| *entry_key == key)
+                .unwrap()
+                .1;
+            for duplicate in [original_value, "different", ""] {
+                let mut duplicated = complete.clone();
+                duplicated.extend_from_slice(format!("{key}={duplicate}\0").as_bytes());
+                assert_eq!(
+                    package_inference(&duplicated, Some(executable.clone())),
+                    None
+                );
+            }
+        }
+        let mut truncated = environment.clone();
+        truncated.pop();
+        assert_eq!(
+            package_inference(&truncated, Some(executable.clone())),
+            None
+        );
+        let mut unrelated_truncation = environment.clone();
+        unrelated_truncation.extend_from_slice(b"SECRET=truncated");
+        assert_eq!(
+            package_inference(&unrelated_truncation, Some(executable.clone())),
+            None
+        );
+
+        let mut maximum = environment;
+        maximum.extend_from_slice(b"SECRET=");
+        maximum.resize(MAX_ENVIRON_BYTES, b'x');
+        maximum[MAX_ENVIRON_BYTES - 1] = 0;
+        assert!(package_inference(&maximum, Some(executable.clone())).is_some());
+        maximum.push(0);
+        assert_eq!(package_inference(&maximum, Some(executable)), None);
+    }
+}
+
+#[test]
+fn package_conflicts_and_launcher_precedence_are_explicit() {
+    let fixture = AppImageFixture::new("application");
+    let appimage = fixture.environment();
+    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
+    let mut conflicting = appimage.clone();
+    conflicting.extend_from_slice(&snap);
+    assert_eq!(
+        package_inference(&conflicting, Some(fixture.executable.clone())),
+        None
+    );
+
+    for (package_environment, executable) in [
+        (&appimage, fixture.executable.clone()),
+        (&snap, PathBuf::from("/snap/example/42/editor")),
+        (&conflicting, fixture.executable.clone()),
+    ] {
+        // Flatpak's strict result wins without inspecting any host metadata.
+        for (metadata, expected) in [
+            (
+                "[Application]\nname=org.example.App",
+                Some(vec![
+                    "flatpak".into(),
+                    "run".into(),
+                    "org.example.App".into(),
+                ]),
+            ),
+            ("[Application]\nname=invalid", None),
+        ] {
+            assert_eq!(
+                infer_process_command(Ok(metadata.as_bytes()), || {
+                    package_inference(package_environment, Some(executable.clone()))
+                }),
+                expected
+            );
+        }
+        let mut desktop = fixture.directory.environment("101");
+        desktop.extend_from_slice(package_environment);
+        assert_eq!(
+            package_inference(&desktop, None),
+            Some(vec![
+                "gio".into(),
+                "launch".into(),
+                fixture.directory.path().to_str().unwrap().into()
+            ])
+        );
+        // A known PID-only or unusable GLib launch must remain unresolved even when
+        // package metadata could otherwise produce a conventional host command.
+        for glib in [
+            b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0".as_slice(),
+            b"GIO_LAUNCHED_DESKTOP_FILE=/missing.desktop\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0",
+        ] {
+            let mut desktop = glib.to_vec();
+            desktop.extend_from_slice(package_environment);
+            assert_eq!(package_inference(&desktop, Some(executable.clone())), None);
+        }
+    }
+    let mut inherited = fixture.directory.environment("102");
+    inherited.extend_from_slice(&appimage);
+    assert_eq!(
+        package_inference(&inherited, Some(fixture.executable.clone())),
+        Some(vec![fixture.image.to_str().unwrap().into()])
+    );
+    let mut inherited = fixture.directory.environment("102");
+    inherited.extend_from_slice(&snap);
+    assert_eq!(
+        package_inference(&inherited, Some("/snap/example/42/editor".into())),
+        Some(vec!["snap".into(), "run".into(), "example.editor".into()])
+    );
+}
+
+#[test]
+fn absent_package_identity_allows_ordinary_argv_without_executable_inspection() {
+    for environment in [b"".as_slice(), b"ARGV0=custom-shell\0", b"UNRELATED=\xff\0"] {
+        assert_eq!(
+            infer_host_command(
+                101,
+                Ok(environment),
+                || panic!("ordinary argv needs no package executable evidence"),
+                || read_command_line(b"host-app\0two words\0\0".as_slice())
+            ),
+            Some(vec!["host-app".into(), "two words".into(), "".into()])
+        );
+    }
+}
+
 #[test]
 fn verified_desktop_launcher_precedes_argv_and_preserves_path_boundaries() {
     let fixture = DesktopFixture::new();
@@ -50,9 +600,12 @@ fn verified_desktop_launcher_precedes_argv_and_preserves_path_boundaries() {
         fixture.path().to_str().unwrap().into(),
     ];
     assert_eq!(
-        infer_host_command(101, Ok(environment.as_slice()), || panic!(
-            "must prefer launcher"
-        )),
+        infer_host_command(
+            101,
+            Ok(environment.as_slice()),
+            || panic!("no package evidence"),
+            || panic!("must prefer launcher")
+        ),
         Some(expected)
     );
 }
@@ -72,9 +625,12 @@ fn absent_and_inherited_launcher_evidence_allow_literal_argv_fallback() {
             LauncherEvidence::Absent
         );
         assert_eq!(
-            infer_host_command(101, Ok(environment.as_slice()), || read_command_line(
-                b"host\0two words\0\0".as_slice()
-            )),
+            infer_host_command(
+                101,
+                Ok(environment.as_slice()),
+                || panic!("no package evidence"),
+                || read_command_line(b"host\0two words\0\0".as_slice())
+            ),
             Some(vec!["host".into(), "two words".into(), "".into()])
         );
     }
@@ -86,9 +642,12 @@ fn glib_284_replay_with_only_matching_pid_requires_manual_command_editing() {
     // even though replay successfully started an application with readable argv.
     let environment = b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0";
     assert_eq!(
-        infer_host_command(101, Ok(environment.as_slice()), || panic!(
-            "PID-only launcher metadata must not fall back to argv"
-        )),
+        infer_host_command(
+            101,
+            Ok(environment.as_slice()),
+            || panic!("no package evidence"),
+            || panic!("PID-only launcher metadata must not fall back to argv")
+        ),
         None
     );
 }
@@ -163,9 +722,12 @@ fn recognized_but_unusable_launcher_evidence_suppresses_argv() {
             LauncherEvidence::Unresolved
         );
         assert!(
-            infer_host_command(101, Ok(environment.as_slice()), || panic!(
-                "unsafe argv fallback"
-            ))
+            infer_host_command(
+                101,
+                Ok(environment.as_slice()),
+                || panic!("no package evidence"),
+                || panic!("unsafe argv fallback")
+            )
             .is_none()
         );
     }
@@ -189,7 +751,12 @@ fn environment_reads_fail_closed_without_exposing_sensitive_errors() {
     for kind in [io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied] {
         let unavailable: io::Result<&[u8]> = Err(io::Error::new(kind, "SECRET=private"));
         assert_eq!(
-            infer_host_command(101, unavailable, || panic!("uncertain environment")),
+            infer_host_command(
+                101,
+                unavailable,
+                || panic!("unavailable environment"),
+                || panic!("uncertain environment")
+            ),
             None
         );
     }
@@ -253,9 +820,12 @@ fn flatpak_evidence_precedes_even_valid_or_inherited_desktop_metadata() {
             let environment = fixture.environment(pid);
             assert_eq!(
                 infer_process_command(Ok(metadata.as_bytes()), || {
-                    infer_host_command(101, Ok(environment.as_slice()), || {
-                        panic!("Flatpak must not consult argv")
-                    })
+                    infer_host_command(
+                        101,
+                        Ok(environment.as_slice()),
+                        || panic!("no package evidence"),
+                        || panic!("Flatpak must not consult argv"),
+                    )
                 }),
                 expected
             );
@@ -264,7 +834,12 @@ fn flatpak_evidence_precedes_even_valid_or_inherited_desktop_metadata() {
     let missing: io::Result<&[u8]> = Err(io::ErrorKind::NotFound.into());
     assert!(
         infer_process_command(missing, || {
-            infer_host_command(101, Ok(fixture.environment("101").as_slice()), || None)
+            infer_host_command(
+                101,
+                Ok(fixture.environment("101").as_slice()),
+                || panic!("no package evidence"),
+                || None,
+            )
         })
         .is_some()
     );

@@ -205,25 +205,77 @@ Runtime-only sandboxes, malformed/ambiguous metadata, invalid identity fields, a
 access errors leave `command: null`; sandbox-internal argv is never used in these cases.
 Identity fields use a conservative ASCII subset; unsupported key-file escapes are rejected.
 
-Only when `.flatpak-info` is missing does inference inspect `/proc/PID/environ` for GLib's
-`GIO_LAUNCHED_DESKTOP_FILE` and `GIO_LAUNCHED_DESKTOP_FILE_PID`. Reads are bounded to 64 KiB
-and require complete NUL-separated entries. Only these two variables are extracted;
-unrelated values, including non-UTF-8 bytes, are ignored and no environment mapping is copied into
-the draft or diagnostics. The recorded positive process PID must exactly match the window
-PID supplied by Sway. The launcher path must be valid UTF-8, absolute, end in `.desktop`,
-and refer to a readable, nonempty regular file. Verified metadata produces the host command
+Only when `.flatpak-info` is missing does inference read `/proc/PID/environ`, once per
+window, bounded to 64 KiB with complete NUL-separated entries. It extracts only the GLib,
+AppImage, and Snap fields described below. Duplicate or malformed relevant entries, and
+inaccessible, oversized, or incomplete reads leave `command: null`. Unrelated values,
+including non-UTF-8 bytes, are ignored; no environment mapping or values enter diagnostics.
+
+GLib inference uses `GIO_LAUNCHED_DESKTOP_FILE` and `GIO_LAUNCHED_DESKTOP_FILE_PID`.
+The recorded positive process PID must exactly match the window PID supplied by Sway.
+The launcher path must be valid UTF-8, absolute, end in `.desktop`, and refer to a readable, nonempty regular file. Verified metadata produces the host command
 `[gio, launch, /absolute/path/to/application.desktop]`, preserving the path as one argument,
 including spaces and private launchers outside XDG application directories. `gio` must be
 available on the host `PATH`. GLib interprets the launcher; sway-stage does not parse `Exec`,
 expand field codes, or reproduce terminal, working-directory, or D-Bus activation semantics.
 
-A different valid recorded PID indicates inherited metadata, which is ignored. Absent
-launcher metadata or inherited metadata permit ordinary `/proc/PID/cmdline` inference.
-Duplicate identity fields, missing/malformed PIDs, and matching-PID metadata with a missing
-or unusable launcher leave `command: null`; they never silently fall back to argv.
-Inaccessible, oversized, or incomplete environment reads also leave the command unresolved.
-Valid Flatpak metadata takes precedence over GLib metadata, including inherited fields;
-unusable Flatpak metadata still suppresses both launcher and argv fallback.
+A different valid recorded PID indicates inherited GLib metadata, which is ignored.
+Missing/malformed PIDs and matching-PID metadata with a missing or unusable launcher leave
+`command: null`; they never fall back to package inference or argv.
+
+AppImage inference requires `APPIMAGE` and `APPDIR`. `APPIMAGE` must be a resolved absolute
+path to a readable, nonempty regular file with executable permission bits; no `.AppImage`
+extension is required. `APPDIR` must resolve to an existing absolute directory, and
+`/proc/PID/exe` must resolve to an executable path inside it. A host descendant outside that
+directory is insufficient evidence even if it inherits the environment. The image must be
+outside `APPDIR` and outside paths with `.mount_` components. A conventional image produces
+one argument, `[/absolute/path/to/application]`, preserving spaces and other literal content.
+No executable inside the image mount is copied into the command.
+
+When present, `ARGV0` must retain the image's basename and be either that bare name,
+`./name`, or the resolved absolute `APPIMAGE` path. Different symlink names can select a
+different program in a multi-binary AppImage; these and invocation paths requiring the
+original cwd are left unresolved. Missing `ARGV0` permits a conventional image launch but
+cannot establish whether unrecorded invocation-name behavior was involved. `ARGV0` alone
+is not AppImage identity. Missing/inconsistent supporting metadata, vanished images,
+nonexecutable files, and unavailable process executables leave `command: null`. These are
+modest filesystem checks, not AppImage format, mount, or wrapper validation.
+
+Snap inference requires `SNAP_INSTANCE_NAME`, `SNAP_APP_NAME`, `SNAP_NAME`, and `SNAP`.
+Package names use 2–40 lowercase ASCII letters/digits with single internal hyphens and at
+least one letter. Instance names must match the package, optionally followed by `_` and a
+1–10 character lowercase ASCII letter/digit key. If `SNAP_INSTANCE_KEY` is present it must
+agree. Application names use ASCII letters/digits with single internal hyphens.
+`SNAP` must identify that package or instance at a positive numeric revision (optionally
+prefixed with `x`) under `/snap` or `/var/lib/snapd/snap`. `/proc/PID/exe` must be inside
+that package's or instance's mount at the same revision. Both paths are accepted because
+parallel installations can expose the base package path inside the Snap mount namespace.
+A host executable or different package/revision is insufficient evidence.
+
+The command is `[snap, run, INSTANCE]` when the application name equals the base package
+name, otherwise `[snap, run, INSTANCE.APPLICATION]`. Parallel instance names are preserved.
+Internal executables, basenames, aliases, titles, and app IDs never supply the application
+name. `SNAP_APP_NAME` requires snapd 2.77+; missing fields on older versions leave the
+command unresolved. `snap` must be available on host `PATH`; it launches the instance's
+current revision, without pinning the observed revision.
+
+After successful environment parsing, precedence is explicit: Flatpak has already won or
+blocked all fallback; verified GLib launcher metadata wins next. Unresolved GLib metadata
+blocks all fallback. With GLib absent or inherited, exactly one package type may establish
+a host command. AppImage and Snap evidence together is ambiguous and leaves `command: null`
+without choosing between them. Recognized but unusable package evidence also blocks argv,
+including metadata inherited by an unrelated host descendant. Only absence of both package
+identities permits ordinary `/proc/PID/cmdline` inference. A verified GLib launcher may
+therefore win even when both package types are recorded; it identifies an explicit launcher
+rather than choosing a package. Malformed/duplicate relevant environment fields fail before
+this selection.
+
+Package membership cannot distinguish every helper or descendant within the same package.
+Interpreted applications whose executable is a host/base-runtime interpreter, unsupported
+mount locations, and wrappers without corroborating package membership remain unresolved.
+Reconstruction does not discover original arguments, cwd, environment overrides, wrapper
+behavior, or invocation-name semantics that were not recorded. It recovers a conventional
+host launch, not an exact window or application/session restoration.
 
 Ordinary cmdline reads are bounded to 64 KiB per window, requiring valid UTF-8, a nonempty
 executable, and NUL-terminated arguments. Argument boundaries, embedded spaces, and empty
@@ -241,21 +293,29 @@ The metadata layout and reference selection follow Flatpak's
 GLib launcher identity follows its
 [launch documentation](https://docs.gtk.org/gio/vfunc.AppInfo.launch.html);
 [`gio launch`](https://manpages.debian.org/testing/libglib2.0-bin/gio.1.en.html)
-accepts a desktop-file path from any location.
+accepts a desktop-file path from any location. AppImage identity and invocation-name
+constraints follow its [environment documentation](https://docs.appimage.org/packaging-guide/environment-variables.html).
+Snap reconstruction follows its [environment documentation](https://snapcraft.io/docs/reference/development/environment-variables/),
+[command namespace rules](https://snapcraft.io/docs/commands-and-aliases/), and
+[parallel installation namespaces](https://snapcraft.io/docs/explanation/how-snaps-work/parallel-installs/).
 
 GLib 2.84.4's [`gio launch` implementation](https://github.com/GNOME/glib/blob/2.84.4/gio/gio-tool-launch.c)
 loses the source filename while loading the desktop entry. Replaying an inferred launcher
 command still starts the application, but its PID-only metadata makes a subsequent inferred
-capture leave `command: null`. Fill that placeholder before another load, or retain the
-previously reviewed launcher command. The
+capture leave `command: null`, even if AppImage or Snap evidence is also available. This
+preserves the unresolved launcher boundary rather than bypassing missing provenance.
+Fill that placeholder before another load, or retain the previously reviewed launcher command. The
 [newer implementation](https://github.com/GNOME/glib/blob/main/gio/gio-tool-launch.c)
 preserves the filename, allowing repeated launcher inference. sway-stage never invents
 missing launcher provenance or copies environment fields into the draft.
 
 **Review inferred commands before executing or sharing.** They may contain secrets and may
 not reproduce the application. Process exit, PID reuse, or argument changes can race with
-inference; it is best-effort, with no second process-identity check. Launcher files may change
-or disappear, and their validity and behavior are not established by checking the path.
+inference; it is best-effort, with no second process-identity check. Launcher and package
+files may change or disappear, and checking the path does not establish their validity or
+behavior.
+Process metadata and filesystem checks are separate observations, not an atomic identity
+or executability guarantee (for example, mount execution policy is not checked).
 Launcher reconstruction does not recover original file/URL arguments or application state.
 Review the referenced launcher as well as the recovered command. Inferred arguments stay
 out of diagnostics and logs, appearing only in the draft sent to stdout or explicitly saved

@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 
 // A modest per-window bound; read one extra byte to detect truncation.
 const MAX_CMDLINE_BYTES: usize = 64 * 1024;
@@ -20,10 +21,15 @@ pub fn read_process_command(pid: i32) -> Option<Vec<String>> {
     let metadata = File::open(format!("/proc/{pid}/root/.flatpak-info"));
     infer_process_command(metadata, || {
         let environment = File::open(format!("/proc/{pid}/environ"));
-        infer_host_command(pid, environment, || {
-            let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
-            read_command_line(file)
-        })
+        infer_host_command(
+            pid,
+            environment,
+            || std::fs::read_link(format!("/proc/{pid}/exe")).ok(),
+            || {
+                let file = File::open(format!("/proc/{pid}/cmdline")).ok()?;
+                read_command_line(file)
+            },
+        )
     })
 }
 
@@ -34,21 +40,31 @@ enum LauncherEvidence {
     Unresolved,
 }
 
-fn infer_host_command(
+pub(super) fn infer_host_command(
     pid: i32,
     environment: io::Result<impl Read>,
+    read_executable: impl FnOnce() -> Option<PathBuf>,
     read_cmdline: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
     // Failed or incomplete reads cannot establish that launcher evidence is absent.
-    let reader = environment.ok()?;
-    match read_desktop_launcher(reader, pid) {
-        LauncherEvidence::Absent => read_cmdline(),
-        LauncherEvidence::Command(command) => Some(command),
-        LauncherEvidence::Unresolved => None,
+    let bytes = read_environment(environment.ok()?)?;
+    let environment = LauncherEnvironment::parse(&bytes)?;
+    match desktop_launcher(&environment, pid) {
+        LauncherEvidence::Command(command) => return Some(command),
+        LauncherEvidence::Unresolved => return None,
+        LauncherEvidence::Absent => {}
+    }
+
+    // Neither package identity can safely win over evidence of the other package type.
+    match (environment.has_appimage(), environment.has_snap()) {
+        (true, true) => None,
+        (true, false) => appimage_command(&environment, &read_executable()?),
+        (false, true) => snap_command(&environment, &read_executable()?),
+        (false, false) => read_cmdline(),
     }
 }
 
-fn read_desktop_launcher(reader: impl Read, pid: i32) -> LauncherEvidence {
+fn read_environment(reader: impl Read) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     if reader
         .take(MAX_ENVIRON_BYTES as u64 + 1)
@@ -57,34 +73,72 @@ fn read_desktop_launcher(reader: impl Read, pid: i32) -> LauncherEvidence {
         || bytes.len() > MAX_ENVIRON_BYTES
         || (!bytes.is_empty() && bytes.last() != Some(&0))
     {
-        return LauncherEvidence::Unresolved;
+        return None;
     }
 
-    desktop_launcher(&bytes, pid)
+    Some(bytes)
+}
+
+#[derive(Default)]
+struct LauncherEnvironment<'a> {
+    desktop_file: Option<&'a [u8]>,
+    launched_pid: Option<&'a [u8]>,
+    appimage: Option<&'a [u8]>,
+    appdir: Option<&'a [u8]>,
+    argv0: Option<&'a [u8]>,
+    snap_instance: Option<&'a [u8]>,
+    snap_app: Option<&'a [u8]>,
+    snap_name: Option<&'a [u8]>,
+    snap_mount: Option<&'a [u8]>,
+    snap_instance_key: Option<&'a [u8]>,
+}
+
+impl<'a> LauncherEnvironment<'a> {
+    /// Extract only launcher fields. Unrelated bytes remain opaque; duplicate or malformed
+    /// relevant fields fail closed without including environment contents in diagnostics.
+    fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let mut environment = Self::default();
+        for entry in bytes.split(|byte| *byte == 0) {
+            let separator = entry.iter().position(|byte| *byte == b'=');
+            let key = separator.map_or(entry, |position| &entry[..position]);
+            let destination = match key {
+                b"GIO_LAUNCHED_DESKTOP_FILE" => &mut environment.desktop_file,
+                b"GIO_LAUNCHED_DESKTOP_FILE_PID" => &mut environment.launched_pid,
+                b"APPIMAGE" => &mut environment.appimage,
+                b"APPDIR" => &mut environment.appdir,
+                b"ARGV0" => &mut environment.argv0,
+                b"SNAP_INSTANCE_NAME" => &mut environment.snap_instance,
+                b"SNAP_APP_NAME" => &mut environment.snap_app,
+                b"SNAP_NAME" => &mut environment.snap_name,
+                b"SNAP" => &mut environment.snap_mount,
+                b"SNAP_INSTANCE_KEY" => &mut environment.snap_instance_key,
+                _ => continue,
+            };
+            if destination.replace(&entry[separator? + 1..]).is_some() {
+                return None;
+            }
+        }
+        Some(environment)
+    }
+
+    fn has_appimage(&self) -> bool {
+        // ARGV0 also has uses outside AppImage; by itself it establishes no package identity.
+        self.appimage.is_some() || self.appdir.is_some()
+    }
+
+    fn has_snap(&self) -> bool {
+        self.snap_instance.is_some()
+            || self.snap_app.is_some()
+            || self.snap_name.is_some()
+            || self.snap_mount.is_some()
+            || self.snap_instance_key.is_some()
+    }
 }
 
 /// GLib's PID field distinguishes a direct launch from metadata inherited by children.
-/// Only these two fields are decoded; unrelated environment bytes remain opaque and
-/// neither environment contents nor I/O errors leave the inference boundary.
-fn desktop_launcher(environment: &[u8], pid: i32) -> LauncherEvidence {
-    let mut desktop_file = None;
-    let mut launched_pid = None;
-    for entry in environment.split(|byte| *byte == 0) {
-        let separator = entry.iter().position(|byte| *byte == b'=');
-        let key = separator.map_or(entry, |position| &entry[..position]);
-        let destination = match key {
-            b"GIO_LAUNCHED_DESKTOP_FILE" => &mut desktop_file,
-            b"GIO_LAUNCHED_DESKTOP_FILE_PID" => &mut launched_pid,
-            _ => continue,
-        };
-        let Some(separator) = separator else {
-            return LauncherEvidence::Unresolved;
-        };
-        if destination.replace(&entry[separator + 1..]).is_some() {
-            return LauncherEvidence::Unresolved;
-        }
-    }
-
+fn desktop_launcher(environment: &LauncherEnvironment<'_>, pid: i32) -> LauncherEvidence {
+    let desktop_file = environment.desktop_file;
+    let launched_pid = environment.launched_pid;
     if desktop_file.is_none() && launched_pid.is_none() {
         return LauncherEvidence::Absent;
     }
@@ -122,6 +176,158 @@ fn desktop_launcher(environment: &[u8], pid: i32) -> LauncherEvidence {
     }
 
     LauncherEvidence::Command(vec!["gio".into(), "launch".into(), desktop_file.into()])
+}
+
+/// A mounted executable corroborates package membership, not original arguments or the
+/// behavior of AppRun. A different invocation name could select another bundled binary.
+fn appimage_command(
+    environment: &LauncherEnvironment<'_>,
+    executable: &Path,
+) -> Option<Vec<String>> {
+    let image_text = std::str::from_utf8(environment.appimage?).ok()?;
+    let image = Path::new(image_text);
+    let appdir = Path::new(std::str::from_utf8(environment.appdir?).ok()?);
+    if !image.is_absolute() || !appdir.is_absolute() || !executable.is_absolute() {
+        return None;
+    }
+
+    // APPIMAGE is documented as resolved. Do not substitute a symlink or a file inside
+    // another temporary AppImage mount for the persistent host executable.
+    if image.canonicalize().ok()? != image
+        || image
+            .components()
+            .any(|part| part.as_os_str().as_encoded_bytes().starts_with(b".mount_"))
+    {
+        return None;
+    }
+    let mounted_directory = appdir.canonicalize().ok()?;
+    let mounted_executable = executable.canonicalize().ok()?;
+    if !mounted_directory.is_dir()
+        || image.starts_with(&mounted_directory)
+        || !mounted_executable.starts_with(&mounted_directory)
+        || mounted_executable == mounted_directory
+    {
+        return None;
+    }
+
+    let metadata = image.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.permissions().mode() & 0o111 == 0 {
+        return None;
+    }
+    let opened_metadata = File::open(image).ok()?.metadata().ok()?;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() == 0
+        || opened_metadata.permissions().mode() & 0o111 == 0
+    {
+        return None;
+    }
+
+    if let Some(invocation) = environment.argv0 {
+        let invocation = std::str::from_utf8(invocation).ok()?;
+        let image_basename = image.file_name()?.to_str()?;
+        let relative_invocation = format!("./{image_basename}");
+        // Other paths need the original cwd or might name a symlink that changes AppRun's
+        // behavior. Do not normalize or resolve them into an apparently equivalent launch.
+        if invocation != image_text
+            && invocation != image_basename
+            && invocation != relative_invocation
+        {
+            return None;
+        }
+    }
+
+    Some(vec![image_text.into()])
+}
+
+fn snap_command(environment: &LauncherEnvironment<'_>, executable: &Path) -> Option<Vec<String>> {
+    let instance = std::str::from_utf8(environment.snap_instance?).ok()?;
+    let application = std::str::from_utf8(environment.snap_app?).ok()?;
+    let package = std::str::from_utf8(environment.snap_name?).ok()?;
+    let (instance_package, instance_key) = instance.split_once('_').unwrap_or((instance, ""));
+    if !valid_snap_name(package)
+        || instance_package != package
+        || !valid_snap_application(application)
+    {
+        return None;
+    }
+    if instance != package {
+        let valid_instance_key = (1..=10).contains(&instance_key.len())
+            && instance_key
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        if !valid_instance_key {
+            return None;
+        }
+    }
+    if let Some(recorded_key) = environment.snap_instance_key
+        && std::str::from_utf8(recorded_key).ok()? != instance_key
+    {
+        return None;
+    }
+
+    let mount = std::str::from_utf8(environment.snap_mount?).ok()?;
+    let mount_root = if mount.starts_with("/snap/") {
+        "/snap"
+    } else if mount.starts_with("/var/lib/snapd/snap/") {
+        "/var/lib/snapd/snap"
+    } else {
+        return None;
+    };
+    let (mounted_package, revision) = mount
+        .strip_prefix(mount_root)?
+        .strip_prefix('/')?
+        .split_once('/')?;
+    let revision_digits = revision.strip_prefix('x').unwrap_or(revision);
+    if (mounted_package != package && mounted_package != instance)
+        || revision_digits.is_empty()
+        || revision_digits.starts_with('0')
+        || !revision_digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    // Parallel instances use the base package path inside their mount namespace, while
+    // /proc/PID/exe can expose the instance path on the host. Accept only those two roots
+    // at the recorded revision, never an unrelated host executable or another snap.
+    let package_mount = PathBuf::from(format!("{mount_root}/{package}/{revision}"));
+    let instance_mount = PathBuf::from(format!("{mount_root}/{instance}/{revision}"));
+    let relative_executable = executable
+        .strip_prefix(&package_mount)
+        .or_else(|_| executable.strip_prefix(&instance_mount))
+        .ok()?;
+    if relative_executable.as_os_str().is_empty()
+        || !relative_executable
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    let command_name = if application == package {
+        instance.to_owned()
+    } else {
+        format!("{instance}.{application}")
+    };
+    Some(vec!["snap".into(), "run".into(), command_name])
+}
+
+fn valid_snap_name(name: &str) -> bool {
+    (2..=40).contains(&name.len())
+        && name.bytes().any(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && valid_snap_application(name)
+}
+
+fn valid_snap_application(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 pub(super) fn infer_process_command(

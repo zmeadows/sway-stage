@@ -1,5 +1,5 @@
 use super::*;
-use crate::command_inference::infer_process_command;
+use crate::command_inference::{infer_host_command, infer_process_command};
 use crate::config::{self, Config, LayoutNode, Matcher, NodeKind, Orientation};
 use crate::observation::fixtures::{frame, node, pair, request, send, tree};
 use serde_json::{Value, json};
@@ -864,6 +864,82 @@ fn desktop_launcher_command_serializes_as_three_literal_arguments() {
     assert_eq!(command, &expected);
     assert_eq!(draft.commands.inferred, 1);
     assert!(!draft.commands.summary().contains("/private"));
+}
+
+#[test]
+fn package_commands_serialize_literally_alongside_unresolved_commands() {
+    let saved = saved_snapshot(workspace(
+        "splith",
+        vec![
+            view_with_pid(20, json!(101)),
+            view_with_pid(21, json!(102)),
+            view_with_pid(22, json!(103)),
+        ],
+        20,
+    ))
+    .unwrap();
+    // The filesystem checks and single-element result are covered by AppImage fixtures.
+    // Exercise serialization here with a path whose contents must stay entirely literal.
+    let image_command = vec!["/private/雪 app: [one] '$HOME'.AppImage".to_owned()];
+    let draft = saved
+        .render_with(true, &mut |pid| {
+            if pid == 101 {
+                return Some(image_command.clone());
+            }
+            let environment = if pid == 102 {
+                b"SNAP_INSTANCE_NAME=example_foo\0SNAP_APP_NAME=editor\0\
+                  SNAP_NAME=example\0SNAP=/snap/example/42\0\
+                  SECRET=environment-only-secret\0BINARY=\xff\0"
+                    .as_slice()
+            } else {
+                // Missing version-dependent metadata must leave this leaf unresolved.
+                b"SNAP_INSTANCE_NAME=example\0SNAP_NAME=example\0\
+                  SNAP=/snap/example/42\0SECRET=environment-only-secret\0"
+            };
+            infer_host_command(
+                pid,
+                Ok(environment),
+                || Some("/snap/example/42/internal-application".into()),
+                || panic!("must not fall back to sandbox argv"),
+            )
+        })
+        .unwrap();
+
+    let parsed = filled(&draft.yaml);
+    let NodeKind::Split { children, .. } = &parsed.layout.value.kind else {
+        panic!("expected split");
+    };
+    for (child, expected) in children.iter().zip([
+        image_command,
+        vec!["snap".into(), "run".into(), "example_foo.editor".into()],
+        vec!["app".into()], // filled() replaces only the unresolved placeholder.
+    ]) {
+        let NodeKind::Window {
+            command, matcher, ..
+        } = &child.value.kind
+        else {
+            panic!("expected window");
+        };
+        assert_eq!(command, &expected);
+        assert!(matches!(matcher, Matcher::AppId(app_id) if app_id == "shared-app"));
+    }
+    assert_eq!(draft.yaml.matches("  command: null").count(), 1);
+    assert_eq!(
+        draft.commands,
+        CommandCounts {
+            total: 3,
+            inferred: 2,
+            inference_requested: true,
+        }
+    );
+    assert_eq!(
+        draft.commands.summary(),
+        "Commands inferred: 2; unresolved: 1. Manual editing required."
+    );
+    assert!(!draft.commands.summary().contains("/private"));
+    assert!(!draft.yaml.contains("SECRET"));
+    assert!(!draft.yaml.contains("environment-only-secret"));
+    assert!(!draft.commands.summary().contains("environment-only-secret"));
 }
 
 #[test]
