@@ -218,7 +218,7 @@ available on the host `PATH`. GLib interprets the launcher; sway-stage does not 
 expand field codes, or reproduce terminal, working-directory, or D-Bus activation semantics.
 
 A different valid recorded PID indicates inherited metadata, which is ignored. Absent
-launcher fields or inherited metadata permit ordinary `/proc/PID/cmdline` inference.
+launcher metadata or inherited metadata permit ordinary `/proc/PID/cmdline` inference.
 Duplicate identity fields, missing/malformed PIDs, and matching-PID metadata with a missing
 or unusable launcher leave `command: null`; they never silently fall back to argv.
 Inaccessible, oversized, or incomplete environment reads also leave the command unresolved.
@@ -242,6 +242,15 @@ GLib launcher identity follows its
 [launch documentation](https://docs.gtk.org/gio/vfunc.AppInfo.launch.html);
 [`gio launch`](https://manpages.debian.org/testing/libglib2.0-bin/gio.1.en.html)
 accepts a desktop-file path from any location.
+
+GLib 2.84.4's [`gio launch` implementation](https://github.com/GNOME/glib/blob/2.84.4/gio/gio-tool-launch.c)
+loses the source filename while loading the desktop entry. Replaying an inferred launcher
+command still starts the application, but its PID-only metadata makes a subsequent inferred
+capture leave `command: null`. Fill that placeholder before another load, or retain the
+previously reviewed launcher command. The
+[newer implementation](https://github.com/GNOME/glib/blob/main/gio/gio-tool-launch.c)
+preserves the filename, allowing repeated launcher inference. sway-stage never invents
+missing launcher provenance or copies environment fields into the draft.
 
 **Review inferred commands before executing or sharing.** They may contain secrets and may
 not reproduce the application. Process exit, PID reuse, or argument changes can race with

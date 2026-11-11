@@ -472,6 +472,7 @@ fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
         environment.replace(fixture.path.to_str().unwrap(), "/foreign.desktop"),
         format!("{environment}GIO_LAUNCHED_DESKTOP_FILE_PID=101\0"),
         format!("{environment}GIO_LAUNCHED_DESKTOP_FILE\0"),
+        "GIO_LAUNCHED_DESKTOP_FILE_PID=101\0".into(),
         "PRIVATE=secret\0".into(),
     ] {
         fs::write(process_directory.join("environ"), &bad_environment).unwrap();
@@ -511,15 +512,57 @@ fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
         Err("cannot verify desktop launcher environment")
     );
 
+    // Only replay uses Foot argv and event binding without asserting launcher provenance.
+    // Both old gio (PID only) and newer gio (filename and PID) must be supported.
+    let replay = crate::scenarios::desktop_launcher_replay(&scenario);
+    let replay_leaf = replay.layout.leaves()[0];
+    for replay_environment in ["GIO_LAUNCHED_DESKTOP_FILE_PID=101\0", &environment] {
+        fs::write(process_directory.join("environ"), replay_environment).unwrap();
+        verify_process_evidence(&process_directory, 101, replay_leaf).unwrap();
+    }
+    for bad_argv in [
+        replay_leaf.command.join("\0") + "\0",
+        argv.replace("300", "301"),
+        argv.replace(leaf.selector.value(), "foreign-window"),
+        argv.trim_end_matches('\0').into(),
+    ] {
+        fs::write(process_directory.join("cmdline"), bad_argv).unwrap();
+        assert_eq!(
+            verify_process_evidence(&process_directory, 101, replay_leaf),
+            Err("process argv does not prove this launch")
+        );
+    }
+    fs::remove_file(process_directory.join("cmdline")).unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, replay_leaf),
+        Err("cannot verify process argv")
+    );
+    fs::write(process_directory.join("cmdline"), &argv).unwrap();
+    fs::write(&fixture.path, "changed").unwrap();
+    assert_eq!(
+        verify_process_evidence(&process_directory, 101, replay_leaf),
+        Err("private desktop fixture changed")
+    );
+    fs::write(&fixture.path, &fixture.contents).unwrap();
+    let preexisting_ids = HashSet::from([20]);
+    let events = vec![window_event("new", 40, Some(leaf.selector.value()))];
+    let fresh = bind_launches(&events, &replay.layout, &preexisting_ids).unwrap();
+    assert_eq!(fresh, accepted(&[(40, "window1")]));
+    assert!(bind_launches(&[], &replay.layout, &preexisting_ids).is_err());
+    let stale = vec![window_event("new", 20, Some(leaf.selector.value()))];
+    assert!(bind_launches(&stale, &replay.layout, &preexisting_ids).is_err());
+
     // Even the exact run-unique app ID and ordered event binding do not authorize a
     // close when independent process provenance cannot be read.
     let window = wayland_window(20, leaf.selector.value(), rect(0, 0, 1920, 1080));
     let tree = desktop("splith", vec![window], 20);
-    let message = uncertain_message(check_ownership(
-        tree,
-        &scenario,
-        &accepted(&[(20, "window1")]),
-    ));
-    assert_contains(&message, "cannot verify process argv");
+    for phase in [&scenario, &replay] {
+        let message = uncertain_message(check_ownership(
+            tree.clone(),
+            phase,
+            &accepted(&[(20, "window1")]),
+        ));
+        assert_contains(&message, "cannot verify process argv");
+    }
     fs::remove_dir_all(directory).unwrap();
 }

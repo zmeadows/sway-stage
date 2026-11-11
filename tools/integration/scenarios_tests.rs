@@ -228,6 +228,7 @@ fn preparation_leaves_standard_and_duplicate_scenarios_runnable() {
         firefox_app_id_override: None,
         xterm: None,
         gio: None,
+        gtk_launch: None,
     };
     let mut retained_profiles = Vec::new();
     for name in ["horizontal-pair", "duplicate-foot-ids"] {
@@ -461,16 +462,32 @@ fn desktop_fixture_is_private_literal_and_requires_independent_process_evidence(
     let scratch = ScratchDirectory::new("desktop-launcher");
     let mut scenario = extended_scenario("desktop-launcher-roundtrip");
     let foot_command = scenario.layout.leaves()[0].command.clone();
+    let inherited_data_home = env::var_os("XDG_DATA_HOME");
     configure_desktop_launcher(&mut scenario, &scratch.0).unwrap();
     let leaf = scenario.layout.leaves()[0];
     let fixture = leaf.desktop_launcher.as_ref().unwrap();
     assert!(fixture.path.is_absolute());
     assert!(fixture.path.starts_with(&scratch.0));
     assert_eq!(fixture.foot_command, foot_command);
+    let data_home = scratch.0.join("desktop data");
+    let desktop_id = format!("{}.desktop", leaf.selector.value());
     assert_eq!(
-        leaf.command,
-        ["gio", "launch", fixture.path.to_str().unwrap()]
+        fixture.path,
+        data_home.join("applications").join(&desktop_id)
     );
+    assert_eq!(leaf.command, ["gtk-launch", &desktop_id]);
+    assert_eq!(
+        leaf.env,
+        [("XDG_DATA_HOME".into(), data_home.to_str().unwrap().into())]
+    );
+    assert_eq!(env::var_os("XDG_DATA_HOME"), inherited_data_home);
+    assert_eq!(fixture.launch_method, DesktopLaunchMethod::GtkLaunch);
+    for directory in [&data_home, &data_home.join("applications")] {
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     assert!(leaf.requires_process_evidence);
     assert_eq!(fs::read_to_string(&fixture.path).unwrap(), fixture.contents);
     assert_eq!(
@@ -488,6 +505,22 @@ fn desktop_fixture_is_private_literal_and_requires_independent_process_evidence(
             "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={exec}\nTerminal=false\n"
         )
     );
+
+    let replay = desktop_launcher_replay(&scenario);
+    let replay_leaf = replay.layout.leaves()[0];
+    assert_eq!(
+        replay_leaf.command,
+        ["gio", "launch", fixture.path.to_str().unwrap()]
+    );
+    assert!(replay_leaf.env.is_empty());
+    assert!(replay_leaf.requires_process_evidence);
+    let replay_fixture = replay_leaf.desktop_launcher.as_ref().unwrap();
+    assert_eq!(replay_fixture.launch_method, DesktopLaunchMethod::GioReplay);
+    assert_eq!(replay_fixture.path, fixture.path);
+    assert_eq!(replay_fixture.contents, fixture.contents);
+    assert_eq!(replay_fixture.foot_command, foot_command);
+    assert_eq!(replay_leaf.selector, leaf.selector);
+    assert_eq!(fixture.launch_method, DesktopLaunchMethod::GtkLaunch);
     assert!(configure_desktop_launcher(&mut scenario, &scratch.0).is_err());
 }
 
@@ -504,17 +537,32 @@ fn desktop_exec_quoting_applies_both_escape_layers_without_shell_evaluation() {
 }
 
 #[test]
-fn desktop_scenario_explicitly_skips_without_gio() {
-    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
-    let applications = OptionalApplications {
-        firefox: None,
-        firefox_app_id_override: None,
-        xterm: None,
-        gio: None,
-    };
-    prepare_extended(&mut scenario, RUN_ID, SLEEP, &applications, &mut Vec::new()).unwrap();
-    assert_eq!(scenario.skip.as_deref(), Some("gio is not installed"));
-    assert!(scenario.layout.leaves()[0].desktop_launcher.is_none());
+fn desktop_scenario_explicitly_skips_without_either_launcher() {
+    for (gio, gtk_launch, expected_skip) in [
+        (
+            None,
+            Some("/usr/bin/gtk-launch"),
+            Some("gio is not installed"),
+        ),
+        (
+            Some("/usr/bin/gio"),
+            None,
+            Some("gtk-launch is not installed"),
+        ),
+        (Some("/usr/bin/gio"), Some("/usr/bin/gtk-launch"), None),
+    ] {
+        let mut scenario = extended_scenario("desktop-launcher-roundtrip");
+        let applications = OptionalApplications {
+            firefox: None,
+            firefox_app_id_override: None,
+            xterm: None,
+            gio: gio.map(PathBuf::from),
+            gtk_launch: gtk_launch.map(PathBuf::from),
+        };
+        prepare_extended(&mut scenario, RUN_ID, SLEEP, &applications, &mut Vec::new()).unwrap();
+        assert_eq!(scenario.skip.as_deref(), expected_skip);
+        assert!(scenario.layout.leaves()[0].desktop_launcher.is_none());
+    }
 }
 
 /// An installation like Debian's: a `bin` symlink to the executable beside its metadata.

@@ -118,6 +118,16 @@ pub struct DesktopLauncher {
     pub path: PathBuf,
     pub contents: String,
     pub foot_command: Vec<String>,
+    pub launch_method: DesktopLaunchMethod,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopLaunchMethod {
+    /// Initial fixture: exact GLib filename/PID metadata must prove provenance.
+    GtkLaunch,
+    /// Actual inferred YAML: GLib 2.84's gio omits filename metadata. Ownership still
+    /// requires independent Foot argv and fresh window events, without claiming provenance.
+    GioReplay,
 }
 
 impl ConfiguredNode {
@@ -464,6 +474,7 @@ pub struct OptionalApplications {
     firefox_app_id_override: Option<String>,
     xterm: Option<PathBuf>,
     gio: Option<PathBuf>,
+    gtk_launch: Option<PathBuf>,
 }
 
 impl OptionalApplications {
@@ -475,6 +486,7 @@ impl OptionalApplications {
             firefox_app_id_override,
             xterm: process::find_on_path("xterm"),
             gio: process::find_on_path("gio"),
+            gtk_launch: process::find_on_path("gtk-launch"),
         }
     }
 }
@@ -560,6 +572,8 @@ pub fn prepare_extended(
         Extension::DesktopLauncher => {
             if applications.gio.is_none() {
                 scenario.skip = Some("gio is not installed".into());
+            } else if applications.gtk_launch.is_none() {
+                scenario.skip = Some("gtk-launch is not installed".into());
             }
             Ok(())
         }
@@ -568,6 +582,8 @@ pub fn prepare_extended(
 
 /// Create only our private fixture, leaving desktop entry interpretation to GLib.
 pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> Result<(), String> {
+    let directory = path::absolute(directory)
+        .map_err(|error| format!("locate private desktop directory: {error}"))?;
     let leaf = scenario.layout.first_leaf_mut();
     let foot_command = leaf.command.clone();
     if foot_command
@@ -584,7 +600,16 @@ pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> 
         "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={}\nTerminal=false\n",
         arguments.join(" ")
     );
-    let path = directory.join("private launcher.desktop");
+    let data_home = directory.join("desktop data");
+    let applications = data_home.join("applications");
+    for private_directory in [&data_home, &applications] {
+        DirBuilder::new()
+            .mode(0o700)
+            .create(private_directory)
+            .map_err(|error| format!("create private desktop directory: {error}"))?;
+    }
+    let desktop_id = format!("{}.desktop", leaf.selector.value());
+    let path = applications.join(&desktop_id);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -594,14 +619,37 @@ pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> 
     file.write_all(contents.as_bytes())
         .map_err(|error| format!("write private desktop fixture: {error}"))?;
 
-    leaf.command = vec!["gio".into(), "launch".into(), utf8(&path)?.into()];
+    // Only this fixture launcher gets the private search directory. Capture and replay
+    // use the absolute filename, so neither needs an XDG override.
+    leaf.command = vec!["gtk-launch".into(), desktop_id];
+    leaf.env = vec![("XDG_DATA_HOME".into(), utf8(&data_home)?.into())];
     leaf.requires_process_evidence = true;
     leaf.desktop_launcher = Some(DesktopLauncher {
         path,
         contents,
         foot_command,
+        launch_method: DesktopLaunchMethod::GtkLaunch,
     });
     Ok(())
+}
+
+/// Independent expectations for the already verified, unedited inferred YAML. This does
+/// not render the replay file; it changes only the harness's launch/evidence expectations.
+pub fn desktop_launcher_replay(scenario: &Scenario) -> Scenario {
+    let mut replay = scenario.clone();
+    let leaf = replay.layout.first_leaf_mut();
+    let fixture = leaf
+        .desktop_launcher
+        .as_mut()
+        .expect("prepared desktop fixture");
+    leaf.command = vec![
+        "gio".into(),
+        "launch".into(),
+        fixture.path.to_str().expect("UTF-8 fixture path").into(),
+    ];
+    leaf.env.clear();
+    fixture.launch_method = DesktopLaunchMethod::GioReplay;
+    replay
 }
 
 fn desktop_exec_argument(argument: &str) -> Result<String, String> {

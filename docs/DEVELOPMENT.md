@@ -95,26 +95,33 @@ independently checked against the captured weights with the ordinary sizing tole
 then captured and safely cleaned again. Failure reports the initial/replay phase and leaves
 remaining windows alone; no speculative cleanup or retry follows.
 
-The fifth extended case, `desktop-launcher-roundtrip`, creates one private `.desktop` file
-inside the harness's temporary directory, with a path containing spaces. Its ordinary
-`Type=Application` entry directly starts a Foot window with a run-unique app ID and a
-300-second `sleep` child, using desktop-entry argument quoting without shell wrappers.
-The initial layout launches it through `gio launch`. Ordered window events, independent
-Sway tree/layout/focus checks, exact Foot process arguments, and independently read GLib
+The fifth extended case, `desktop-launcher-roundtrip`, creates a uniquely named `.desktop`
+file under a private `XDG_DATA_HOME/applications` inside the harness's temporary directory,
+with a path containing spaces. Its ordinary `Type=Application` entry directly starts a
+Foot window with a run-unique app ID and a 300-second `sleep` child, using desktop-entry
+argument quoting without shell wrappers.
+The initial layout launches it through `gtk-launch`, with the private `XDG_DATA_HOME`
+supplied only to that fixture launcher. Ordered window events, independent Sway
+tree/layout/focus checks, exact Foot process arguments, and independently read GLib
 metadata must establish ownership: the recorded launcher PID must match Sway's window PID,
-and the path must exactly identify the unchanged private fixture. Every ownership check,
-including the checks immediately before cleanup, requires this evidence.
+and the path must exactly identify the unchanged private fixture. Every initial-cycle
+ownership check, including the checks immediately before cleanup, requires this evidence.
 
 Ordinary capture must match the structural draft; inferred capture must differ only in
 its command, exactly `[gio, launch, PRIVATE_DESKTOP_FILE_PATH]`. State, event-history, and
 foreign-window checks must remain unchanged. After verified initial cleanup, an empty
 workspace, and a fresh baseline, the harness checks and reloads the actual inferred YAML,
-without replacing its command. It independently verifies the new window's Foot argv,
-matching launcher PID/path, layout, and focus, captures again, and performs final guarded
-cleanup. This intentionally uses a single window to keep launcher provenance focused;
+without replacing its command or supplying private XDG overrides. Replay ownership requires
+fresh ordered window events, exact Foot argv, the unchanged fixture, and the same Sway
+identity, placement, layout, focus, and preservation checks. It does not claim launcher
+provenance: GLib 2.84.4's `gio launch` supplies the PID but loses the filename metadata.
+The second inferred capture must therefore either leave `command: null` (the conservative
+production behavior for PID-only metadata) or reconstruct the exact same `gio launch`
+array on newer GLib. Ordinary capture and final guarded cleanup still run.
+This intentionally uses a single window to keep launcher provenance focused;
 the standard round-trip scenario covers nested weights. Any uncertainty stops the case
 without speculative cleanup. The private launcher and replay YAML are removed with the
-harness's temporary files; nothing is installed in XDG application directories.
+harness's temporary files; global desktop configuration is untouched.
 
 For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
 the correct distinct run-specific title argument from each leaf's original launch array.
@@ -172,10 +179,12 @@ Extended prerequisites:
 - Xterm coverage needs `xterm`, `Xwayland`, and `xdpyinfo` on `PATH`, and `DISPLAY` reaching
   this session's Xwayland server with the `XWAYLAND` extension. An unavailable server/probe
   skips the case; a subsequent launch or class mismatch fails it.
-- Desktop-launcher coverage needs `gio` on `PATH` and readable `/proc/PID/cmdline` and
-  `/proc/PID/environ` for Foot. Missing `gio` explicitly skips this scenario. The GLib
-  launcher must directly launch the observed Foot process with matching PID metadata;
-  wrappers, delegated server processes, or missing/contradictory metadata fail conservatively.
+- Desktop-launcher coverage needs `gtk-launch` and `gio` on `PATH` and readable
+  `/proc/PID/cmdline` and `/proc/PID/environ` for Foot. Missing either launcher explicitly
+  skips this optional scenario. The initial GTK launch must directly start the observed
+  Foot process with matching PID and filename metadata; wrappers, delegated server
+  processes, or missing/contradictory initial metadata fail conservatively. Replay uses
+  independent Foot argv and window-event evidence because older gio loses the filename.
   No full desktop environment is required. Fixture paths containing `%` or control
   characters are refused because the fixture deliberately avoids desktop field codes.
 
@@ -188,7 +197,8 @@ available applications stop the suite.
 Cleanup is an explicit success phase, never a failure handler. Each exact-ID close requires
 fresh independent ownership, event-history, state, and hierarchy evidence. Selectors alone
 are insufficient; Firefox and repeated-ID Foot additionally require literal process-argument
-evidence, and the desktop-launcher case requires both Foot argv and launcher metadata.
+evidence. The desktop-launcher case always requires Foot argv and an unchanged fixture;
+the initial GTK launch additionally requires exact launcher PID/path metadata.
 Failure stops subsequent scenarios and closes, leaving remaining windows alone.
 Read reported container IDs, selectors, PIDs, and retained paths before manual intervention;
 diagnostic candidates do not imply ownership. Rules, gaps, minimum sizes, desktop activity,

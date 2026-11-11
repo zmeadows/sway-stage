@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 
 use crate::capture::{
-    executable_capture, verify_capture, verify_desktop_launcher_capture, verify_inferred_capture,
+    executable_capture, verify_capture, verify_desktop_launcher_capture,
+    verify_desktop_replay_capture, verify_inferred_capture,
 };
 use crate::ipc::{IPC_TIMEOUT, Swaymsg, TreeNode, validate_restoration_name, workspace_number};
 use crate::layout::{
@@ -33,8 +34,8 @@ use crate::preservation::ForeignWindows;
 use crate::process;
 use crate::scenarios::{
     ConfiguredNode, Extension, OptionalApplications, Scenario, configuration_yaml,
-    configure_desktop_launcher, configure_process_execution, extended_scenarios,
-    foreign_fixture_scenario, prepare_extended, standard_scenarios,
+    configure_desktop_launcher, configure_process_execution, desktop_launcher_replay,
+    extended_scenarios, foreign_fixture_scenario, prepare_extended, standard_scenarios,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -545,8 +546,10 @@ impl Harness {
                         .desktop_launcher
                         .as_ref()
                         .expect("prepared desktop fixture");
-                    verify_desktop_launcher_capture(&inferred, &draft, fixture)?;
-                    if !replay_cycle {
+                    if replay_cycle {
+                        verify_desktop_replay_capture(&inferred, &draft, fixture)?;
+                    } else {
+                        verify_desktop_launcher_capture(&inferred, &draft, fixture)?;
                         inferred_replay = Some(inferred);
                     }
                 } else {
@@ -559,7 +562,7 @@ impl Harness {
                 // This fixture has one root window, so no measured weights need copying
                 // into the independent model. Save the actual, fully verified YAML.
                 directory.write("replay", &inferred)?;
-                Some(progress.scenario.clone())
+                Some(desktop_launcher_replay(&progress.scenario))
             } else if name == "capture-reload-roundtrip" && !replay_cycle {
                 self.stage = format!("{cycle_name}: executable capture check");
                 let (yaml, replay) = executable_capture(&draft, &progress.scenario, &measurements)?;

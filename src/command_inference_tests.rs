@@ -81,6 +81,19 @@ fn absent_and_inherited_launcher_evidence_allow_literal_argv_fallback() {
 }
 
 #[test]
+fn glib_284_replay_with_only_matching_pid_requires_manual_command_editing() {
+    // gio 2.84.4 loses the desktop filename. A PID alone cannot reconstruct its launcher,
+    // even though replay successfully started an application with readable argv.
+    let environment = b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0";
+    assert_eq!(
+        infer_host_command(101, Ok(environment.as_slice()), || panic!(
+            "PID-only launcher metadata must not fall back to argv"
+        )),
+        None
+    );
+}
+
+#[test]
 fn recognized_but_unusable_launcher_evidence_suppresses_argv() {
     let fixture = DesktopFixture::new();
     let mut invalid = Vec::new();

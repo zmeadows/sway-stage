@@ -5,8 +5,9 @@
 //! workspace in safe tiled state, the exact app ID or Xwayland class, and, where selectors
 //! cannot tell launches apart, the literal launch arguments in `/proc/PID/cmdline`.
 //! Desktop fixtures additionally require their expected Foot argv, unchanged launcher,
-//! and exact GLib launcher PID/path fields. Every failure here is `Uncertain`, which
-//! forbids cleanup and workspace restoration.
+//! and, for the initial gtk-launch fixture, exact GLib launcher PID/path fields. Replay
+//! requires the same Foot argv and window evidence without asserting GLib provenance.
+//! Every failure here is `Uncertain`, which forbids cleanup and workspace restoration.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -16,7 +17,7 @@ use std::path::Path;
 use crate::ipc::{EventContainer, Shell, TreeNode, WindowChange, WindowEvent};
 use crate::layout::{class, is_window, observed_identifier, outline};
 use crate::observation::{Failure, walk};
-use crate::scenarios::{ConfiguredNode, ConfiguredWindow, Selector};
+use crate::scenarios::{ConfiguredNode, ConfiguredWindow, DesktopLaunchMethod, Selector};
 
 /// Sway container ID → configured layout ID, for windows this run launched and accepted.
 pub type AcceptedWindows = BTreeMap<i64, String>;
@@ -250,8 +251,8 @@ pub fn verify_ownership(
 }
 
 /// Requires Sway's PID for `window` to show the configured application's literal argv.
-/// Desktop launches require fixture provenance too, rather than comparing Foot to gio's
-/// intermediary argv. Recovered arguments never appear in messages.
+/// Desktop launches compare Foot's argv rather than the intermediary's. Initial fixture
+/// launches additionally require GLib provenance. Recovered arguments never appear in messages.
 pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Result<(), Failure> {
     let Some(pid) = window.pid.filter(|pid| *pid > 0) else {
         return Err(Failure::Uncertain(format!(
@@ -276,10 +277,12 @@ fn verify_process_evidence(
     let command_line = read_process_bytes(&process_directory.join("cmdline"))
         .ok_or("cannot verify process argv")?;
     let expected_command = if let Some(fixture) = &leaf.desktop_launcher {
-        let environment = read_process_bytes(&process_directory.join("environ"))
-            .ok_or("cannot verify desktop launcher environment")?;
-        if !launcher_environment_proves_launch(&environment, pid, &fixture.path) {
-            return Err("desktop launcher metadata does not prove this launch");
+        if fixture.launch_method == DesktopLaunchMethod::GtkLaunch {
+            let environment = read_process_bytes(&process_directory.join("environ"))
+                .ok_or("cannot verify desktop launcher environment")?;
+            if !launcher_environment_proves_launch(&environment, pid, &fixture.path) {
+                return Err("desktop launcher metadata does not prove this launch");
+            }
         }
         let contents =
             read_process_bytes(&fixture.path).ok_or("cannot verify private desktop fixture")?;

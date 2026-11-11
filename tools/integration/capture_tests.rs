@@ -339,6 +339,7 @@ fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() 
         path: "/private/test launcher.desktop".into(),
         contents: "independent fixture".into(),
         foot_command: scenario.layout.leaves()[0].command.clone(),
+        launch_method: crate::scenarios::DesktopLaunchMethod::GtkLaunch,
     };
     let default = expected_draft(&scenario, &BTreeMap::new()).unwrap();
     let inferred = default.replace(
@@ -346,6 +347,10 @@ fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() 
         "command:\n    - gio\n    - launch\n    - /private/test launcher.desktop",
     );
     verify_desktop_launcher_capture(&inferred, &default, &fixture).unwrap();
+    verify_desktop_replay_capture(&inferred, &default, &fixture).unwrap();
+    verify_desktop_replay_capture(&default, &default, &fixture).unwrap();
+    // GLib 2.84's replay miss cannot satisfy initial inference verification.
+    assert!(verify_desktop_launcher_capture(&default, &default, &fixture).is_err());
     // Preserve the existing Foot-only assertion: gio argv cannot satisfy it.
     assert!(verify_inferred_capture(&inferred, &default, &scenario.layout).is_err());
     for bad in [
@@ -360,7 +365,26 @@ fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() 
     ] {
         let error = verify_desktop_launcher_capture(&bad, &default, &fixture).unwrap_err();
         assert!(!error.contains("secret") && !error.contains("/private"));
+        if bad != default {
+            assert!(verify_desktop_replay_capture(&bad, &default, &fixture).is_err());
+        }
     }
+    let foot_arguments = fixture
+        .foot_command
+        .iter()
+        .map(|argument| format!("    - {argument}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let foot_inferred = default.replace("command: null", &format!("command:\n{foot_arguments}"));
+    assert!(verify_desktop_replay_capture(&foot_inferred, &default, &fixture).is_err());
+    assert!(
+        verify_desktop_replay_capture(
+            &default.replace("focus: window1", "focus: window2"),
+            &default,
+            &fixture
+        )
+        .is_err()
+    );
 }
 
 #[test]

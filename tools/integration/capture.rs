@@ -255,6 +255,20 @@ pub fn verify_desktop_launcher_capture(
     Ok(())
 }
 
+/// gio on GLib 2.84 supplies only PID metadata, so production conservatively leaves the
+/// replay's command unresolved. Newer GLib preserves provenance and infers gio again.
+/// Neither outcome relaxes the initial fixture's exact launcher inference assertion.
+pub fn verify_desktop_replay_capture(
+    inferred_draft: &str,
+    default_draft: &str,
+    fixture: &crate::scenarios::DesktopLauncher,
+) -> Result<(), String> {
+    if capture_lines(inferred_draft) == capture_lines(default_draft) {
+        return Ok(());
+    }
+    verify_desktop_launcher_capture(inferred_draft, default_draft, fixture)
+}
+
 /// Parse command arrays and prove that normalizing only those arrays reproduces the
 /// verified ordinary draft. No recovered arguments enter diagnostics.
 fn inferred_commands(
