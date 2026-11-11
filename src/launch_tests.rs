@@ -247,6 +247,148 @@ fn fails(fixture: &Fixture, steps: Vec<Step>, expected: &str) {
     assert_eq!(fixture.launches(), 1);
 }
 
+// The foreign window deliberately shares the requested app ID: baseline ancestry,
+// rather than selector mismatch, is the evidence that permits its close.
+fn foreign_close_command_steps() -> Vec<Step> {
+    let mut steps = successful_steps();
+    for step in &mut steps {
+        step.tree = elsewhere(step.tree.clone(), view(90, Some("expected")));
+    }
+    let before = steps.last().unwrap().tree.clone();
+    let after = with_target(vec![view(20, Some("expected"))]);
+    let mut command = command_step("[con_id=20] focus");
+    command.events.push((
+        WINDOW,
+        json!({"change": "close", "container": view(90, Some("expected"))}),
+    ));
+    steps.extend([
+        step(before),
+        command,
+        step(after.clone()),
+        step(after), // The close still requires another, quiet fence.
+    ]);
+    steps
+}
+
+#[test]
+fn baseline_foreign_close_during_command_verification_settles_and_completes() {
+    let fixture = Fixture::new();
+    fixture
+        .run(&fixture.config(), foreign_close_command_steps())
+        .unwrap();
+    assert_eq!(fixture.launches(), 1);
+}
+
+#[test]
+fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards() {
+    for scenario in 0..12 {
+        let fixture = Fixture::new();
+        let mut steps = foreign_close_command_steps();
+        let expected = match scenario {
+            0 => {
+                steps[5].events[0].1["container"] = view(20, Some("expected"));
+                "accepted window/group"
+            }
+            1 => {
+                steps[5].events[0].1["container"] = view(99, Some("unrelated"));
+                "ownership is uncertain"
+            }
+            2 => {
+                // First seen during this launch, then added to preexisting_ids by the
+                // command's before-fence: this is still not initial-baseline evidence.
+                for step in steps.iter_mut().take(2) {
+                    step.tree["nodes"][0]["nodes"].as_array_mut().unwrap().pop();
+                }
+                for step in steps.iter_mut().take(5).skip(2) {
+                    step.tree["nodes"][0]["nodes"][1]["nodes"][0]["app_id"] = json!("unrelated");
+                }
+                "ownership is uncertain"
+            }
+            3 => {
+                steps[5].events[0].1["change"] = json!("move");
+                "ownership is uncertain"
+            }
+            4 => {
+                steps[6].tree = arranged(
+                    "splith",
+                    vec![group(100, "splith", vec![view(20, Some("expected"))])],
+                    20,
+                );
+                "unexpected hierarchy"
+            }
+            5 => {
+                steps[5].events.push((WORKSPACE, focus(11, 10)));
+                steps[5].events.push((WORKSPACE, focus(10, 11)));
+                "focus changed"
+            }
+            6 => {
+                steps[5].events.push((WORKSPACE, workspace_move(10)));
+                "moved to another output"
+            }
+            7 => {
+                steps[6].tree["nodes"][0]["id"] = json!(3);
+                "changed output"
+            }
+            8 => {
+                steps[5].events.push((
+                    WINDOW,
+                    json!({"change": "move", "container": view(90, Some("expected"))}),
+                ));
+                "ownership is uncertain"
+            }
+            9..=11 => {
+                // These preexisting-window events retain their existing launch-wait
+                // behavior, but revoke the evidence needed for a later safe close.
+                let change = ["new", "floating", "fullscreen_mode"][scenario - 9];
+                steps[2].events.push((
+                    WINDOW,
+                    json!({"change": change, "container": view(90, Some("expected"))}),
+                ));
+                "ownership is uncertain"
+            }
+            _ => unreachable!(),
+        };
+        fails(&fixture, steps, expected);
+    }
+}
+
+#[test]
+fn foreign_close_requires_the_following_quiet_snapshot_to_verify_too() {
+    let fixture = Fixture::new();
+    let mut steps = foreign_close_command_steps();
+    steps[7].tree = tree();
+    fails(&fixture, steps, "disappeared");
+}
+
+#[test]
+fn launch_wait_still_tolerates_preexisting_close_and_refuses_provisional_or_unknown_close() {
+    for scenario in 0..3 {
+        let fixture = Fixture::new();
+        let mut steps = successful_steps();
+        let id = match scenario {
+            0 => {
+                for step in steps.iter_mut().take(2) {
+                    step.tree = elsewhere(step.tree.clone(), view(90, Some("expected")));
+                }
+                90
+            }
+            1 => 20, // Already provisional after the first mapped snapshot.
+            _ => 99,
+        };
+        let app_id = if id == 20 { "expected" } else { "unrelated" };
+        steps[3].events.push((
+            WINDOW,
+            json!({"change": "close", "container": view(id, Some(app_id))}),
+        ));
+        if scenario == 0 {
+            steps.push(step(with_target(vec![view(20, Some("expected"))])));
+            fixture.run_finished(&fixture.config(), steps).unwrap();
+        } else {
+            fails(&fixture, steps, "closed");
+        }
+    }
+}
+
 #[test]
 fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation() {
     let fixture = Fixture::new();
@@ -1580,6 +1722,7 @@ fn completed_session(
             diagnostics,
             target: initial.target,
             preexisting_ids: HashSet::new(),
+            baseline_foreign_ids: HashSet::new(),
             accepted,
             expected_hierarchy: expected,
             window_timeout_ms: config.window_timeout_ms,

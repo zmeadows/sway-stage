@@ -63,6 +63,11 @@ fn load_with(
 
     diagnostics.stage(format!("prelaunch workspace={target}"));
     require_empty(&initial, diagnostics)?;
+    let baseline_foreign_ids = locate_windows(&initial.tree)
+        .iter()
+        .filter(|window| window.workspace.is_some() && window.workspace != Some(target))
+        .map(|window| window.node.id)
+        .collect();
     let mut preexisting_ids = initial.tree.iter().map(|node| node.id).collect();
     record_prelaunch_events(&initial, &mut preexisting_ids)?;
 
@@ -81,6 +86,7 @@ fn load_with(
         diagnostics,
         target,
         preexisting_ids,
+        baseline_foreign_ids,
         accepted: BTreeMap::new(),
         expected_hierarchy: empty_workspace,
         window_timeout_ms: config.window_timeout_ms,
@@ -196,6 +202,9 @@ struct Construction<'a> {
     /// Every container ID observed before the next launch, except accepted windows.
     /// A launch can accept only a window whose ID is absent from this set.
     preexisting_ids: HashSet<i64>,
+    /// Windows proven foreign by the initial empty-target baseline. Later launches must
+    /// not expand this set; contradictory structural events revoke close eligibility.
+    baseline_foreign_ids: HashSet<i64>,
     /// This run's accepted windows by container ID, with the selector each must keep.
     accepted: BTreeMap<i64, &'a Matcher>,
     expected_hierarchy: Hierarchy,
@@ -224,8 +233,15 @@ impl<'a> Construction<'a> {
         loop {
             let snapshot = self.observer.snapshot((self.connect)()?, deadline)?;
             for event in &snapshot.events {
-                if let Event::Window(window) = event
-                    && !self.accepted.contains_key(&window.container.id)
+                let Event::Window(window) = event else {
+                    continue;
+                };
+                let known_foreign_close = window.change == WindowChange::Close
+                    && self.baseline_foreign_ids.contains(&window.container.id)
+                    && window.container.nodes.is_empty()
+                    && window.container.floating_nodes.is_empty();
+                if !self.accepted.contains_key(&window.container.id)
+                    && !known_foreign_close
                     && matches!(
                         window.change,
                         WindowChange::New
@@ -626,6 +642,7 @@ impl<'a> Construction<'a> {
         let mut new_windows = NewWindowTracker {
             target: self.target,
             preexisting_ids: self.preexisting_ids.clone(),
+            baseline_foreign_ids: &mut self.baseline_foreign_ids,
             matcher,
             accepted: &self.accepted,
             observed: BTreeMap::new(),
@@ -1093,6 +1110,7 @@ fn record_prelaunch_events(
 struct NewWindowTracker<'a> {
     target: i64,
     preexisting_ids: HashSet<i64>,
+    baseline_foreign_ids: &'a mut HashSet<i64>,
     matcher: &'a Matcher,
     accepted: &'a BTreeMap<i64, &'a Matcher>,
     /// Each new window's latest description, for logs and timeout diagnostics.
@@ -1170,6 +1188,16 @@ impl NewWindowTracker<'_> {
         reject_unsafe_window_event(event, self.accepted, diagnostics)?;
 
         let node = &window.container;
+        if matches!(
+            window.change,
+            WindowChange::New | WindowChange::Floating | WindowChange::FullscreenMode
+        ) {
+            // These events were already tolerated for preexisting windows during a
+            // launch wait, but cannot establish a safe foreign close later.
+            for contained in node.iter() {
+                self.baseline_foreign_ids.remove(&contained.id);
+            }
+        }
         if self.accepted.contains_key(&node.id) {
             return Ok(());
         }

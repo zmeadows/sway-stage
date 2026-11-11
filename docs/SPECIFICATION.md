@@ -214,8 +214,10 @@ fence rather than aborting. Every command reply must succeed, and subsequent tre
 match the expected leaf order, grouping, orientation, and retained identities. New wrapper
 identities are obtained from Sway. Only the exact structural transition requested by the
 command is allowed. The reviewed split path reparents without emitting window move events;
-every move event remains fatal because its payload omits workspace ancestry. New-window close events and uncertain structural
-activity between launches or during command verification also abort conservatively.
+every move event remains fatal because its payload omits workspace ancestry. Closes of
+windows proven foreign by the initial baseline may settle through another fence, provided
+no contradictory structural history was observed. New-window close events and uncertain
+structural activity between launches or during command verification also abort conservatively.
 
 Construction has no transaction or rollback. Safety takes precedence over completing a
 layout. The target is the focused workspace observed after validation, identified by its
