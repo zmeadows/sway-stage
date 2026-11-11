@@ -1,136 +1,39 @@
-# sway-stage specification
+# User reference and specification
 
-This is the authoritative behavioral contract. Current status, design decisions, and the
-manual verification procedure are in the [roadmap](PLAN.md). The YAML format may be revised
-before its first release, with this document and the examples updated together.
+This is the authoritative contract for implemented behavior. Start with the
+[README](../README.md) for installation; contributors should also read
+[development](DEVELOPMENT.md) and [AGENTS.md](../AGENTS.md).
 
-## Purpose and scope
-
-`sway-stage` is a small standalone Linux executable that reads a named YAML layout and
-constructs it on the currently focused, empty Sway workspace. It uses synchronous native
-Sway IPC, launches applications sequentially, and exits after construction. Precompiled
-Linux releases are a delivery goal; the supported build targets will be documented when
-release validation is available.
-
-Layouts describe ordered, nested horizontal and vertical tiled splits with relative
-sibling weights. They specify application commands, arguments, optional working
-directories and environment overrides, and explicit window identification.
-
-Non-goals: session restoration, existing-window reuse, persistent daemons, automatic
-layout enforcement, cross-compositor support, graphical configuration editors, workspace
-or monitor assignment, and management of application lifetimes after launch.
-
-## Commands and discovery
-
-The command surface:
+## Commands and layout discovery
 
 | Command | Behavior |
 | --- | --- |
-| `load NAME` | Validate the named layout, then construct it on the focused empty workspace. |
-| `check NAME` | Validate a layout's syntax and semantics without IPC or launching anything. |
-| `capture [--infer-commands]` | Read the focused workspace and write an editable YAML draft to stdout. No discovery. |
-| `menu [--infer-commands]` | Use Fuzzel to load a named layout or capture a named draft into the layouts directory. |
-| `list` | Print available layout names, one per line in lexical order. No IPC. |
+| `load NAME` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
+| `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
+| `list` | Print discovered names in lexical order without parsing contents. |
+| `capture [--infer-commands]` | Print an editable draft of the focused workspace. |
+| `menu [--infer-commands]` | Load a layout or save a named capture through Fuzzel. |
 
-`--layouts-dir PATH` overrides discovery for `load`, `check`, `list`, and `menu`, including
-the menu's capture destination. Otherwise
-use `$XDG_CONFIG_HOME/sway-stage/layouts`, or `$HOME/.config/sway-stage/layouts` if
-`XDG_CONFIG_HOME` is unset or empty. A nonempty XDG path must be absolute; if neither
-base is usable, report an error. An explicit relative directory is relative to the CLI's
-working directory. Discovery reads only immediate regular `*.yaml` and `*.yml` files;
-the stem is the case-sensitive name. Names must match `[A-Za-z0-9][A-Za-z0-9_-]*`.
-Reject invalid names and duplicate stems rather than choosing an arbitrary file.
-Never create a discovery directory on read. A missing default directory produces an
-empty list; loading a missing name and a missing explicit directory are errors.
+`check` and `list` never contact Sway, launch applications, write logs, or notify.
+`check` does not probe executables or promise that a command creates a matching window.
+Help, version, and invocation without a subcommand need no configuration or optional tools;
+no subcommand prints help and does nothing else.
 
-`list` does not parse layout contents. `check` performs all static validation required by
-`load`, including cwd existence, but does not run commands, probe applications, contact
-Sway, create logs, or send notifications. It cannot promise that a command will create
-a matching window or that an application is installed. Help and version output also
-require no configuration, compositor, or optional tools. No subcommand shows help and
-performs no action.
+Global `--layouts-dir PATH` controls discovery and menu saves; standalone capture ignores
+it. Otherwise use `$XDG_CONFIG_HOME/sway-stage/layouts`, falling back to
+`$HOME/.config/sway-stage/layouts` when XDG_CONFIG_HOME is unset or empty. Nonempty default
+bases must be absolute. Explicit relative paths resolve from the CLI's working directory.
 
-Successful operations and menu cancellation exit 0; validation or operational failure
-exits 1; invalid CLI usage exits 2. Data goes to stdout and errors, warnings, and diagnostics
-to stderr. A failed capture emits no partial YAML. Standalone `capture` writes only to
-stdout; users choose where to redirect it.
+Discovery reads immediate regular `.yaml` and `.yml` files only, ignoring symlinks and
+subdirectories. The case-sensitive filename stem is the name and must match
+`[A-Za-z0-9][A-Za-z0-9_-]*`. Invalid names or duplicate stems are errors. Reads never create
+directories. A missing default directory lists as empty; a missing explicit directory or
+requested layout is an error.
 
-## Combined Fuzzel menu
-
-`menu` requires Fuzzel 1.11 or newer as an optional external executable. Run it synchronously
-through `std::process::Command` without a shell or an interactive-input deadline. Supply
-lexically ordered layout names as `Load: NAME` lines, followed by the separate
-`Capture current layout…` action. Discover filenames without parsing their contents;
-with no layouts, still offer Capture. Pass `--no-sort` to preserve this supplied order
-without changing matching. Both the action menu and draft-name prompt use
-`--no-exit-on-keyboard-focus-loss` so pointer-triggered keyboard-focus loss does not
-automatically close them. This does not restore keyboard focus or override Fuzzel's
-configured keyboard-focus mode. Accept only an exact offered label, mapped to its
-explicit action. Arbitrary typed input must never become a name, path, command, or action.
-Require one UTF-8 newline-terminated output line without embedded control characters.
-Fuzzel's dmenu cancellation is exit status 2 with no output: treat it as a successful no-op.
-Missing Fuzzel, any other nonzero status (including 1), unexpected output, and invalid
-selections are errors.
-
-Before launching the initial Fuzzel menu, attempt one read-only Sway tree snapshot through
-`SWAYSOCK`. Retain its original focused workspace identity, output ancestry, hierarchy,
-focus, and window PIDs in memory. Do not validate layout representability at this point:
-an empty or unsupported arrangement must still allow Load and cancellation. Retain any
-snapshot acquisition error; report it only when the selected action needs the snapshot,
-without retrying. Cancellation remains a successful no-op.
-
-When the saved tree identifies the original output name, pass `--output=OUTPUT` to both
-the action menu and draft-name prompt. With no output name, omit that option; never choose
-another workspace for capture. If the output disappears, report any resulting Fuzzel
-failure normally, without switching outputs or repairing desktop state.
-
-For Load, wait for Fuzzel to exit, then start launch diagnostics and use the same
-`load_named` path as `load`. Rediscover the selected layout and perform all ordinary
-validation. Constrain the loader's initial synchronized observation to the original
-pre-Fuzzel workspace container ID. Refuse if another workspace is focused, even if it has
-the same name or number; never restore focus automatically. If the original identity could
-not be established, refuse Load after ordinary layout validation. Empty or unsupported
-capture arrangements do not prevent loading. The original workspace must still be
-completely empty at load time. Compare original and final focused identities; intermediate
-away-and-back changes while Fuzzel is open need not be detected. Preserve construction,
-sizing, final focus, and launch failure reporting.
-
-For Capture, wait for the action menu to exit, then render the saved pre-menu tree into
-complete YAML in memory. Do not query Sway again. Subsequent focus, workspace, output,
-and window changes during either prompt cannot alter or invalidate the captured structure
-or final-focus selection. Neither Fuzzel instance participates in capture. Do not focus,
-move, resize, or switch anything. Capture failure reports an error without opening the
-name prompt. Otherwise open `fuzzel --dmenu --prompt-only=...` for a draft name on the same
-original output. Canceling either prompt is a successful no-op; canceling the name prompt
-discards the draft without writing. `menu --infer-commands` attempts inference only after
-Capture is selected, using the saved window PIDs with best-effort null fallback. Arguments
-may have changed or processes exited during the unlimited menu wait. By default commands
-remain null. Standalone capture continues to use one tree snapshot at invocation.
-
-Save into the layouts directory, resolved exactly as for discovery: `--layouts-dir PATH`
-when given, otherwise the XDG default. A missing explicit directory remains a discovery
-error before either prompt. Create a missing default directory and its parents only when
-saving, with private permissions (0700); do not change permissions of existing directories.
-New draft files are private (0600).
-
-Names must match `[A-Za-z0-9][A-Za-z0-9_-]*` and contain at most 250 ASCII characters,
-leaving room for the `.yaml` suffix. Save `development` as `layouts/development.yaml`.
-Reject empty or invalid names, separators, traversal, and collisions at either `.yaml` or
-`.yml`, including symlinks. Never trim, rewrite, or normalize input. Publish complete drafts
-exclusively so concurrent creation cannot silently overwrite a `.yaml` file. A failed write
-must not expose an incomplete YAML draft; preserve uncertain files for manual inspection
-rather than attempting destructive rollback. Staging files must not use a `.yaml` or
-`.yml` extension, so discovery never sees them. Report save errors under `menu` without
-including inferred arguments.
-
-Save the complete capture output without interpreting or validating it as an executable
-configuration. Drafts may contain inferred commands needing review, `command: null`, or
-`match: null`. A saved draft is immediately discoverable, so `list` and the menu offer it,
-but `check` and `load` reject placeholders before any IPC or launch. Users edit it in place
-and run `check`; never repair, rewrite, or remove it automatically. On a
-successful save, attempt a brief notification identifying the saved path. Notification
-failure is secondary and does not fail the save. No extra confirmation or load-success
-notification is needed.
+Success and menu cancellation exit 0, operational or validation errors exit 1, and invalid
+CLI usage exits 2. Data goes to stdout; errors, warnings, and diagnostics go to stderr.
+Capture prepares a complete draft before writing; acquisition or rendering failure emits
+no YAML. An output-stream failure can still interrupt delivery.
 
 ## YAML format, version 1
 
@@ -143,7 +46,7 @@ top-level keys:
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a split or a window. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
-| `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. The user must keep the target focused while waiting, so longer waits are rejected. |
+| `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
 A split node has `split: horizontal` (left to right, Sway `splith`) or `split: vertical`
 (top to bottom, `splitv`), and an ordered `children` sequence with at least two nodes.
@@ -184,207 +87,190 @@ missing required values, empty children/commands/selectors, invalid weights, dup
 IDs, and a `focus` that does not identify a leaf. Do not silently coerce or repair input.
 Reject multiple documents, custom tags, merge keys, and aliases. Bound input size (1 MiB),
 tree depth (32 nodes along a path), and total layout nodes (256) before side effects;
-parser resource limits must also prevent pathological input before semantic validation.
-Report the filename, node/field path, and line/column where available.
+parser resource limits also bound pathological input.
+Errors include the filename, node/field path, and line/column where available.
+String fields require quotes around numeric/boolean scalars; numeric fields reject quoted
+numbers. Explicit nulls never trigger optional defaults.
 
-Default capture drafts use `command: null` as an explicit editing placeholder.
-With `--infer-commands`, successfully recovered process arguments replace that placeholder.
-If an observed window has no usable identifier, emit `match: null` too. These are permitted in capture
-output only: `check` and `load` reject them with instructions to fill them in. A draft
-otherwise follows the same format. There is no executable fallback.
+## Loading, sizing, and safety
 
-## Loading and safety
+Layouts describe new applications in ordered horizontal and vertical tiles. There is no
+session restoration, existing-window reuse, daemon, ongoing enforcement, workspace/output
+assignment, or management of application lifetimes after launch. Tabbed, stacked, floating,
+and fullscreen arrangements are outside the layout format.
 
-`load` supports a root window and ordered, arbitrarily nested splits within the validation
-limits. See [two Foot windows](../examples/two-foot.yaml) and the
-[four-window reference](../examples/four-windows.yaml). One observation session retains
-the original workspace and every accepted window throughout the run.
+The following safeguards apply to standalone and menu loading:
 
-Construction completes the first child of a split, then establishes its enclosing split
-and launches subsequent children as explicitly focused siblings. If that first completed
-group fills the workspace, it is wrapped using the populated workspace's split operation;
-the workspace parent is selected explicitly through an owned direct child and verified
-before splitting. This does not change workspaces. Equal-axis meaningful groups remain
-separate. No empty placeholder hierarchy or window move commands are used.
+1. Validate the complete file before launching applications or mutating Sway. Standalone
+   Load validates before contacting Sway; menu takes its read-only snapshot first. Select the
+   currently focused workspace by container identity, and retain its containing output
+   identity. Both tiled and floating child lists must be empty, including empty containers.
+   Never create, select, rename, or assign a workspace for the user.
+2. Observe focus throughout construction, sizing, and final focus. Switching away, even
+   briefly and back, destroys the safety precondition. Moving the target to another output,
+   including away and back, also stops construction. Missing targets, changed output
+   identity, lost observations, and IPC failures are fatal. An unrelated workspace move or
+   output geometry change alone is allowed if the target stays on its original output.
+3. Launch once per leaf in depth-first visual order, waiting for each window before
+   continuing. Only a newly observed, unclaimed window absent from all pre-launch snapshots
+   can match. Matching is global: a matching new window elsewhere, including the scratchpad,
+   multiple matches, a floating/fullscreen match, or an unexpected window entering the
+   target is fatal. Delayed identifiers may resolve within the window timeout; uncertain
+   ownership is never guessed. An existing matching window cannot substitute for a new one.
+4. Preserve grouping, orientation, and order, including meaningful same-axis nested groups.
+   Recheck workspace, output, focus, ownership, and hierarchy before every launch or mutation;
+   verify command replies and resulting structure. Accepted windows must retain their
+   identity, selector, tiled state, and location. Closing one or changing its state stops
+   construction rather than triggering repair or relaunch.
+5. Mutate only accepted windows and containers whose window descendants all belong to the
+   run. Never close, move, resize, or reuse preexisting windows, use broad app-ID/class
+   criteria for mutations, or manipulate the global scratchpad. Construction uses neither
+   window moves nor placeholder windows.
+6. Apply weights from outer splits inward, then focus the configured leaf (the first
+   depth-first leaf by default), verify it, and exit.
 
-Every command is guarded by a fresh fenced tree and ownership checks. A launch or command
-may proceed only from a settled fence: a verified tree whose event history contains no
-window events. Harmless window events, such as focus or title changes, require another
-fence rather than aborting. Every command reply must succeed, and subsequent trees must
-match the expected leaf order, grouping, orientation, and retained identities. New wrapper
-identities are obtained from Sway. Only the exact structural transition requested by the
-command is allowed. The reviewed split path reparents without emitting window move events;
-every move event remains fatal because its payload omits workspace ancestry. Closes of
-windows proven foreign by the initial baseline may settle through another fence, provided
-no contradictory structural history was observed. New-window close events and uncertain
-structural activity between launches or during command verification also abort conservatively.
+Any window move event, even elsewhere, stops the run because its workspace ancestry is
+unknown. Other uncertain structural activity between launches or during command verification
+also stops it. Harmless title/focus activity can settle through another observation; a close
+of a window proven foreign by the initial baseline may also settle if no contradictory
+history exists. Continuous activity can time out a run.
 
-Construction has no transaction or rollback. Safety takes precedence over completing a
-layout. The target is the focused workspace observed after validation, identified by its
-Sway workspace identity rather than a configured number or monitor. Menu Load additionally
-requires the pre-Fuzzel workspace identity as described above. Freeze both the target
-workspace and its containing output identity at the initial synchronized observation;
-never create, select, rename, or assign a workspace on the user's behalf.
+On failure, stop further launches and layout mutations. Leave applications and partial
+layouts in place: no cleanup, killing, rollback, focus restoration, retries, or automatic
+relaunch. Process exit does not prove that no window will appear; delegating applications
+are still allowed the window deadline. Failure to spawn is reported immediately.
 
-1. Validate the whole layout before launching or mutating Sway. Connect and subscribe to
-   workspace/window events before the initial target snapshot. Establish an empty target:
-   both tiled and floating child lists must be empty, including otherwise empty containers.
-   Snapshot existing window container IDs across the whole tree, including other workspaces.
-2. Observe workspace focus throughout construction, including while waiting and resizing.
-   A focus event away from the target aborts even if the user switches back before the
-   next snapshot. A move event for the target workspace to another output also aborts,
-   including a move away and back. Recheck the target's containing output in every
-   synchronized tree observation; a changed output aborts even without a move event or
-   focus change. Moving an unrelated workspace or reconfiguring outputs while the target
-   stays on its original output does not alone abort. Recheck focus, target existence,
-   output identity, and ownership before every launch or mutating IPC command. Lost event
-   observation or IPC connectivity is fatal.
-3. Launch leaves in depth-first order, establishing split orientations as groups are built.
-   Snapshot global window IDs immediately before each launch. Launch exactly once and wait for
-   exactly one new, unclaimed window with the leaf's explicit selector; never match an
-   ID in any pre-launch snapshot or already accepted for another leaf. Observe events and
-   fresh trees with a monotonic deadline. Match properties may arrive after window creation;
-   do not mutate the layout while a new target window's identity is unresolved. Resolve
-   it within the current deadline or fail rather than guessing its ownership.
-4. Inspect candidates globally. A matching new window on the wrong workspace (or in the
-   scratchpad), multiple new matches, a floating/fullscreen match, an unrelated new window entering
-   the target, or a preexisting window entering it is fatal. Do not move, tile, close,
-   resize, or adopt such a window. Unrelated windows elsewhere remain untouched.
-5. Accept the expected window by container ID only after confirming its target and tiled
-   state. Build the split hierarchy using the accepted windows and their containers,
-   verifying observed structure as construction proceeds. Any accepted window closing,
-   leaving the target, becoming floating/fullscreen, or unexpected hierarchy changes, aborts.
-   Do not relaunch or repair around interference.
-6. Verify final leaf order and split hierarchy. Apply weights from outer
-   splits inward. Bound adjustment to at most three passes per split; read the actual tree
-   after sizing. Each IPC command must have replies and every reply must succeed.
-7. Recheck all safety conditions and focus `focus`, or the first depth-first
-   window by default, using its accepted container ID. Then exit; there is no ongoing enforcement.
+Sizing compares each child's extent along its parent's split axis with the sum of sibling
+extents. It aims within **1 percentage point** of the requested share, using at most three
+passes per split. Residual differences up to **5 percentage points** are accepted; larger
+differences or unusable sizing geometry produce a warning rather than failing an otherwise
+correct hierarchy. Gaps, borders, integer rounding, and application minimum sizes remain
+in effect. Structural and ownership errors are always fatal.
 
-Direct mutations must target only accepted windows and containers whose window descendants
-are all accepted by this run. Before any ancestor resize or split change, verify it cannot
-affect foreign descendants. Never use broad selector criteria for mutations. Never close,
-move, resize, or reuse preexisting windows anywhere, and never manipulate the global Sway
-scratchpad. Do not use scratchpad staging, placeholders that swallow existing windows,
-or workspace moves to construct the hierarchy.
+App IDs/classes identify a window type, not which process created it. Concurrent launches
+with the same selector can be indistinguishable; distinct IDs reduce ambiguity. Sway rules,
+inherited activation context, and single-instance applications can place a window elsewhere;
+the loader refuses rather than moving it. IPC observations and commands are not atomic:
+these safeguards do not provide isolation from concurrent desktop activity.
 
-On error or cancellation, stop further launches and layout mutations; leave the partial
-layout and processes in place. Do not kill applications, undo splits, restore focus by
-switching workspaces, or retry an application. A process may delegate to an existing
-instance; process exit alone does not establish window creation. Wait for the new window
-or deadline, and report a spawn error immediately if the process could not be started.
-An existing matching window is never an alternative to a missing new window.
+## Capture workflow
 
-An app ID/class identifies a window type, not causality. A concurrent unrelated launch
-with the same selector can be indistinguishable; unique IDs reduce this ambiguity.
-Sway commands and event/tree reads are not atomic together. Minimize race windows with
-fresh guards and stop on observed interference; do not promise transaction-like isolation.
+Capture records an arrangement as a draft, not a restorable session. From a terminal in the
+arrangement, or a keybinding, run `sway-stage capture > draft.yaml`. To exclude your terminal,
+run the following from another workspace and switch to the arranged workspace during the
+delay:
 
-## Sizing and focus
+```sh
+sleep 5; sway-stage capture > draft.yaml
+# Edit draft.yaml: fill command and match placeholders, and review any inferred commands.
+sway-stage --layouts-dir . check draft
+```
 
-Compute desired proportions independently for each sibling set using its weights. Compare
-observed sibling dimensions on that axis, normalized by their sum, with desired shares.
-Borders, gaps, rounding, and application minimum sizes can prevent exact proportions.
-Adjustment aims for an absolute difference of at most **1 percentage point** per child,
-and an absolute difference of at most **5 percentage points** is accepted. A larger
-difference after bounded adjustment produces a warning identifying the split, requested share, and
-observed share; it does not turn an otherwise correct hierarchy into failure. Structural
-or ownership errors are always fatal. Do not disable user gaps, borders, or application
-constraints to force a result.
+Move the edited file into your layouts directory, then load it from a keybinding on a new,
+empty workspace. The [examples](../examples) show complete commands and selectors.
 
-The [four-window reference](../examples/four-windows.yaml) launches Firefox, middle Foot,
-upper-right Foot, then lower-right Foot, constructs a horizontal root with a vertical right
-column, applies root weights **44:32:24** and right-column weights **77:23**, and focuses
-Firefox last. Sizing verifies the resulting proportions; it does not replay a fixed sequence
-of percentage commands.
+Capture reads one Sway tree through `SWAYSOCK`, with a bounded response wait. It never
+launches applications or sends layout/focus commands. Later desktop changes cannot redirect
+or invalidate the saved structure; no freeze or ongoing event observation is attempted.
+Standalone capture writes only stdout, so the shell controls the destination (and may
+create or truncate the file even if capture fails).
 
-## Capture
+The draft preserves split hierarchy, orientations, visual order, and focused window. IDs
+are `window1`, `window2`, … in depth-first order. Child weights are percentages of summed
+sibling extents on the split axis, rounded to hundredths with a minimum of `0.01`; the root
+has no weight. A single window becomes the root. Single-child wrappers collapse after
+validation; multi-child groups remain even if their orientation matches their parent's.
+Selectors prefer nonempty Wayland app IDs, then Xwayland classes, otherwise `match: null`.
+Commands default to `command: null`. Workspace names, outputs, titles, container IDs, PIDs,
+cwd, and environment are not serialized.
 
-`capture` accepts only the optional `--infer-commands` flag and uses read-only IPC:
-one `GET_TREE` request through the explicit `SWAYSOCK` path, with a bounded response wait.
-It retains the complete tree in memory without event subscriptions, tick fences, or further
-Sway queries. It never sends commands, changes focus, launches applications, or writes
-files. On success, stdout holds exactly one draft document.
+Capture refuses empty workspaces, floating containers, fullscreen windows/groups,
+scratchpad content (even shown), tabbed/stacked containers (even with one child), unsupported
+or malformed nodes, nonpositive split-axis extents, ambiguous/absent focus, focus on a group
+rather than a window, and layouts exceeding the format's depth/node limits. The workspace's
+own fullscreen flag is not treated as a fullscreen window.
 
-The draft follows the version 1 format. It preserves the focused workspace's ordered tiled
-hierarchy and orientations. Each split child's `weight` is its percentage of its siblings'
-summed extent along the split axis, rounded to hundredths with a minimum of `0.01`, which
-reconstructs proportions well within the sizing tolerance; the root has no weight. Leaf
-IDs are `window1`, `window2`, ... in depth-first order, and `focus` names the focused
-window. `match` uses the window's nonempty Wayland app ID, otherwise its nonempty Xwayland
-class, otherwise `null`. Without the flag, `command` is always `null`. A leading comment
-explains the placeholders. Do not serialize Sway container IDs, workspace names/numbers,
-outputs, titles, PIDs, cwd, or environment from the running session. The result records
-arrangement and selectors, with optional process arguments, rather than session restoration.
+`--infer-commands` optionally reads saved window PIDs' Linux `/proc/PID/cmdline`: at most
+64 KiB per window, requiring valid UTF-8, a nonempty executable, and NUL-terminated arguments.
+Argument boundaries and empty arguments are preserved. Unavailable or malformed data leaves
+that window's command null without failing capture. No parent/process-name searches,
+environment capture, command rewriting, or application-specific recovery is attempted.
 
-With `--infer-commands`, attempt each leaf's Linux `/proc/PID/cmdline` using its positive
-PID recorded in the saved tree. Read at most 64 KiB plus one oversize detection byte.
-Require a nonempty executable, a final NUL terminator, and
-valid UTF-8 arguments; preserve argument boundaries and empty arguments. Unavailable,
-inaccessible, empty, malformed, or oversized process information leaves `command: null`
-for that window without failing capture. No process-name searches,
-parent traversal, command rewriting, environment capture, or application-specific recovery
-is performed. Never execute or probe inferred commands.
+**Review inferred commands before executing or sharing.** They may contain secrets and may
+not reproduce the application. Process exit, PID reuse, or argument changes can race with
+inference; it is best-effort, with no second process-identity check. Inferred arguments stay
+out of diagnostics and logs, appearing only in the draft sent to stdout or explicitly saved
+through the menu. Fill all remaining null placeholders and run `check` before loading.
 
-Recovered arrays represent current process arguments, which may differ from the original
-launch command and may not reproduce the application. They may contain passwords or
-tokens. An additional brief YAML comment asks users to review commands before executing
-or sharing. Arguments appear only in the opted-in stdout draft, never diagnostics,
-notifications, logs, caches, or automatically written configuration files. Process exit,
-PID reuse, and argument changes can race with observation; inference is best-effort and
-cannot promise transactional process identity. Null command and match placeholders still
-require editing before `check` or `load` accepts the draft.
+## Fuzzel menu
 
-A single-window workspace is a root leaf. A container with one tiled child, including the
-workspace itself, is replaced by that child, which takes the container's extent among its
-siblings. Every container with two or more children remains a split, even when it shares
-its parent's orientation.
+`menu` requires Fuzzel 1.11+ on `PATH`, using default dmenu text output. It offers sorted
+`Load: NAME` entries followed by `Capture current layout…`, even with no layouts. Only exact
+offered actions are accepted; arbitrary typed action text is an error. Both prompts disable
+automatic exit on keyboard-focus loss, without changing Fuzzel's configured focus mode. Interactive
+input has no deadline. Escape at either prompt cancels successfully without saving/loading.
+Fuzzel cancellation requires exit status 2 and empty output; other failures, index output,
+control characters, or anything other than one UTF-8 newline-terminated line are errors.
 
-Refuse an empty workspace; any floating container; a tabbed or stacked container, even
-with a single child; a fullscreen window or container (the workspace's own
-`fullscreen_mode` is ignored); a scratchpad window or container, even when shown;
-unsupported node types and malformed containers;
-nonpositive extents along a split axis; focus on anything but a window, such as a group
-after `focus parent`; and an arrangement exceeding the depth or node limits.
+One read-only snapshot is saved **before the first prompt**. Both prompts use its original
+output when known. Snapshot errors are deferred until an action needs the snapshot;
+cancellation remains available, and empty/unsupported capture layouts do not block Load.
 
-The single tree determines the focused workspace by container ID and ancestry, including
-when an empty workspace itself is focused. Reject absent or ambiguous focus and malformed
-container identities. The saved tree retains output ancestry, hierarchy, identities,
-geometry, focus, and PIDs. Snapshot acquisition does not require a valid nonempty layout;
-the structural restrictions above apply when rendering it as a capture.
+- **Load:** after Fuzzel exits, rediscover and validate the selected file, then require the
+  original workspace identity to be focused and empty. A recreated workspace with the same
+  name/number is refused. Focus is never restored automatically. Intermediate away-and-back
+  changes while the menu is open need not be detected; construction then uses the normal
+  continuous focus/output safeguards. If the original identity is unavailable, loading
+  refuses after ordinary file validation.
+- **Capture:** render only the pre-menu snapshot, then ask for a draft name. Later workspace,
+  window, output, or focus changes during either prompt do not alter the draft. Unsupported
+  capture state fails before the name prompt. `--infer-commands` runs only after Capture is
+  selected, using the saved PIDs; process arguments may have changed during the wait.
 
-Once the tree response is obtained, subsequent focus, workspace, output, and window
-changes cannot redirect or invalidate the draft. Validation and YAML generation use only
-saved Sway state, even if a captured window has since disappeared. No compositor freeze
-is attempted. This is a snapshot of Sway state, not an atomic transaction with applications
-or Linux processes; optional command inference remains best-effort. A failed capture
-writes no YAML.
+Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at
+most 250 ASCII characters, without an extension; input is not trimmed or normalized.
+Reject collisions at either `.yaml` or `.yml`, including symlinks. Create missing default
+directories only on save (0700); preserve existing directory permissions. A missing explicit
+directory fails discovery before prompting. New drafts are 0600.
 
-## Errors, notifications, and diagnostics
+Saving requires hard-link support in that directory. Publish only complete drafts,
+exclusively, without overwriting an existing `.yaml`. Cross-suffix concurrent external
+changes are not atomic. On write/publication failure, retain the reported `.partial` file
+for inspection; it is outside discovery. Do not automatically remove uncertain files.
+A successful save attempts a path notification; notification failure does not fail the save.
 
-Errors identify the operation/stage, layout and leaf where relevant, target workspace,
-underlying failure, and the next useful action. A timeout includes observed new container
-IDs, app IDs/classes, workspace locations, and floating states; it must distinguish no
-new window from new windows that failed to match. Log stages, elapsed waits, accepted
-container IDs, IPC commands/replies, hierarchy checks, and requested/observed sizing.
+Drafts appear immediately in `list` and the menu. They are saved without executable-layout
+validation; `check` and `load` reject remaining placeholders before loader IPC or application launches. Edit
+them in place and check them. There is no automatic repair, execution, or deletion.
 
-`load`, `menu`, and `capture` attempt a desktop notification for fatal errors, titled for
-the invoked operation (`sway-stage load failed`, `sway-stage menu failed`, or
-`sway-stage capture failed`), using `notify-send` with a bounded wait. Missing notification
-tools or delivery failures are secondary diagnostics; stderr remains sufficient and the
-original failure remains primary. Advise that a partial layout or applications may remain,
-and to inspect windows before retrying, only after this invocation has successfully
-spawned an application; a spawn that fails to start does not count. Send a warning
-notification for substantial sizing deviations so keybinding launches can surface them.
-`list`, `check`, help, and version are side-effect-free apart from stdout/stderr.
+## Diagnostics and troubleshooting
 
-`last-run.log` is reserved for layout launches. Each `load`, and each `menu` once a layout
-has been selected for loading, replaces it. Menu cancellation, selection errors, capture,
-and save operations, as well as every standalone `capture`, leave the previous log untouched;
-their errors go only to stderr and a best-effort notification. Write the log to
+`load`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
+notifications through `notify-send`. Sizing warnings also notify. Missing notification
+tools or delivery failures never hide the primary result. Success requires no notification.
+
+Each load attempt, including a menu Load selection, replaces the private launch log at
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to
-`$HOME/.local/state/sway-stage/last-run.log`. Require absolute state bases. Keep only this
-last-run log, create it with private permissions, and include its path in failure output
-when available. Logging failure falls back to stderr without hiding the operation result.
-Use timestamps and stages; omit titles, environment values, and complete argv by default.
-No telemetry or background logging service is involved.
+`$HOME/.local/state/sway-stage/last-run.log`; state bases must be absolute. New log files are
+0600 and new directories 0700. Existing log links are not followed or reused. Log failure
+falls back to stderr. Records include timestamps, stages, waits, accepted IDs, commands and
+replies, hierarchy checks, and requested/observed sizes; titles, full argv, and environment
+values are omitted by default. No telemetry or background service is involved.
+
+Menu cancellation, selection errors, capture, and saves leave the launch log untouched.
+Capture failures report through stderr and notifications only. After a failed load that
+started applications, inspect remaining windows before retrying; failure messages identify
+the stage and log path when available. Timeouts distinguish no new windows from new windows
+that failed to match, with observed IDs, selectors, locations, and floating state.
+
+| Symptom | What to check |
+| --- | --- |
+| Workspace occupied | Invoke from a Sway keybinding on an empty workspace; the calling terminal counts as an occupant. |
+| No matching window / wrong workspace | Check executable, exact app ID/class, Sway assignment rules, and single-instance behavior. |
+| Focus/output refusal | Keep the target focused on its original output until completion; inspect partial results before retrying. |
+| Draft rejected | Replace null commands/selectors and review inferred arguments, then run `check NAME`. |
+| Menu fails | Install Fuzzel 1.11+, use dmenu text output, and check Fuzzel's stderr/configuration. |
+| Proportions differ | Check gaps and application minimum sizes; substantial deviations are warnings. |
+
+No minimum supported Sway version or Linux architecture/libc baseline has been established.
+Release packaging and compatibility verification remain in the [roadmap](PLAN.md).

@@ -11,8 +11,7 @@ currently focused, empty Sway workspace. Prioritize, in order:
 4. A small executable and little ongoing maintenance cost.
 
 Read the affected code and [specification](docs/SPECIFICATION.md) before editing.
-Do not mistake planned commands for implemented behavior. Follow
-[the roadmap](docs/PLAN.md) in small steps.
+Use [the roadmap](docs/PLAN.md) for outstanding release work.
 Do not add session restoration, existing-window reuse, a daemon, automatic enforcement,
 other compositors, or a graphical editor unless explicitly requested.
 
@@ -75,7 +74,8 @@ compatibility, and verify the locked graph on the MSRV. Do not silently raise it
   for the user. Refuse any tiled or floating occupancy before the first mutation.
 - Observe workspace focus changes throughout construction, including a switch away and
   back between snapshots. Stop on a switch, missing target, IPC failure, or lost safety
-  precondition. Never switch back automatically.
+  precondition. Freeze the containing output identity too; stop on target output migration,
+  including away and back. Never switch back automatically.
 - Snapshot existing window identities across the tree before launching, and before each
   subsequent launch. Only newly observed, unclaimed windows with the explicit expected
   app ID or Xwayland class can be accepted. Launch one application at a time and bound
@@ -104,20 +104,18 @@ as necessary guards; do not promise atomic isolation against concurrent user act
 
 Each kind of information has one home:
 
-- `README.md`: concise user-facing introduction, current status, requirements, build and
-  usage instructions, and important restrictions. No implementation mechanics or history.
-- `docs/SPECIFICATION.md`: authoritative planned behavior and configuration contract.
-- `docs/PLAN.md`: implementation status, remaining milestones and completion criteria,
-  architectural and dependency decisions, Sway/swayipc technical findings, open questions,
-  and the user's manual verification procedure. Condense completed work into decisions
-  and findings; do not accumulate per-change histories or test counts.
+- `README.md`: concise introduction, installation, quick start, and links.
+- `docs/SPECIFICATION.md`: authoritative implemented behavior, configuration contract,
+  capture workflow, and troubleshooting.
+- `docs/DEVELOPMENT.md`: contributor verification and user-only manual integration procedure.
+- `docs/PLAN.md`: outstanding release work and explicitly undecided ideas only.
 - `examples/`: user-facing illustrative YAML configurations, linked to the specification.
 - `tools/`: development-only Rust diagnostics and the integration harness, registered in
-  `Cargo.toml` as Cargo examples and run only by the user against a live Sway session. The
-  harness's offline tests are a separate `integration_harness` test target.
+  `Cargo.toml` as Cargo examples. The harness's offline tests are a separate
+  `integration_harness` test target.
 - `AGENTS.md`: durable engineering standards and safety constraints.
-- Source and comments: implementation details; CLI help becomes the command reference
-  when implemented. Keep it consistent with the specification without duplicating it.
+- Source and comments: implementation details; CLI help describes current commands.
+  Keep it consistent with the specification.
 
 Inspect callers and failure paths before editing. Test behavior at meaningful boundaries:
 configuration fixtures, pure tree/weight calculations, and recorded IPC trees/events.
@@ -125,11 +123,12 @@ Introduce only the smallest test seam needed. Keep automated checks non-interact
 independent of a live compositor. Never execute commands that modify the user's live
 Sway session, including launching or terminating applications, changing focus, or moving
 or resizing windows. Never run `sway-stage load` against the real compositor. All
-live-desktop behavioral verification must be performed manually by the user in an
-isolated disposable Sway session.
+live-desktop behavioral verification must be performed manually by the user on disposable
+workspaces in their existing Sway session, following [development](docs/DEVELOPMENT.md).
+A disposable workspace does not isolate the compositor or other workspaces.
 
 The integration harness, the `integration` Cargo example in `tools/integration/`, is
-exclusively for the user's manual execution in a disposable Sway session. Agents must never
+exclusively for the user's manual execution on a disposable workspace. Agents must never
 execute it, including `--help`, partial runs, or trial runs: never run
 `cargo run --example integration` or the built example binary, and never connect it to a
 live compositor. Validate it only by compilation, static inspection, and the offline
