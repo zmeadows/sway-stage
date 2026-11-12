@@ -46,7 +46,7 @@ top-level keys:
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a group or a window. |
 | `cwd` | Optional default working directory for all windows; a window’s own `cwd` overrides it. |
-| `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. Reserved for future directory selection; currently uses the root normally. |
+| `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. In the menu, select an immediate child directory as the layout default. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
@@ -105,13 +105,13 @@ sibling. Absolute paths and literal leading `~/` paths are also supported. The o
 validated before connecting to Sway or launching applications. This option belongs only
 to `load`, and does not bypass validation of configured paths.
 
-For each child, precedence is window `cwd`, then CLI `--cwd`, then layout `cwd`, then the
-launcher's existing working directory. The parent process's directory never changes.
+For each child, precedence is window `cwd`, then CLI `--cwd` or the menu-selected
+directory, then layout `cwd`, then the launcher's existing working directory. The parent process's directory never changes.
 `cwd_select` accepts only booleans (explicit `null` is invalid). A valid layout `cwd` may
 be used with `cwd_select` omitted or `false`. With `cwd_select: true`, direct loading
-still uses the configured root normally unless `--cwd` overrides it. Interactive project
-directory selection is not implemented yet. Capture and command inference do not attempt
-to reconstruct working-directory settings.
+still uses the configured root normally unless `--cwd` overrides it. Only `menu` offers
+interactive project directory selection; direct `load` never prompts. Capture and command
+inference do not attempt to reconstruct working-directory settings.
 
 Commands are launched with preserved argument boundaries, without implicit shell parsing,
 variable expansion, tilde expansion, or globbing. A bare executable uses the child's
@@ -395,6 +395,24 @@ cancellation remains available, and empty/unsupported capture layouts do not blo
   changes while the menu is open need not be detected; construction then uses the normal
   continuous focus/output safeguards. If the original identity is unavailable, loading
   refuses after ordinary file validation.
+  With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
+  `Directory:`, before loading. It enumerates only immediate children of the resolved
+  top-level `cwd` using filesystem directory reads, without recursive scanning.
+  Names beginning with `.`, files, non-directory entries, non-UTF-8 names, and names
+  containing control characters are excluded. Directory symlinks are included even when
+  their targets are outside the root; broken or unusable symlinks are ignored. Basenames
+  appear in deterministic lexical order. Only an exact offered name is accepted; typed
+  paths, fuzzy matches, root selection, and parent traversal are unavailable.
+  An empty selectable list or enumeration failure is an error and launches nothing.
+  Escape cancels successfully and preserves the previous launch log, including when
+  the pre-menu snapshot failed. Selection errors also leave that log untouched.
+  The selected path replaces the layout default; window `cwd` overrides still win.
+  The path is validated again before loader IPC or application launches, so a removed
+  or invalid directory fails without launching. Filesystem checks do not lock paths
+  against subsequent changes. The parent process's directory never changes.
+  Both prompts retain the original output and workspace baseline; directory selection
+  never captures a replacement baseline or bypasses fresh emptiness, focus, output,
+  and ownership checks. With `cwd_select` omitted or false, Load uses one prompt.
 - **Capture:** render only the pre-menu snapshot, then ask for a draft name. Later workspace,
   window, output, or focus changes during either prompt do not alter the draft. Unsupported
   capture state fails before the name prompt. `--infer-commands` runs only after Capture is

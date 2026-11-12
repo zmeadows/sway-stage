@@ -430,6 +430,15 @@ A valid Load selection after switching to another workspace (or recreating the s
 must refuse without launching, mutating, or restoring focus. Cancellation must work even
 when the initial snapshot fails; invalid files still receive ordinary validation errors.
 
+For project-directory selection, use a trusted test layout with `cwd: ~/Projects` and
+`cwd_select: true`, with at least two non-hidden child directories. On an empty disposable
+workspace, run `menu`, select the layout, and confirm the sorted `Directory:` basenames.
+Choose a project and inspect the terminal's `pwd`; repeat with a window-level `cwd` override.
+Check Escape at each prompt preserves the previous launch log. In separate runs, remove a
+listed directory while its prompt is open, type an unoffered name, and switch workspaces
+before selecting: each must refuse without launches or focus restoration. An empty root
+must report an error. Direct `load NAME` must use the root without prompting.
+
 For loader interference, separately switch away and back during a load, introduce an
 unexpected window, and change an accepted window's state. Expect no further launches or
 layout mutations, with partial results left in place. Verify real keybinding launch context

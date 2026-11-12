@@ -105,21 +105,26 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
-    load_named(name, layouts_dir, cwd, Ok(None), &mut diagnostics)
-        .map_err(|error| diagnostics.report_failure(error))
+    load_named(
+        name,
+        read_named(name, layouts_dir),
+        cwd,
+        Ok(None),
+        &mut diagnostics,
+    )
+    .map_err(|error| diagnostics.report_failure(error))
 }
 
 /// Validates and constructs a named layout under launch diagnostics. This is the single
 /// loading path: menu calls it only after Fuzzel has exited with a valid selection.
 fn load_named(
     name: &str,
-    layouts_dir: Option<PathBuf>,
+    layout: Result<(PathBuf, config::Config), String>,
     cwd: Option<PathBuf>,
     expected_workspace: Result<Option<i64>, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
-    let path = find_layout(name, layouts_dir)?;
-    let mut config = config::read(&path)?;
+    let (path, mut config) = layout?;
     if let Some(mut directory) = cwd {
         if directory.is_relative()
             && !directory.as_os_str().as_encoded_bytes().starts_with(b"~/")
@@ -139,6 +144,16 @@ fn load_named(
     // Validate the selected layout before surfacing a deferred pre-menu snapshot error.
     launch::load(&config, expected_workspace?, diagnostics)
         .map_err(|error| format!("layout {name:?}: {error}"))
+}
+
+/// Read once so menu selection and loading use the same validated configuration.
+fn read_named(
+    name: &str,
+    layouts_dir: Option<PathBuf>,
+) -> Result<(PathBuf, config::Config), String> {
+    let path = find_layout(name, layouts_dir)?;
+    let config = config::read(&path)?;
+    Ok((path, config))
 }
 
 /// Resolves a layout name to its discovered file. Parses no layout contents.
@@ -193,20 +208,34 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
     match action {
         None => Ok(()),
         Some(menu::Action::Load(name)) => {
+            // Keep validation failures under launch diagnostics, but leave the old log
+            // intact while a directory prompt can still be canceled.
+            let layout = read_named(&name, layouts_dir);
+            let cwd = if let Ok((_, config)) = &layout
+                && config.cwd_select
+            {
+                let root = config
+                    .cwd
+                    .as_deref()
+                    .expect("validated cwd_select requires cwd");
+                let Some(directory) =
+                    menu::select_directory(root, output_name).map_err(report_menu_failure)?
+                else {
+                    return Ok(());
+                };
+                Some(directory)
+            } else {
+                None
+            };
+
             let mut diagnostics = Diagnostics::start("menu");
             diagnostics.stage(format!("menu load {name:?}: validation"));
             let expected_workspace = snapshot
                 .as_ref()
                 .map(|saved| Some(saved.workspace_id()))
                 .map_err(|error| format!("pre-menu workspace snapshot: {error}"));
-            load_named(
-                &name,
-                layouts_dir,
-                None,
-                expected_workspace,
-                &mut diagnostics,
-            )
-            .map_err(|error| diagnostics.report_failure(error))
+            load_named(&name, layout, cwd, expected_workspace, &mut diagnostics)
+                .map_err(|error| diagnostics.report_failure(error))
         }
         Some(menu::Action::Capture) => {
             let snapshot =

@@ -21,11 +21,6 @@ native-group acceptance remains outstanding. Behavior is defined in the
   fixtures do not establish compositor reconstruction or cleanup behavior; record manual
   results before marking this acceptance complete.
 
-- **Working directories, Stage 2.** Implement interactive project-directory selection
-  through Fuzzel using the validated top-level `cwd` root and `cwd_select` contract.
-  Stage 1 path validation and load-only `--cwd` override are implemented; direct loads
-  currently use the configured root normally. Preserve window-level precedence.
-
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release
   metadata for public distribution.

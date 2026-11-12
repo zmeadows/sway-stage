@@ -32,6 +32,16 @@ case "$prompt" in
     printf '%b' "$NAME_OUTPUT"
     exit "$NAME_STATUS"
     ;;
+  '--prompt=Directory: ')
+    test "$no_sort" = 1 || exit 96
+    test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
+    /bin/cat > "$MENU_DIRECTORY/directories"
+    if test -n "$REMOVE_DIRECTORY"; then
+        /bin/rmdir "$REMOVE_DIRECTORY" || exit 97
+    fi
+    printf '%b' "$DIRECTORY_OUTPUT"
+    exit "$DIRECTORY_STATUS"
+    ;;
   '--prompt=Layout: ')
     test "$no_sort" = 1 || exit 96
     if test "$REQUIRE_SNAPSHOT" = 1; then
@@ -72,6 +82,9 @@ fn command(fixture: &Fixture, action_output: &str, name_output: &str) -> Command
         .env("MENU_STATUS", "0")
         .env("NAME_OUTPUT", name_output)
         .env("NAME_STATUS", "0")
+        .env("DIRECTORY_OUTPUT", "gon\n")
+        .env("DIRECTORY_STATUS", "0")
+        .env_remove("REMOVE_DIRECTORY")
         .env("NOTIFY_STATUS", "0");
     command
 }
@@ -649,15 +662,21 @@ fn failed_snapshot_is_deferred_until_selected_action_and_is_never_retried() {
 
 #[test]
 fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
-    for (initial_layout, final_id, final_name) in [
-        ("empty", 10, "original"),
-        ("tabbed", 10, "original"),
-        ("empty", 88, "later"),
-        ("empty", 88, "original"),
+    for (initial_layout, final_id, final_name, select_directory) in [
+        ("empty", 10, "original", false),
+        ("tabbed", 10, "original", false),
+        ("empty", 88, "later", false),
+        ("empty", 88, "original", false),
+        ("empty", 10, "original", true),
+        ("empty", 88, "later", true),
+        ("empty", 88, "original", true),
     ] {
         let fixture = Fixture::new();
         setup(&fixture);
         fixture.file("writing.yaml", WINDOW);
+        if select_directory {
+            project_layout(&fixture, true);
+        }
         let mut initial = capture_tree();
         initial["nodes"][0]["nodes"][0]["name"] = json!("original");
         if initial_layout == "empty" {
@@ -751,7 +770,11 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
         assert!(!fixture.path.join("name-opened").exists());
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),
-            "DP-1\n"
+            if select_directory {
+                "DP-1\nDP-1\n"
+            } else {
+                "DP-1\n"
+            }
         );
     }
 }
@@ -793,4 +816,249 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
     assert!(notification.contains("Commands inferred: 1; unresolved: 1. Manual editing required."));
     assert!(notification.contains("./partial.yaml"));
     assert!(!notification.contains(std::env::current_exe().unwrap().to_str().unwrap()));
+}
+
+// The selected path is deliberately distinct from both the root and the window override.
+fn project_layout(fixture: &Fixture, select: bool) {
+    fs::create_dir_all(fixture.path.join("projects/gon")).unwrap();
+    fixture.file(
+        "writing.yaml",
+        &format!("{WINDOW}cwd: ~/projects\ncwd_select: {select}\n"),
+    );
+}
+
+#[test]
+fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    setup(&fixture);
+    project_layout(&fixture, true);
+    let root = fixture.path.join("projects");
+    for name in [
+        "zebra",
+        "Alpha",
+        ".hidden",
+        "gon/grandchild",
+        "two words",
+        "bad\nname",
+        "bad\tname",
+    ] {
+        fs::create_dir_all(root.join(name)).unwrap();
+    }
+    fs::create_dir(root.join(OsString::from_vec(vec![0xff]))).unwrap();
+    fs::create_dir(fixture.path.join("external")).unwrap();
+    symlink(fixture.path.join("external"), root.join("link")).unwrap();
+    symlink("missing", root.join("broken")).unwrap();
+    symlink("loop", root.join("loop")).unwrap();
+    fixture.file("projects/file", "ordinary file");
+    symlink("file", root.join("file-link")).unwrap();
+
+    let output = run_capture(
+        &fixture,
+        command(&fixture, "Load: writing\n", "")
+            .env("DIRECTORY_OUTPUT", "")
+            .env("DIRECTORY_STATUS", "2")
+            .args(["--layouts-dir", ".", "menu"]),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("directories")).unwrap(),
+        "Alpha\ngon\nlink\ntwo words\nzebra\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("outputs")).unwrap(),
+        "DP-1\nDP-1\n"
+    );
+}
+
+#[test]
+fn directory_cancellation_and_errors_preserve_the_launch_log_even_without_a_snapshot() {
+    for (response, status, expected) in [
+        ("", "2", ""),
+        ("unknown\n", "0", "not offered"),
+        ("../gon\n", "0", "not offered"),
+        (" gon\n", "0", "not offered"),
+        ("gon", "0", "newline-terminated"),
+        ("gon\nextra\n", "0", "single line"),
+        ("gon\r\n", "0", "control characters"),
+        ("\\377\n", "0", "not UTF-8"),
+        ("gon\n", "2", "unexpected output while canceling"),
+        ("", "1", "exit status: 1"),
+    ] {
+        let fixture = Fixture::new();
+        setup(&fixture);
+        project_layout(&fixture, true);
+        let output = command(&fixture, "Load: writing\n", "")
+            .env("DIRECTORY_OUTPUT", response)
+            .env("DIRECTORY_STATUS", status)
+            .args(["--layouts-dir", ".", "menu"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), expected.is_empty(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{output:?}"
+        );
+        assert_log_preserved(&fixture);
+        assert!(!fixture.path.join("name-opened").exists());
+    }
+}
+
+#[test]
+fn disabled_directory_selection_uses_the_single_prompt_loading_path() {
+    let fixture = Fixture::new();
+    setup(&fixture);
+    project_layout(&fixture, false);
+    let output = command(&fixture, "Load: writing\n", "")
+        .args(["--layouts-dir", ".", "menu"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SWAYSOCK is unset"));
+    assert!(!fixture.path.join("directories").exists());
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(log.contains("validated layout"));
+}
+
+#[test]
+fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
+    for remove_before_prompt in [true, false] {
+        let fixture = Fixture::new();
+        setup(&fixture);
+        project_layout(&fixture, true);
+        let selected = fixture.path.join("projects/gon");
+        let mut command = command(&fixture, "Load: writing\n", "");
+        command.args(["--layouts-dir", ".", "menu"]);
+        if remove_before_prompt {
+            fs::remove_dir(&selected).unwrap();
+        } else {
+            command.env("REMOVE_DIRECTORY", &selected);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+        if remove_before_prompt {
+            assert!(stderr.contains("no selectable directories"), "{stderr}");
+            assert!(!fixture.path.join("directories").exists());
+            assert_log_preserved(&fixture);
+        } else {
+            assert!(
+                stderr.contains("inspect") && stderr.contains("projects/gon"),
+                "{stderr}"
+            );
+            let log =
+                fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+            assert!(!log.contains("subscribe"));
+        }
+    }
+}
+
+#[test]
+fn directory_selection_reaches_child_launch_with_window_override_precedence() {
+    for window_override in [false, true] {
+        let fixture = Fixture::new();
+        setup(&fixture);
+        project_layout(&fixture, true);
+        fs::create_dir(fixture.path.join("override")).unwrap();
+        fixture.file("app", "#!/bin/sh\nprintf '%s\n' \"$PWD\" > \"$RESULT\"\n");
+        fs::set_permissions(fixture.path.join("app"), fs::Permissions::from_mode(0o700)).unwrap();
+        let window_cwd = if window_override {
+            "cwd: ~/override,"
+        } else {
+            ""
+        };
+        fixture.file(
+            "writing.yaml",
+            &format!(
+                "version: 1
+cwd: ~/projects
+cwd_select: true
+window_timeout_ms: 500
+layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESULT: '{}'}}}}
+",
+                fixture.path.join("app").display(),
+                fixture.path.join("result").display()
+            ),
+        );
+
+        let mut empty = capture_tree();
+        empty["nodes"][0]["nodes"][0]["nodes"] = json!([]);
+        empty["nodes"][0]["nodes"][0]["focused"] = json!(true);
+        let socket = fixture.path.join("launch.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let accept = || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+            };
+            let mut query = accept();
+            assert_eq!(read_ipc_message(&mut query).0, 4);
+            write_ipc_message(&mut query, 4, &empty);
+            assert_eq!(query.read(&mut [0]).unwrap(), 0);
+            let mut events = accept();
+            assert_eq!(read_ipc_message(&mut events).0, 2);
+            write_ipc_message(&mut events, 2, &json!({"success": true}));
+            // Initial and immediately-before-launch snapshots. Any layout mutation
+            // instead of these read-only requests fails the fixture.
+            for _ in 0..2 {
+                let mut query = accept();
+                assert_eq!(read_ipc_message(&mut query).0, 1);
+                write_ipc_message(
+                    &mut query,
+                    1,
+                    &json!([{
+                        "id": 10, "num": 1, "name": "fixture", "visible": true, "focused": true,
+                        "urgent": false, "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                        "output": "DP-1"
+                    }]),
+                );
+                assert_eq!(read_ipc_message(&mut query).0, 4);
+                write_ipc_message(&mut query, 4, &empty);
+                let (kind, token) = read_ipc_message(&mut query);
+                assert_eq!(kind, 10);
+                write_ipc_message(
+                    &mut events,
+                    (1 << 31) | 7,
+                    &json!({"first": false, "payload": String::from_utf8(token).unwrap()}),
+                );
+                write_ipc_message(&mut query, 10, &json!({"success": true}));
+            }
+            // The harmless fixture child creates no window. Disconnect at observation
+            // after launch; construction must stop without issuing any mutation.
+            let mut query = accept();
+            assert_eq!(read_ipc_message(&mut query).0, 1);
+        });
+        let output = command(&fixture, "Load: writing\n", "")
+            .env("SWAYSOCK", &socket)
+            .args(["--layouts-dir", ".", "menu"])
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let expected = fixture.path.join(if window_override {
+            "override"
+        } else {
+            "projects/gon"
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(fixture.path.join("result")).unwrap_or_default()
+            != format!("{}\n", expected.display())
+        {
+            assert!(std::time::Instant::now() < deadline, "{output:?}");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("result")).unwrap(),
+            format!("{}\n", expected.display())
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("outputs")).unwrap(),
+            "DP-1\nDP-1\n"
+        );
+    }
 }

@@ -47,6 +47,59 @@ pub fn select(
         })
 }
 
+/// Names and paths stay paired: typed Fuzzel input never becomes a filesystem path.
+pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let choices = directory_choices(root)?;
+    let input = choices
+        .iter()
+        .map(|(name, _)| format!("{name}\n"))
+        .collect::<String>();
+    let Some(selection) = fuzzel("--prompt=Directory: ", Some(&input), output_name)? else {
+        return Ok(None);
+    };
+    let (_, directory) = choices
+        .into_iter()
+        .find(|(name, _)| name == &selection)
+        .ok_or("directory selection: Fuzzel returned a name that was not offered")?;
+    Ok(Some(directory))
+}
+
+fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let entries = fs::read_dir(root)
+        .map_err(|error| format!("read project directory {}: {error}", root.display()))?;
+    let mut choices = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read entry in project directory {}: {error}",
+                root.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') || name.chars().any(char::is_control) {
+            continue;
+        }
+
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect project entry {}: {error}", path.display()))?;
+        // Follow directory symlinks, including external targets; ignore unusable links.
+        let is_directory = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
+        if is_directory {
+            choices.push((name.to_owned(), path));
+        }
+    }
+    choices.sort_by(|left, right| left.0.cmp(&right.0));
+    if choices.is_empty() {
+        return Err(format!("no selectable directories in {}", root.display()));
+    }
+    Ok(choices)
+}
+
 /// Saves into the same directory `select` discovered, so `--layouts-dir` controls both.
 /// The draft is not validated: placeholders stay until the user edits and checks it.
 pub fn capture_draft(
@@ -256,6 +309,17 @@ mod tests {
     impl Drop for Directory {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_enumeration_errors_include_the_root() {
+        let directory = Directory::new();
+        for root in [directory.0.join("missing"), directory.0.join("file")] {
+            fs::write(directory.0.join("file"), "not a directory").unwrap();
+            let error = directory_choices(&root).unwrap_err();
+            assert!(error.contains("read project directory"), "{error}");
+            assert!(error.contains(root.to_str().unwrap()), "{error}");
         }
     }
 
