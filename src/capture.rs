@@ -206,9 +206,10 @@ enum CapturedNode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
 enum SplitAxis {
+    #[serde(rename = "splith")]
     Horizontal,
+    #[serde(rename = "splitv")]
     Vertical,
 }
 
@@ -402,7 +403,7 @@ struct Draft {
 #[serde(untagged)]
 enum DraftNode {
     Split {
-        split: SplitAxis,
+        group: SplitAxis,
         #[serde(skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
         children: Vec<DraftNode>,
@@ -548,7 +549,7 @@ fn draft_node(
                 })
                 .collect();
             DraftNode::Split {
-                split: *axis,
+                group: *axis,
                 weight,
                 children,
             }

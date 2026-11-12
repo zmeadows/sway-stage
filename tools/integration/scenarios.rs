@@ -52,8 +52,8 @@ impl SplitAxis {
 
     fn yaml_value(self) -> &'static str {
         match self {
-            SplitAxis::Horizontal => "horizontal",
-            SplitAxis::Vertical => "vertical",
+            SplitAxis::Horizontal => "splith",
+            SplitAxis::Vertical => "splitv",
         }
     }
 }
@@ -927,7 +927,7 @@ fn emit_node(
     let mut fields = Vec::new();
     match node {
         ConfiguredNode::Window(window) => fields.push(format!("id: {}", window.layout_id)),
-        ConfiguredNode::Split { axis, .. } => fields.push(format!("split: {}", axis.yaml_value())),
+        ConfiguredNode::Split { axis, .. } => fields.push(format!("group: {}", axis.yaml_value())),
     }
 
     if !path.is_empty() {

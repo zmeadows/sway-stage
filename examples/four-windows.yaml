@@ -6,7 +6,7 @@
 version: 1
 focus: browser # Optional; the first leaf is also the default.
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: browser
       weight: 44
@@ -18,7 +18,7 @@ layout:
       command: [foot, --app-id=sway-stage-middle]
       match:
         app_id: sway-stage-middle
-    - split: vertical
+    - group: splitv
       weight: 24
       children:
         - id: upper-right

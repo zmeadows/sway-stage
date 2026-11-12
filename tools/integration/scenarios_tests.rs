@@ -291,14 +291,14 @@ version: 1
 focus: window3
 window_timeout_ms: 20000
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: window1
       weight: 4
       command: {}
       match:
         app_id: {}
-    - split: vertical
+    - group: splitv
       weight: 3
       children:
         - id: window2
@@ -367,7 +367,7 @@ fn expected_draft_has_measured_weights_and_placeholders_only() {
 version: 1
 focus: window2
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: window1
       weight: 59.75

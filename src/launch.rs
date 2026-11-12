@@ -1,6 +1,6 @@
 //! Sequential launch and guarded, recursive tiled construction.
 
-use crate::config::{Config, LayoutNode, Matcher, NodeKind, Orientation};
+use crate::config::{Config, GroupLayout, LayoutNode, Matcher, NodeKind};
 use crate::diagnostics::Diagnostics;
 use crate::observation::{
     self, Observer, Snapshot, app_id, class, locate_windows, proportions, sibling_dimensions,
@@ -38,8 +38,10 @@ pub fn load(
     expected_workspace: Option<i64>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
-    let socket = observation::sway_socket()?;
-    let mut connect = || observation::connect(&socket);
+    let mut connect = || {
+        let socket = observation::sway_socket()?;
+        observation::connect(&socket)
+    };
     let sizing_warnings = load_with(config, expected_workspace, &mut connect, diagnostics)?;
     diagnostics.report_sizing_warnings(&sizing_warnings);
     Ok(())
@@ -52,6 +54,8 @@ fn load_with(
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<Vec<String>, String> {
+    require_supported_groups(&config.layout, "layout")?;
+
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot_for_workspace(
@@ -111,6 +115,31 @@ fn load_with(
         "final focus verified leaf={focus_leaf:?} id={focus_id} workspace={target}"
     ));
     Ok(sizing_warnings)
+}
+
+// Reject unsupported groups across the whole tree before connecting or launching a leaf.
+fn require_supported_groups(
+    node: &serde_saphyr::Spanned<LayoutNode>,
+    field_path: &str,
+) -> Result<(), String> {
+    if let NodeKind::Group { layout, children } = &node.value.kind {
+        let unsupported = match layout {
+            GroupLayout::Tabbed => Some("tabbed"),
+            GroupLayout::Stacked => Some("stacked"),
+            GroupLayout::SplitH | GroupLayout::SplitV => None,
+        };
+        if let Some(layout) = unsupported {
+            return Err(format!(
+                "{field_path}.group (line {}, column {}): loading {layout} groups is not implemented yet",
+                node.referenced.line(),
+                node.referenced.column()
+            ));
+        }
+        for (child_index, child) in children.iter().enumerate() {
+            require_supported_groups(child, &format!("{field_path}.children[{child_index}]"))?;
+        }
+    }
+    Ok(())
 }
 
 // The workspace is the outer Split. Structural IDs are bound from the first verified
@@ -352,19 +381,18 @@ impl<'a> Construction<'a> {
         path: &[usize],
         warnings: &mut Vec<String>,
     ) -> Result<(), String> {
-        let NodeKind::Split {
-            orientation,
-            children,
-        } = &layout_node.kind
-        else {
+        let NodeKind::Group { layout, children } = &layout_node.kind else {
             return Ok(());
         };
         let group_id = self.expected_hierarchy.at_mut(path).id();
-        let axis = match orientation {
-            Orientation::Horizontal => "width",
-            Orientation::Vertical => "height",
+        let axis = match layout {
+            GroupLayout::SplitH => "width",
+            GroupLayout::SplitV => "height",
+            GroupLayout::Tabbed | GroupLayout::Stacked => {
+                return Err("loading tabbed or stacked groups is not implemented yet".into());
+            }
         };
-        let weights: Vec<_> = children.iter().map(|child| child.value.weight).collect();
+        let weights: Vec<_> = children.iter().map(|child| child.value.weight()).collect();
         let target_shares = proportions(&weights);
 
         self.diagnostics
@@ -491,23 +519,18 @@ impl<'a> Construction<'a> {
         layout_node: &'a LayoutNode,
         insert_after: Option<Vec<usize>>,
     ) -> Result<Vec<usize>, String> {
-        let NodeKind::Split {
-            orientation,
-            children,
-        } = &layout_node.kind
-        else {
+        let NodeKind::Group { layout, children } = &layout_node.kind else {
             return self.launch_window(layout_node, insert_after);
+        };
+        let (split_layout, split_command) = match layout {
+            GroupLayout::SplitH => (NodeLayout::SplitH, "splith"),
+            GroupLayout::SplitV => (NodeLayout::SplitV, "splitv"),
+            GroupLayout::Tabbed | GroupLayout::Stacked => {
+                return Err("loading tabbed or stacked groups is not implemented yet".into());
+            }
         };
         let first_path = self.build(&children[0].value, insert_after)?;
 
-        let split_layout = match orientation {
-            Orientation::Horizontal => NodeLayout::SplitH,
-            Orientation::Vertical => NodeLayout::SplitV,
-        };
-        let split_command = match orientation {
-            Orientation::Horizontal => "splith",
-            Orientation::Vertical => "splitv",
-        };
         let mut expected_after = self.expected_hierarchy.clone();
         let group_path;
         let command;
@@ -576,11 +599,7 @@ impl<'a> Construction<'a> {
             }
 
             command = if singleton && !ordinary_parent {
-                let layout_command = match orientation {
-                    Orientation::Horizontal => "layout splith",
-                    Orientation::Vertical => "layout splitv",
-                };
-                format!("[con_id={first_id}] {layout_command}")
+                format!("[con_id={first_id}] layout {split_command}")
             } else {
                 format!("[con_id={first_id}] {split_command}")
             };
@@ -794,7 +813,7 @@ fn find_focus_leaf<'a>(
         NodeKind::Window { id, .. } => configured_focus
             .is_none_or(|focus| focus == id)
             .then(|| (id.as_str(), path.to_vec())),
-        NodeKind::Split { children, .. } => {
+        NodeKind::Group { children, .. } => {
             for (child_index, child) in children.iter().enumerate() {
                 let mut child_path = path.to_vec();
                 child_path.push(child_index);

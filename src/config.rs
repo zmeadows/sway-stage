@@ -29,18 +29,19 @@ pub struct Config {
     pub window_timeout_ms: u64,
 }
 
-/// A configured split or window. Distinct from `swayipc::Node`, an observed Sway container.
+/// A configured group or window. Distinct from `swayipc::Node`, an observed Sway container.
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "NodeFields")]
 pub struct LayoutNode {
-    pub weight: f64,
+    // Retain omission so tabbed/stacked parents can reject every explicit weight.
+    pub weight: Option<f64>,
     pub kind: NodeKind,
 }
 
 #[derive(Debug)]
 pub enum NodeKind {
-    Split {
-        orientation: Orientation,
+    Group {
+        layout: GroupLayout,
         children: Vec<Spanned<LayoutNode>>,
     },
     Window {
@@ -54,9 +55,11 @@ pub enum NodeKind {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Orientation {
-    Horizontal,
-    Vertical,
+pub enum GroupLayout {
+    SplitH,
+    SplitV,
+    Tabbed,
+    Stacked,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,15 +69,15 @@ pub enum Matcher {
     Class(String),
 }
 
-// A single map preserves useful field errors, unlike an untagged split/window enum
+// A single map preserves useful field errors, unlike an untagged group/window enum
 // which discards each variant's deserialization error while trying the next variant.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NodeFields {
-    #[serde(default = "default_weight", deserialize_with = "unquoted_number")]
-    weight: f64,
+    #[serde(default, deserialize_with = "optional_weight")]
+    weight: Option<f64>,
     #[serde(default, deserialize_with = "non_null")]
-    split: Option<Orientation>,
+    group: Option<GroupLayout>,
     #[serde(default, deserialize_with = "non_null")]
     children: Option<Vec<Spanned<LayoutNode>>>,
     #[serde(default, deserialize_with = "non_null")]
@@ -114,20 +117,20 @@ impl TryFrom<NodeFields> for LayoutNode {
     type Error = String;
 
     fn try_from(fields: NodeFields) -> Result<Self, String> {
-        let is_split = fields.split.is_some() || fields.children.is_some();
+        let is_group = fields.group.is_some() || fields.children.is_some();
         let has_window_fields = fields.id.is_some()
             || fields.command.is_some()
             || fields.matcher.is_some()
             || fields.cwd.is_some()
             || fields.env.is_some();
 
-        let kind = if is_split {
+        let kind = if is_group {
             if has_window_fields {
-                return Err("node mixes split fields with window fields".into());
+                return Err("node mixes group fields with window fields".into());
             }
-            NodeKind::Split {
-                orientation: fields.split.ok_or("split node is missing split")?,
-                children: fields.children.ok_or("split node is missing children")?,
+            NodeKind::Group {
+                layout: fields.group.ok_or("group node is missing group")?,
+                children: fields.children.ok_or("group node is missing children")?,
             }
         } else {
             NodeKind::Window {
@@ -145,8 +148,15 @@ impl TryFrom<NodeFields> for LayoutNode {
     }
 }
 
-fn default_weight() -> f64 {
-    1.0
+impl LayoutNode {
+    /// The effective split share weight, including the default for an omitted field.
+    pub fn weight(&self) -> f64 {
+        self.weight.unwrap_or(1.0)
+    }
+}
+
+fn optional_weight<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+    unquoted_number(deserializer).map(Some)
 }
 
 fn default_window_timeout_ms() -> u64 {
@@ -339,18 +349,37 @@ fn validate_node(
     if *node_count > MAX_LAYOUT_NODES {
         return Err(fail("", "layout exceeds 256 nodes"));
     }
-    if !node.value.weight.is_finite() || node.value.weight <= 0.0 {
+    if !node.value.weight().is_finite() || node.value.weight() <= 0.0 {
         return Err(fail(".weight", "expected a finite positive number"));
     }
 
     match &mut node.value.kind {
-        NodeKind::Split { children, .. } => {
-            if children.len() < 2 {
-                return Err(fail(".children", "a split requires at least two children"));
+        NodeKind::Group { layout, children } => {
+            let is_split = matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV);
+            if is_split && children.len() < 2 {
+                return Err(fail(
+                    ".children",
+                    "a split group requires at least two children",
+                ));
             }
+            if children.is_empty() {
+                return Err(fail(
+                    ".children",
+                    "a tabbed or stacked group requires at least one child",
+                ));
+            }
+
             let mut weight_sum = 0.0;
             for (child_index, child) in children.iter_mut().enumerate() {
                 let child_path = format!("{field_path}.children[{child_index}]");
+                if !is_split && child.value.weight.is_some() {
+                    let location = child.referenced;
+                    return Err(format!(
+                        "{child_path}.weight (line {}, column {}): children of tabbed or stacked groups must omit weight",
+                        location.line(),
+                        location.column()
+                    ));
+                }
                 validate_node(
                     child,
                     &child_path,
@@ -359,7 +388,7 @@ fn validate_node(
                     window_ids,
                     layout_dir,
                 )?;
-                weight_sum += child.value.weight;
+                weight_sum += child.value.weight();
             }
             if !weight_sum.is_finite() {
                 return Err(fail(".children", "sibling weight sum must be finite"));
@@ -466,18 +495,18 @@ mod tests {
         let config = parse_test(include_str!("../examples/four-windows.yaml")).unwrap();
         assert_eq!(config.focus.as_deref(), Some("browser"));
         assert_eq!(config.window_timeout_ms, 20_000);
-        let NodeKind::Split {
-            orientation: root_orientation,
+        let NodeKind::Group {
+            layout: root_layout,
             children: root_children,
         } = config.layout.value.kind
         else {
             panic!("expected root split");
         };
-        assert!(matches!(root_orientation, Orientation::Horizontal));
+        assert!(matches!(root_layout, GroupLayout::SplitH));
         assert_eq!(root_children.len(), 3);
-        assert_eq!(root_children[0].value.weight, 44.0);
-        assert_eq!(root_children[1].value.weight, 32.0);
-        assert_eq!(root_children[2].value.weight, 24.0);
+        assert_eq!(root_children[0].value.weight(), 44.0);
+        assert_eq!(root_children[1].value.weight(), 32.0);
+        assert_eq!(root_children[2].value.weight(), 24.0);
 
         let NodeKind::Window { id, matcher, .. } = &root_children[0].value.kind else {
             panic!("expected browser window");
@@ -485,14 +514,14 @@ mod tests {
         assert_eq!(id, "browser");
         assert!(matches!(matcher, Matcher::AppId(value) if value == "firefox-esr"));
 
-        let NodeKind::Split {
-            orientation: column_orientation,
+        let NodeKind::Group {
+            layout: column_layout,
             children: column_children,
         } = &root_children[2].value.kind
         else {
             panic!("expected nested right column split");
         };
-        assert!(matches!(column_orientation, Orientation::Vertical));
+        assert!(matches!(column_layout, GroupLayout::SplitV));
         let NodeKind::Window { id, matcher, .. } = &column_children[0].value.kind else {
             panic!("expected upper-right window");
         };
@@ -506,7 +535,7 @@ mod tests {
             "version: 1\nlayout:\n  id: '1'\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words']\n  match: {class: Example}\n  cwd: ..\n  env: {'1': '', PATH: 'literal:$PATH'}\n",
         ).unwrap();
         assert!(config.focus.is_none());
-        assert_eq!(config.layout.value.weight, 1.0);
+        assert_eq!(config.layout.value.weight(), 1.0);
         let NodeKind::Window {
             command,
             matcher,
@@ -532,13 +561,13 @@ mod tests {
         for (input, expected) in [
             (format!("version: 1\nlayout: {WINDOW}\nextra: true"), "unknown field"),
             ("version: 1\nlayout: {id: t, command: [foot], match: {app_id: foot}, extra: 1}".into(), "unknown field"),
-            ("version: 1\nlayout: {split: horizontal, children: [], extra: 1}".into(), "unknown field"),
+            ("version: 1\nlayout: {group: splith, children: [], extra: 1}".into(), "unknown field"),
             ("version: 1\nlayout: {id: t, command: [foot], match: {title: foot}}".into(), "unknown field"),
             (format!("version: 1\nversion: 1\nlayout: {WINDOW}"), "duplicate"),
             ("version: 1\nlayout: {id: t, id: x, command: [foot], match: {app_id: foot}}".into(), "duplicate"),
             ("version: 1\nlayout: {id: t, command: [foot], match: {app_id: foot, app_id: foot}}".into(), "duplicate"),
             ("version: 1\nlayout: {id: t, command: [foot], match: {app_id: foot}, env: {A: x, 'A': y}}".into(), "duplicate"),
-            ("version: 1\nlayout: {split: horizontal, children: [], children: []}".into(), "duplicate"),
+            ("version: 1\nlayout: {group: splith, children: [], children: []}".into(), "duplicate"),
         ] {
             rejects(&input, expected);
         }
@@ -618,6 +647,86 @@ mod tests {
     }
 
     #[test]
+    fn group_layouts_child_counts_and_mixed_nesting() {
+        let second = WINDOW.replace("terminal", "second");
+        for layout in ["splith", "splitv", "tabbed", "stacked"] {
+            let input =
+                format!("version: 1\nlayout: {{group: {layout}, children: [{WINDOW}, {second}]}}");
+            assert!(parse_test(&input).is_ok(), "{input}");
+            rejects(
+                &format!("version: 1\nlayout: {{group: {layout}, children: []}}"),
+                "at least",
+            );
+            let singleton =
+                format!("version: 1\nlayout: {{group: {layout}, children: [{WINDOW}]}}");
+            assert_eq!(
+                parse_test(&singleton).is_ok(),
+                matches!(layout, "tabbed" | "stacked")
+            );
+        }
+
+        let input = format!(
+            "version: 1\nfocus: second\nlayout: {{group: splith, weight: 7, children: [{{group: tabbed, weight: 3, children: [{{group: stacked, children: [{{group: splitv, children: [{WINDOW}, {second}]}}]}}]}}, {{id: third, command: [foot], match: {{app_id: foot}}}}]}}"
+        );
+        let config = parse_test(&input).unwrap();
+        assert_eq!(config.layout.value.weight(), 7.0);
+        assert_eq!(config.focus.as_deref(), Some("second"));
+        let NodeKind::Group { children, .. } = &config.layout.value.kind else {
+            panic!("expected group");
+        };
+        assert_eq!(children[0].value.weight, Some(3.0));
+        assert_eq!(children[1].value.weight, None);
+    }
+
+    #[test]
+    fn tabbed_and_stacked_children_must_omit_weight() {
+        for layout in ["tabbed", "stacked"] {
+            for child in [
+                "{id: terminal, command: [foot], match: {app_id: foot}, weight: 1}".to_owned(),
+                format!("{{group: tabbed, weight: 1, children: [{WINDOW}]}}"),
+                format!("{{group: stacked, weight: 2, children: [{WINDOW}]}}"),
+                format!(
+                    "{{group: splith, weight: 3, children: [{WINDOW}, {{id: second, command: [foot], match: {{app_id: foot}}}}]}}"
+                ),
+            ] {
+                let input = format!(
+                    "version: 1\nlayout: {{group: tabbed, children: [{{group: {layout}, children: [{child}]}}]}}"
+                );
+                let error = parse_test(&input).unwrap_err();
+                for context in [
+                    "layout.children[0].children[0].weight",
+                    "must omit weight",
+                    "line",
+                    "column",
+                ] {
+                    assert!(error.contains(context), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_and_invalid_group_fields_with_context() {
+        for child in [
+            "{split: horizontal, children: []}",
+            "{split: vertical, children: []}",
+            "{group: horizontal, children: []}",
+            "{group: vertical, children: []}",
+            "{group: diagonal, children: []}",
+            "{group: null, children: []}",
+            "{group: tabbed}",
+            "{group: tabbed, children: [], id: terminal}",
+            "{group: stacked, children: [], command: [foot]}",
+        ] {
+            let input = format!("version: 1\nlayout: {{group: tabbed, children: [{child}]}}");
+            let error = parse_test(&input).unwrap_err();
+            for context in ["layout.children[0]", "line", "column"] {
+                assert!(error.contains(context), "{error}");
+            }
+        }
+    }
+
+    #[test]
     fn validates_structure_ids_commands_and_selectors() {
         for input in [
             "{id: '', command: [foot], match: {app_id: foot}}",
@@ -632,12 +741,12 @@ mod tests {
             "{id: t, command: [foot], match: {app_id: ''}}",
             "{id: t, command: [foot], match: {class: ''}}",
             "{id: t, command: [foot], match: {app_id: foot, class: Foot}}",
-            "{split: horizontal, children: []}",
-            "{split: vertical}",
+            "{group: splith, children: []}",
+            "{group: splitv}",
             "{children: []}",
-            "{split: diagonal, children: []}",
-            "{split: horizontal, children: [], id: t}",
-            "{split: horizontal, children: [], env: {}}",
+            "{group: diagonal, children: []}",
+            "{group: splith, children: [], id: t}",
+            "{group: splith, children: [], env: {}}",
         ] {
             assert!(
                 parse_test(&format!("version: 1\nlayout: {input}")).is_err(),
@@ -645,11 +754,11 @@ mod tests {
             );
         }
         rejects(
-            &format!("version: 1\nlayout: {{split: horizontal, children: [{WINDOW}]}}"),
+            &format!("version: 1\nlayout: {{group: splith, children: [{WINDOW}]}}"),
             "at least two",
         );
         rejects(
-            &format!("version: 1\nlayout: {{split: horizontal, children: [{WINDOW}, {WINDOW}]}}"),
+            &format!("version: 1\nlayout: {{group: splith, children: [{WINDOW}, {WINDOW}]}}"),
             "duplicate window id",
         );
         rejects(
@@ -676,7 +785,7 @@ mod tests {
             assert!(parse_test(&input).is_ok(), "rejected {input}");
         }
         rejects(
-            "version: 1\nlayout: {split: horizontal, children: [{id: a, command: [foot], match: {app_id: foot}, weight: 1e308}, {id: b, command: [foot], match: {app_id: foot}, weight: 1e308}]}",
+            "version: 1\nlayout: {group: splith, children: [{id: a, command: [foot], match: {app_id: foot}, weight: 1e308}, {id: b, command: [foot], match: {app_id: foot}, weight: 1e308}]}",
             "sum must be finite",
         );
         for timeout in [
@@ -730,7 +839,7 @@ mod tests {
         let mut node = WINDOW.to_owned();
         for index in 1..depth {
             node = format!(
-                "{{split: horizontal, children: [{node}, {{id: w{index}, command: [foot], match: {{app_id: foot}}}}]}}"
+                "{{group: splith, children: [{node}, {{id: w{index}, command: [foot], match: {{app_id: foot}}}}]}}"
             );
         }
         format!("version: 1\nlayout: {node}")
@@ -755,7 +864,7 @@ mod tests {
                 .map(|index| format!("{{id: w{index}, command: [foot], match: {{app_id: foot}}}}"))
                 .collect();
             let input = format!(
-                "version: 1\nlayout: {{split: horizontal, children: [{}]}}",
+                "version: 1\nlayout: {{group: splith, children: [{}]}}",
                 children.join(",")
             );
             assert_eq!(parse_test(&input).is_ok(), valid);
@@ -774,7 +883,7 @@ mod tests {
     #[test]
     fn nested_errors_report_field_path_and_source_location() {
         let input = format!(
-            "version: 1\nlayout:\n  split: horizontal\n  children:\n    - {WINDOW}\n    - id: second\n      command: [foot]\n      match: {{app_id: foot}}\n      weight: 0\n"
+            "version: 1\nlayout:\n  group: splith\n  children:\n    - {WINDOW}\n    - id: second\n      command: [foot]\n      match: {{app_id: foot}}\n      weight: 0\n"
         );
         let error = parse_test(&input).unwrap_err();
         assert!(error.contains("layout.children[1].weight"), "{error}");

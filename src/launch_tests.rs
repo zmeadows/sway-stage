@@ -44,7 +44,7 @@ impl Fixture {
     fn run_finished(&self, config: &Config, mut steps: Vec<Step>) -> Result<(), String> {
         let tree = steps.last().unwrap().tree.clone();
         fn sizing(steps: &mut Vec<Step>, tree: &Value, node: &LayoutNode) {
-            if let NodeKind::Split { children, .. } = &node.kind {
+            if let NodeKind::Group { children, .. } = &node.kind {
                 steps.push(step(tree.clone()));
                 for child in children {
                     sizing(steps, tree, &child.value);
@@ -485,7 +485,7 @@ fn workspace_migration_stops_before_launch_or_any_further_construction() {
             let config = layout_config(
                 &fixture,
                 &format!(
-                    "{{split: horizontal, children: [{}, {}]}}",
+                    "{{group: splith, children: [{}, {}]}}",
                     leaf(&fixture, 0),
                     leaf(&fixture, 1)
                 ),
@@ -830,7 +830,7 @@ fn failure_reports_mention_partial_layouts_only_after_a_successful_spawn() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: horizontal, children: [{}, {missing}]}}",
+            "{{group: splith, children: [{}, {missing}]}}",
             leaf(&fixture, 0)
         ),
     );
@@ -1032,9 +1032,9 @@ fn finish(fixture: &Fixture, config: &Config, steps: Vec<Step>, count: usize) {
 #[test]
 fn horizontal_vertical_and_three_siblings_use_exact_ids_with_repeated_app_ids() {
     for (axis, layout, count) in [
-        ("horizontal", "splith", 2),
-        ("vertical", "splitv", 2),
-        ("horizontal", "splith", 3),
+        ("splith", "splith", 2),
+        ("splitv", "splitv", 2),
+        ("splith", "splith", 3),
     ] {
         let fixture = Fixture::new();
         let leaves = (0..count)
@@ -1043,7 +1043,7 @@ fn horizontal_vertical_and_three_siblings_use_exact_ids_with_repeated_app_ids() 
             .join(",");
         let config = layout_config(
             &fixture,
-            &format!("{{split: {axis}, children: [{leaves}]}}"),
+            &format!("{{group: {axis}, children: [{leaves}]}}"),
         );
         let mut steps = vec![step(tree())];
         let first = arranged("splith", vec![window(20)], 20);
@@ -1081,14 +1081,14 @@ fn nested_right_group_and_three_meaningful_levels() {
         let fixture = Fixture::new();
         let w = (0..4).map(|i| leaf(&fixture, i)).collect::<Vec<_>>();
         let right = if deep {
-            format!("{{split: horizontal, children: [{}, {}]}}", w[2], w[3])
+            format!("{{group: splith, children: [{}, {}]}}", w[2], w[3])
         } else {
             w[2].clone()
         };
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {{split: vertical, children: [{}, {right}]}}]}}",
+                "{{group: splith, children: [{}, {{group: splitv, children: [{}, {right}]}}]}}",
                 w[0], w[1]
             ),
         );
@@ -1156,12 +1156,12 @@ fn nested_first_child_wraps_populated_workspace_and_preserves_equal_axis_groups(
     for equal_axis in [false, true] {
         let fixture = Fixture::new();
         let w = (0..4).map(|i| leaf(&fixture, i)).collect::<Vec<_>>();
-        let axis = if equal_axis { "horizontal" } else { "vertical" };
+        let axis = if equal_axis { "splith" } else { "splitv" };
         let layout = if equal_axis { "splith" } else { "splitv" };
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{{split: {axis}, children: [{}, {}]}}, {{split: vertical, children: [{}, {}]}}]}}",
+                "{{group: splith, children: [{{group: {axis}, children: [{}, {}]}}, {{group: splitv, children: [{}, {}]}}]}}",
                 w[0], w[1], w[2], w[3]
             ),
         );
@@ -1220,7 +1220,7 @@ fn construction_failures_stop_before_another_launch() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: vertical, children: [{}, {}]}}",
+                "{{group: splitv, children: [{}, {}]}}",
                 leaf(&fixture, 0),
                 leaf(&fixture, 1)
             ),
@@ -1292,7 +1292,7 @@ fn accepted_windows_are_revalidated_during_the_next_window_wait() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 leaf(&fixture, 0),
                 leaf(&fixture, 1)
             ),
@@ -1391,7 +1391,7 @@ fn four_window_reference_transcript_uses_three_root_children() {
                 *command = vec!["./app".into()];
                 *directory = Some(cwd.clone());
             }
-            NodeKind::Split { children, .. } => {
+            NodeKind::Group { children, .. } => {
                 for child in children {
                     substitute(&mut child.value, cwd);
                 }
@@ -1501,7 +1501,7 @@ fn initial_tabbed_workspace_is_oriented_without_an_extra_wrapper() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: vertical, children: [{}, {}]}}",
+            "{{group: splitv, children: [{}, {}]}}",
             leaf(&fixture, 0),
             leaf(&fixture, 1)
         ),
@@ -1548,7 +1548,7 @@ fn insertion_focus_interference_is_detected_before_spawning() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: horizontal, children: [{}, {}, {}]}}",
+            "{{group: splith, children: [{}, {}, {}]}}",
             leaf(&fixture, 0),
             leaf(&fixture, 1),
             leaf(&fixture, 2)
@@ -1582,7 +1582,7 @@ fn harmless_window_events_require_another_fence_before_continuing() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: horizontal, children: [{}, {}]}}",
+            "{{group: splith, children: [{}, {}]}}",
             leaf(&fixture, 0),
             leaf(&fixture, 1)
         ),
@@ -1628,7 +1628,7 @@ fn workspace_split_requires_workspace_focus_on_its_settled_fence() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{{split: vertical, children: [{}, {}]}}, {}]}}",
+                "{{group: splith, children: [{{group: splitv, children: [{}, {}]}}, {}]}}",
                 w[0], w[1], w[2]
             ),
         );
@@ -1703,7 +1703,7 @@ fn completed_session(
                     accepted.insert(actual.id, matcher);
                     Hierarchy::Window(actual.id)
                 }
-                NodeKind::Split { children, .. } => Hierarchy::Split {
+                NodeKind::Group { children, .. } => Hierarchy::Split {
                     id: Some(actual.id),
                     layout: actual.layout,
                     children: children
@@ -1765,7 +1765,7 @@ fn two_sibling_weights_use_dimensions_and_ignore_root_weight_and_percent() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{weight: 999, split: horizontal, children: [{}, {}]}}",
+            "{{weight: 999, group: splith, children: [{}, {}]}}",
             weighted(&fixture, 0, 3.0),
             weighted(&fixture, 1, 1.0)
         ),
@@ -1801,7 +1801,7 @@ fn three_siblings_reobserve_redistribution_and_converge_over_multiple_passes() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: horizontal, children: [{}, {}, {}]}}",
+            "{{group: splith, children: [{}, {}, {}]}}",
             weighted(&fixture, 0, 20.0),
             weighted(&fixture, 1, 30.0),
             weighted(&fixture, 2, 50.0)
@@ -1858,7 +1858,7 @@ fn minimum_constraints_stagnation_and_three_pass_limit_warn_without_failing() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 weighted(&fixture, 0, 90.0),
                 weighted(&fixture, 1, 10.0)
             ),
@@ -1912,7 +1912,7 @@ fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 weighted(&fixture, 0, 3.0),
                 weighted(&fixture, 1, 1.0)
             ),
@@ -1942,7 +1942,7 @@ fn residuals_between_the_target_and_tolerance_are_adjusted_without_a_warning() {
     let config = layout_config(
         &fixture,
         &format!(
-            "{{split: horizontal, children: [{}, {}]}}",
+            "{{group: splith, children: [{}, {}]}}",
             weighted(&fixture, 0, 3.0),
             weighted(&fixture, 1, 1.0)
         ),
@@ -1981,13 +1981,13 @@ fn residuals_between_the_target_and_tolerance_are_adjusted_without_a_warning() {
 fn nested_groups_are_sized_outer_first_including_equal_axes() {
     for equal_axis in [false, true] {
         let fixture = Fixture::new();
-        let axis = if equal_axis { "horizontal" } else { "vertical" };
+        let axis = if equal_axis { "splith" } else { "splitv" };
         let layout = if equal_axis { "splith" } else { "splitv" };
         let dimension = if equal_axis { "width" } else { "height" };
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{{weight: 3, split: {axis}, children: [{}, {}]}}, {{split: vertical, children: [{}, {}]}}]}}",
+                "{{group: splith, children: [{{weight: 3, group: {axis}, children: [{}, {}]}}, {{group: splitv, children: [{}, {}]}}]}}",
                 weighted(&fixture, 0, 3.0),
                 weighted(&fixture, 1, 1.0),
                 weighted(&fixture, 2, 1.0),
@@ -2068,7 +2068,7 @@ fn sizing_interference_and_ipc_errors_are_fatal_even_when_sizes_are_nonfatal() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 weighted(&fixture, 0, 3.0),
                 weighted(&fixture, 1, 1.0)
             ),
@@ -2148,7 +2148,7 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 leaf(&fixture, 0),
                 leaf(&fixture, 1)
             ),
@@ -2196,7 +2196,7 @@ fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
         let mut config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{{split: vertical, children: [{}, {}]}}, {}]}}",
+                "{{group: splith, children: [{{group: splitv, children: [{}, {}]}}, {}]}}",
                 leaf(&fixture, 0),
                 leaf(&fixture, 1),
                 leaf(&fixture, 2)
@@ -2234,7 +2234,7 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
         let config = layout_config(
             &fixture,
             &format!(
-                "{{split: horizontal, children: [{}, {}]}}",
+                "{{group: splith, children: [{}, {}]}}",
                 leaf(&fixture, 0),
                 leaf(&fixture, 1)
             ),
@@ -2270,5 +2270,35 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
         let error =
             completed_session(&fixture, &config, steps, |session| session.focus(&[0])).unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
+    }
+}
+
+#[test]
+fn unsupported_groups_refuse_before_connections_or_launches() {
+    let fixture = Fixture::new();
+    for group in ["tabbed", "stacked"] {
+        for nested in [false, true] {
+            let mut layout = format!("{{group: {group}, children: [{}]}}", leaf(&fixture, 0));
+            if nested {
+                for index in 1..8 {
+                    layout = format!(
+                        "{{group: splith, children: [{}, {layout}]}}",
+                        leaf(&fixture, index)
+                    );
+                }
+            }
+            let config = layout_config(&fixture, &layout);
+            let mut connect = || -> Result<UnixStream, String> {
+                panic!("unsupported groups must fail before any IPC connection");
+            };
+            let mut diagnostics = Diagnostics::start("unsupported group test");
+            let error = load_with(&config, None, &mut connect, &mut diagnostics).unwrap_err();
+            assert!(
+                error.contains(&format!("loading {group} groups is not implemented yet")),
+                "{error}"
+            );
+            assert!(error.contains("layout"), "{error}");
+            assert!(!fixture.path.join("launches").exists());
+        }
     }
 }

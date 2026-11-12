@@ -38,7 +38,7 @@ fn pair_draft() -> String {
 version: 1
 focus: window2
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: window1
       weight: 59.9
@@ -95,14 +95,14 @@ fn nested_capture_matches_the_measured_hierarchy() {
 version: 1
 focus: 'window3'
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: window1
       weight: 40.0
       command: null
       match:
         app_id: {}
-    - split: vertical
+    - group: splitv
       weight: 30.0
       children:
         - id: window2
@@ -146,7 +146,7 @@ fn capture_differences_report_the_failed_comparison() {
             "weight: sixty",
             "capture weight is not numeric",
         ),
-        ("split: horizontal", "split: vertical", "capture value"),
+        ("group: splith", "group: splitv", "capture value"),
         ("    - id: window1", "    - id: window2", "capture value"),
         (
             "      command: null\n      match:\n        app_id: sway",
@@ -599,7 +599,7 @@ fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
         assert!(!error.contains("/usr/bin"));
     }
     for (original, replacement) in [
-        ("split: horizontal", "split: vertical"),
+        ("group: splith", "group: splitv"),
         ("weight: 59.9", "weight: 59.91"),
         ("id: window1", "id: other"),
         ("focus: window2", "focus: window1"),

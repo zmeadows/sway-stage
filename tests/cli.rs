@@ -385,7 +385,7 @@ fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
 fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
-    fixture.file("nested.yaml", "version: 1\nlayout: {split: horizontal, children: [{id: a, command: [not-installed], match: {app_id: a}}, {id: b, command: [not-installed], match: {app_id: b}}]}\n");
+    fixture.file("nested.yaml", "version: 1\nlayout: {group: splith, children: [{id: a, command: [not-installed], match: {app_id: a}}, {id: b, command: [not-installed], match: {app_id: b}}]}\n");
     fixture.file("good.yaml", WINDOW);
     let log = fixture.path.join(".local/state/sway-stage/last-run.log");
     for name in ["nested", "good"] {
@@ -635,7 +635,7 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
     let draft = drafts.remove(0);
     assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
     assert!(
-        draft.contains("version: 1\nfocus: window1\nlayout:\n  split: horizontal\n"),
+        draft.contains("version: 1\nfocus: window1\nlayout:\n  group: splith\n"),
         "{draft}"
     );
     let placeholders = |placeholder: &str| {
@@ -795,5 +795,25 @@ fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
         }
         assert!(!stderr.contains(std::env::current_exe().unwrap().to_str().unwrap()));
         assert!(!fixture.path.join(".local").exists());
+    }
+}
+
+#[test]
+fn check_accepts_new_groups_and_load_refuses_without_sway() {
+    let fixture = Fixture::new();
+    for group in ["tabbed", "stacked"] {
+        fixture.file("group.yaml", &format!(
+            "version: 1\nlayout: {{group: {group}, children: [{{id: a, command: [not-installed], match: {{app_id: a}}}}]}}\n"
+        ));
+        let output = fixture.run(&["--layouts-dir", ".", "check", "group"], 0);
+        assert_eq!(output.stdout, b"group: valid\n");
+        assert!(output.stderr.is_empty());
+        let output = fixture.run(&["--layouts-dir", ".", "load", "group"], 1);
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains(&format!("loading {group} groups is not implemented yet")),
+            "{error}"
+        );
+        assert!(!error.contains("SWAYSOCK"), "{error}");
     }
 }

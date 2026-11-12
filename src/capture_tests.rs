@@ -1,6 +1,6 @@
 use super::*;
 use crate::command_inference::{infer_host_command, infer_process_command};
-use crate::config::{self, Config, LayoutNode, Matcher, NodeKind, Orientation};
+use crate::config::{self, Config, GroupLayout, LayoutNode, Matcher, NodeKind};
 use crate::observation::fixtures::{frame, node, pair, request, send, tree};
 use serde_json::{Value, json};
 use std::io::Read;
@@ -106,17 +106,15 @@ fn outline(layout: &LayoutNode) -> String {
             matcher: Matcher::Class(class),
             ..
         } => format!("{id} class={class}"),
-        NodeKind::Split {
-            orientation,
-            children,
-        } => {
-            let axis = match orientation {
-                Orientation::Horizontal => "h",
-                Orientation::Vertical => "v",
+        NodeKind::Group { layout, children } => {
+            let axis = match layout {
+                GroupLayout::SplitH => "h",
+                GroupLayout::SplitV => "v",
+                GroupLayout::Tabbed | GroupLayout::Stacked => panic!("unsupported capture group"),
             };
             let children: Vec<_> = children
                 .iter()
-                .map(|child| format!("{} @{}", outline(&child.value), child.value.weight))
+                .map(|child| format!("{} @{}", outline(&child.value), child.value.weight()))
                 .collect();
             format!("{axis}({})", children.join(", "))
         }
@@ -164,7 +162,7 @@ fn two_windows_record_axis_order_proportions_and_non_first_focus() {
 version: 1
 focus: window2
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: window1
       weight: 50.0
@@ -451,7 +449,7 @@ fn unusual_identifiers_survive_serialization_and_strict_parsing_exactly() {
     assert!(!body(&draft).contains("match: null"), "{draft}");
 
     let config = filled(&draft);
-    let NodeKind::Split { children, .. } = &config.layout.value.kind else {
+    let NodeKind::Group { children, .. } = &config.layout.value.kind else {
         panic!("expected a root split");
     };
     let parsed: Vec<_> = children
@@ -461,7 +459,7 @@ fn unusual_identifiers_survive_serialization_and_strict_parsing_exactly() {
                 matcher: Matcher::AppId(value) | Matcher::Class(value),
                 ..
             } => value.as_str(),
-            NodeKind::Split { .. } => panic!("expected only windows"),
+            NodeKind::Group { .. } => panic!("expected only windows"),
         })
         .collect();
     assert_eq!(parsed, identifiers);
@@ -790,10 +788,10 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
     let inferred_config = filled(&inferred);
     let default_config = filled(&default);
     assert_eq!(inferred_config.focus, default_config.focus);
-    let NodeKind::Split { children, .. } = &inferred_config.layout.value.kind else {
+    let NodeKind::Group { children, .. } = &inferred_config.layout.value.kind else {
         panic!("expected horizontal root");
     };
-    let NodeKind::Split {
+    let NodeKind::Group {
         children: nested, ..
     } = &children[1].value.kind
     else {
@@ -1006,7 +1004,7 @@ fn package_commands_serialize_literally_alongside_unresolved_commands() {
         .unwrap();
 
     let parsed = filled(&draft.yaml);
-    let NodeKind::Split { children, .. } = &parsed.layout.value.kind else {
+    let NodeKind::Group { children, .. } = &parsed.layout.value.kind else {
         panic!("expected split");
     };
     for (child, expected) in children.iter().zip([
@@ -1065,7 +1063,7 @@ fn flatpak_inference_preserves_pid_association_and_window_matchers_in_yaml() {
         })
         .unwrap();
     let parsed = filled(&draft.yaml);
-    let NodeKind::Split { children, .. } = &parsed.layout.value.kind else {
+    let NodeKind::Group { children, .. } = &parsed.layout.value.kind else {
         panic!("expected split")
     };
     for (child, expected) in children.iter().zip([

@@ -1,7 +1,7 @@
 # See docs/SPECIFICATION.md. Equal widths; final focus defaults to the left window.
 version: 1
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: left
       command: [foot, --app-id=sway-stage-left]
