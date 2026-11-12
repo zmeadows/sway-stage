@@ -1,5 +1,5 @@
 use crate::discovery::valid_name;
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_saphyr::Spanned;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
@@ -53,7 +53,7 @@ pub enum NodeKind {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupLayout {
     SplitH,

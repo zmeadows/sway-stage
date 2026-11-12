@@ -5,7 +5,7 @@
 //! arrangement and window selectors, with optional best-effort process arguments.
 
 use crate::command_inference::read_process_command;
-use crate::config::{MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
+use crate::config::{GroupLayout, MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
 use crate::observation::{self, app_id, class, proportions, sibling_dimensions};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -197,20 +197,12 @@ enum CapturedNode {
         container_id: i64,
         selector: Option<Selector>,
     },
-    Split {
-        axis: SplitAxis,
-        /// Child extents along `axis` in pixels, parallel to `children`.
-        extents: Vec<f64>,
+    Group {
+        layout: GroupLayout,
+        /// Present only for splits: child extents along the split axis, parallel to `children`.
+        split_extents: Option<Vec<f64>>,
         children: Vec<CapturedNode>,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-enum SplitAxis {
-    #[serde(rename = "splith")]
-    Horizontal,
-    #[serde(rename = "splitv")]
-    Vertical,
 }
 
 /// An exact window selector, serialized as the single key of a `match` mapping.
@@ -256,24 +248,19 @@ fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
     })
 }
 
-/// Captures the workspace or a structural container from its tiled children. A group with
-/// one child has no visible boundary of its own, since the child fills it, so the child
-/// replaces it; the group's extent was already measured among its own siblings.
+/// Captures the workspace or a structural container from its tiled children. Singleton
+/// splits collapse; tabbed/stacked groups retain their headers even with only one child.
+/// The enclosing split already measured this container's extent before any collapse.
 fn capture_group(
     group: &Node,
     depth: usize,
     node_count: &mut usize,
 ) -> Result<CapturedNode, String> {
-    // Checked even for a single child: a one-tab group still shows its tab bar.
-    let axis = match group.layout {
-        NodeLayout::SplitH => SplitAxis::Horizontal,
-        NodeLayout::SplitV => SplitAxis::Vertical,
-        NodeLayout::Tabbed | NodeLayout::Stacked => {
-            return Err(format!(
-                "container id={} is tabbed or stacked, which the layout format cannot represent; switch it to `layout splith` or `layout splitv` and retry",
-                group.id
-            ));
-        }
+    let layout = match group.layout {
+        NodeLayout::SplitH => GroupLayout::SplitH,
+        NodeLayout::SplitV => GroupLayout::SplitV,
+        NodeLayout::Tabbed => GroupLayout::Tabbed,
+        NodeLayout::Stacked => GroupLayout::Stacked,
         layout => {
             return Err(format!(
                 "container id={} has unsupported layout {layout:?}",
@@ -282,25 +269,31 @@ fn capture_group(
         }
     };
 
+    let is_split = matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV);
     match group.nodes.as_slice() {
         [] => Err(format!(
             "container id={} holds neither a window nor child containers",
             group.id
         )),
-        [only_child] => capture_node(only_child, depth, node_count),
+        [only_child] if is_split => capture_node(only_child, depth, node_count),
         children => {
             count_layout_node(depth, node_count)?;
-            let extents = sibling_dimensions(group).map_err(|error| {
-                format!("container id={} has unusable geometry: {error}", group.id)
-            })?;
+            let split_extents = if is_split {
+                let extents = sibling_dimensions(group).map_err(|error| {
+                    format!("container id={} has unusable geometry: {error}", group.id)
+                })?;
+                Some(extents)
+            } else {
+                None
+            };
 
             let mut captured_children = Vec::new();
             for child in children {
                 captured_children.push(capture_node(child, depth + 1, node_count)?);
             }
-            Ok(CapturedNode::Split {
-                axis,
-                extents,
+            Ok(CapturedNode::Group {
+                layout,
+                split_extents,
                 children: captured_children,
             })
         }
@@ -385,7 +378,7 @@ fn count_layout_node(depth: usize, node_count: &mut usize) -> Result<(), String>
     }
     if *node_count > MAX_LAYOUT_NODES {
         return Err(format!(
-            "the arrangement has more than the layout format's {MAX_LAYOUT_NODES} windows and splits"
+            "the arrangement has more than the layout format's {MAX_LAYOUT_NODES} windows and groups"
         ));
     }
     Ok(())
@@ -402,8 +395,8 @@ struct Draft {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum DraftNode {
-    Split {
-        group: SplitAxis,
+    Group {
+        group: GroupLayout,
         #[serde(skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
         children: Vec<DraftNode>,
@@ -498,8 +491,8 @@ fn render_draft(
     })
 }
 
-/// `weight` is `None` only for the root, whose weight would have no effect. `draft_ids`
-/// maps each captured window's container ID to its draft ID.
+/// `weight` comes only from an enclosing split; the root and children of tabbed/stacked
+/// groups omit it. `draft_ids` maps each captured window's container ID to its draft ID.
 fn draft_node(
     captured: &CapturedNode,
     weight: Option<f64>,
@@ -527,20 +520,21 @@ fn draft_node(
                 selector: selector.clone(),
             }
         }
-        CapturedNode::Split {
-            axis,
-            extents,
+        CapturedNode::Group {
+            layout,
+            split_extents,
             children,
         } => {
-            let child_weights = percentage_weights(extents);
+            let child_weights = split_extents.as_deref().map(percentage_weights);
             let children = children
                 .iter()
-                .zip(child_weights)
-                .map(|(child, child_weight)| {
+                .enumerate()
+                .map(|(child_index, child)| {
+                    let child_weight = child_weights.as_ref().map(|weights| weights[child_index]);
                     // Each child adds a two-space sequence indent and a two-space dash.
                     draft_node(
                         child,
-                        Some(child_weight),
+                        child_weight,
                         indent + 4,
                         draft_ids,
                         command_for,
@@ -548,8 +542,8 @@ fn draft_node(
                     )
                 })
                 .collect();
-            DraftNode::Split {
-                group: *axis,
+            DraftNode::Group {
+                group: *layout,
                 weight,
                 children,
             }

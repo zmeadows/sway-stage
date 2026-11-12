@@ -92,8 +92,8 @@ fn filled(draft: &str) -> Config {
     config::parse(&edited, Path::new("draft.yaml")).unwrap()
 }
 
-/// Splits as `h(...)` or `v(...)` with each child's weight after `@`; windows as
-/// `id app_id=value` or `id class=value`.
+/// Groups as `h(...)`, `v(...)`, `t(...)`, or `s(...)`, with explicit child weights
+/// after `@`; windows as `id app_id=value` or `id class=value`.
 fn outline(layout: &LayoutNode) -> String {
     match &layout.kind {
         NodeKind::Window {
@@ -107,16 +107,23 @@ fn outline(layout: &LayoutNode) -> String {
             ..
         } => format!("{id} class={class}"),
         NodeKind::Group { layout, children } => {
-            let axis = match layout {
+            let group = match layout {
                 GroupLayout::SplitH => "h",
                 GroupLayout::SplitV => "v",
-                GroupLayout::Tabbed | GroupLayout::Stacked => panic!("unsupported capture group"),
+                GroupLayout::Tabbed => "t",
+                GroupLayout::Stacked => "s",
             };
             let children: Vec<_> = children
                 .iter()
-                .map(|child| format!("{} @{}", outline(&child.value), child.value.weight()))
+                .map(|child| {
+                    let mut description = outline(&child.value);
+                    if let Some(weight) = child.value.weight {
+                        description.push_str(&format!(" @{weight}"));
+                    }
+                    description
+                })
                 .collect();
-            format!("{axis}({})", children.join(", "))
+            format!("{group}({})", children.join(", "))
         }
     }
 }
@@ -124,6 +131,7 @@ fn outline(layout: &LayoutNode) -> String {
 /// Captures a saved workspace and summarizes the filled, validated draft as (focus, outline).
 fn capture_outline(tree: Value) -> (String, String) {
     let config = filled(&capture_recorded(tree).unwrap());
+    assert!(config.layout.value.weight.is_none());
     (config.focus.unwrap(), outline(&config.layout.value))
 }
 
@@ -196,6 +204,122 @@ layout:
             "v(window1 app_id=top @75, window2 app_id=bottom @25)".into()
         )
     );
+}
+
+#[test]
+fn tabbed_and_stacked_roots_keep_order_focus_and_singletons_without_weights() {
+    for (layout, symbol) in [("tabbed", "t"), ("stacked", "s")] {
+        let desktop = workspace(layout, vec![left(), right()], 21);
+        let draft = capture_recorded(desktop.clone()).unwrap();
+        assert!(!body(&draft).contains("weight:"), "{draft}");
+        assert!(body(&draft).contains(&format!("layout:\n  group: {layout}\n")));
+        assert_eq!(
+            capture_outline(desktop),
+            (
+                "window2".into(),
+                format!("{symbol}(window1 app_id=left, window2 app_id=right)")
+            )
+        );
+        assert_eq!(
+            capture_outline(workspace(layout, vec![left()], 20)),
+            ("window1".into(), format!("{symbol}(window1 app_id=left)"))
+        );
+    }
+}
+
+#[test]
+fn split_parents_weight_tabbed_and_stacked_groups_by_the_parent_axis() {
+    for (layout, symbol, tab_weight, stack_weight) in
+        [("splith", "h", 25, 75), ("splitv", "v", 75, 25)]
+    {
+        let desktop = workspace(
+            layout,
+            vec![
+                group(30, "tabbed", 400, 750, vec![left(), right()]),
+                group(31, "stacked", 1200, 250, vec![view(22, Some("c"), 0, 0)]),
+            ],
+            21,
+        );
+        assert_eq!(
+            capture_outline(desktop),
+            (
+                "window2".into(),
+                format!(
+                    "{symbol}(t(window1 app_id=left, window2 app_id=right) @{tab_weight}, \
+                     s(window3 app_id=c) @{stack_weight})"
+                )
+            )
+        );
+    }
+}
+
+/// Mixed ancestry exercises weights on groups, omitted weights on nested groups, and
+/// split sizing below both header layouts. Header children need no split-axis geometry.
+fn mixed_native_groups() -> Value {
+    let inner_split = group(
+        33,
+        "splith",
+        0,
+        0,
+        vec![xwayland(23, "D", 300, 0), view(24, Some("e"), 100, 0)],
+    );
+    let stack = group(
+        32,
+        "stacked",
+        100,
+        250,
+        vec![view(22, None, 0, 0), inner_split],
+    );
+    let column = group(
+        31,
+        "splitv",
+        0,
+        0,
+        vec![view(21, Some("b"), 100, 750), stack],
+    );
+    let tabs = group(
+        30,
+        "tabbed",
+        600,
+        1080,
+        vec![view(20, Some("a"), 0, 0), column],
+    );
+    let singleton_stack = group(34, "stacked", 1400, 1080, vec![view(25, Some("f"), 0, 0)]);
+    workspace("splith", vec![tabs, singleton_stack], 24)
+}
+
+#[test]
+fn mixed_native_groups_round_trip_through_the_configuration_validator() {
+    assert_eq!(
+        capture_outline(mixed_native_groups()),
+        (
+            "window5".into(),
+            "h(t(window1 app_id=a, v(window2 app_id=b @75, \
+             s(window3 app_id=filled, h(window4 class=D @75, window5 app_id=e @25)) @25)) @30, \
+             s(window6 app_id=f) @70)"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn singleton_split_wrappers_preserve_header_groups_and_enclosing_weights() {
+    for (layout, symbol) in [("tabbed", "t"), ("stacked", "s")] {
+        let meaningful_group = group(32, layout, 0, 0, vec![left()]);
+        let wrapper = group(31, "splitv", 300, 100, vec![meaningful_group]);
+        let outer_wrapper = group(30, "splith", 400, 100, vec![wrapper]);
+        assert_eq!(
+            capture_outline(workspace("splitv", vec![outer_wrapper.clone()], 20)),
+            ("window1".into(), format!("{symbol}(window1 app_id=left)"))
+        );
+        assert_eq!(
+            capture_outline(workspace("splith", vec![outer_wrapper, right()], 21)),
+            (
+                "window2".into(),
+                format!("h({symbol}(window1 app_id=left) @29.41, window2 app_id=right @70.59)")
+            )
+        );
+    }
 }
 
 #[test]
@@ -522,6 +646,43 @@ fn layout_format_limits_bound_captures() {
 }
 
 #[test]
+fn preserved_header_groups_count_toward_depth_and_node_limits() {
+    for levels in [MAX_LAYOUT_DEPTH, MAX_LAYOUT_DEPTH + 1] {
+        let mut subtree = left();
+        for level in 1..levels {
+            let layout = if level % 2 == 0 { "tabbed" } else { "stacked" };
+            subtree = group(1000 + level as i64, layout, 0, 0, vec![subtree]);
+        }
+        let result = capture_recorded(workspace("splith", vec![subtree], 20));
+        if levels == MAX_LAYOUT_DEPTH {
+            filled(&result.unwrap());
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("deeper than the layout format")
+            );
+        }
+    }
+
+    let mut children = Vec::new();
+    for child_index in 0..(MAX_LAYOUT_NODES - 2) / 2 {
+        children.push(group(
+            1000 + child_index as i64,
+            "tabbed",
+            0,
+            0,
+            vec![view(2000 + child_index as i64, Some("tile"), 0, 0)],
+        ));
+    }
+    children.push(left());
+    filled(&capture_recorded(workspace("stacked", children.clone(), 20)).unwrap());
+    children.push(right());
+    let error = capture_recorded(workspace("stacked", children, 20)).unwrap_err();
+    assert!(error.contains("more than the layout format's 256 windows and groups"));
+}
+
+#[test]
 fn unrepresentable_arrangements_fail_without_a_draft() {
     let mut floating_child = workspace("splith", vec![left()], 20);
     floating_child["nodes"][0]["nodes"][0]["floating_nodes"] =
@@ -538,9 +699,6 @@ fn unrepresentable_arrangements_fail_without_a_draft() {
     fullscreen_group["fullscreen_mode"] = json!(1);
     let mut window_with_children = left();
     window_with_children["nodes"] = json!([view(22, Some("inner"), 960, 1080)]);
-    let stacked_group = group(30, "stacked", 960, 1080, vec![left(), right()]);
-    // A single tab still shows a tab bar, so even a one-child tabbed group is refused.
-    let single_tab = group(30, "tabbed", 1920, 1080, vec![left()]);
     let column = group(30, "splitv", 960, 1080, vec![left(), right()]);
 
     #[rustfmt::skip]
@@ -553,9 +711,7 @@ fn unrepresentable_arrangements_fail_without_a_draft() {
         (workspace("splith", vec![global_fullscreen, right()], 21), "fullscreen"),
         (workspace("splith", vec![unknown_fullscreen, right()], 21), "fullscreen"),
         (workspace("splith", vec![fullscreen_group], 20), "id=30 is fullscreen"),
-        (workspace("tabbed", vec![left(), right()], 20), "tabbed or stacked"),
-        (workspace("splith", vec![stacked_group, view(22, Some("x"), 960, 1080)], 20), "tabbed or stacked"),
-        (workspace("splith", vec![single_tab], 20), "tabbed or stacked"),
+        (workspace("none", vec![left(), right()], 20), "unsupported layout"),
         (workspace("splith", vec![node(30, "output", false), right()], 21), "unsupported Sway node type"),
         (workspace("splith", vec![window_with_children, right()], 21), "holds child containers"),
         (workspace("splith", vec![node(30, "con", false), right()], 21), "neither a window nor child"),
@@ -568,6 +724,49 @@ fn unrepresentable_arrangements_fail_without_a_draft() {
     for (tree, expected) in cases {
         let error = capture_recorded(tree).unwrap_err();
         assert!(error.contains(expected), "expected {expected:?}: {error}");
+    }
+}
+
+#[test]
+fn header_groups_still_validate_their_contents_focus_and_enclosing_split_geometry() {
+    for layout in ["tabbed", "stacked"] {
+        let mut floating = left();
+        floating["floating"] = json!("user_on");
+        let mut fullscreen = group(30, layout, 100, 100, vec![left()]);
+        fullscreen["fullscreen_mode"] = json!(1);
+        let mut scratchpad = group(30, layout, 100, 100, vec![left()]);
+        scratchpad["scratchpad_state"] = json!("changed");
+        let malformed_window = {
+            let mut window = left();
+            window["nodes"] = json!([right()]);
+            window
+        };
+        let invalid_split = group(
+            30,
+            "splitv",
+            0,
+            0,
+            vec![view(20, Some("a"), 100, 0), right()],
+        );
+
+        #[rustfmt::skip]
+        let cases = [
+            (workspace(layout, vec![group(30, layout, 0, 0, vec![])], 30), "neither a window nor child"),
+            (workspace(layout, vec![floating], 20), "floating"),
+            (workspace(layout, vec![fullscreen], 20), "fullscreen"),
+            (workspace(layout, vec![scratchpad], 20), "scratchpad"),
+            (workspace(layout, vec![node(30, "output", false)], 30), "unsupported Sway node type"),
+            (workspace(layout, vec![malformed_window], 20), "holds child containers"),
+            (workspace(layout, vec![invalid_split], 21), "unusable geometry"),
+            (workspace("splith", vec![group(30, layout, 0, 100, vec![left()]), right()], 21), "unusable geometry"),
+            (workspace(layout, vec![left(), right()], 10), "focus is on container id=10"),
+            (workspace("splith", vec![group(30, layout, 100, 100, vec![left()])], 30), "focus is on container id=30"),
+            (workspace(layout, vec![], 10), "empty"),
+        ];
+        for (desktop, expected) in cases {
+            let error = capture_recorded(desktop).unwrap_err();
+            assert!(error.contains(expected), "expected {expected:?}: {error}");
+        }
     }
 }
 
@@ -658,7 +857,7 @@ fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes()
 fn acquisition_allows_empty_and_unsupported_layouts_until_rendering() {
     for desktop in [
         workspace("splith", vec![], 10),
-        workspace("tabbed", vec![left(), right()], 20),
+        workspace("none", vec![left(), right()], 20),
     ] {
         let saved = saved_snapshot(desktop).unwrap();
         assert_eq!(saved.workspace_id(), 10);
@@ -728,6 +927,87 @@ fn view_with_pid(id: i64, pid: Value) -> Value {
     let mut window = view(id, Some("shared-app"), 960, 1080);
     window["pid"] = pid;
     window
+}
+
+/// Remove only launch commands and comments when comparing inferred and ordinary drafts.
+fn without_commands(draft: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_command = false;
+    for line in draft.lines().filter(|line| !line.starts_with('#')) {
+        if line.trim_start().starts_with("command:") {
+            lines.push(format!(
+                "{}command: null",
+                " ".repeat(line.len() - line.trim_start().len())
+            ));
+            in_command = true;
+        } else if in_command && line.trim_start().starts_with("- ") {
+            continue;
+        } else {
+            in_command = false;
+            lines.push(line.to_owned());
+        }
+    }
+    lines.join("\n")
+}
+
+#[test]
+fn inference_keeps_mixed_group_structure_weights_selectors_and_global_focus() {
+    fn set_window_pids(container: &mut Value) {
+        if container["shell"].is_string() {
+            container["pid"] = json!(container["id"].as_i64().unwrap() + 100);
+        }
+        for child in container["nodes"].as_array_mut().unwrap() {
+            set_window_pids(child);
+        }
+    }
+
+    let mut desktop = mixed_native_groups();
+    set_window_pids(&mut desktop);
+    let saved = saved_snapshot(desktop).unwrap();
+    let ordinary = saved
+        .render_with(false, &mut |_| {
+            panic!("disabled inference reads no processes")
+        })
+        .unwrap();
+    let mut requested_pids = Vec::new();
+    let inferred = saved
+        .render_with(true, &mut |pid| {
+            requested_pids.push(pid);
+            (pid != 122).then(|| vec!["app".into(), format!("pid-{pid}")])
+        })
+        .unwrap();
+    assert_eq!(requested_pids, [120, 121, 122, 123, 124, 125]);
+    assert_eq!(inferred.commands.total, 6);
+    assert_eq!(inferred.commands.inferred, 5);
+    assert_eq!(
+        without_commands(&ordinary.yaml),
+        without_commands(&inferred.yaml)
+    );
+
+    let ordinary_config = filled(&ordinary.yaml);
+    let inferred_config = filled(&inferred.yaml);
+    assert_eq!(inferred_config.focus, ordinary_config.focus);
+    assert_eq!(
+        outline(&inferred_config.layout.value),
+        outline(&ordinary_config.layout.value)
+    );
+
+    let mut pending = vec![&inferred_config.layout.value];
+    while let Some(layout_node) = pending.pop() {
+        match &layout_node.kind {
+            NodeKind::Group { children, .. } => {
+                pending.extend(children.iter().map(|child| &child.value));
+            }
+            NodeKind::Window { id, command, .. } => {
+                let window_number: i32 = id.strip_prefix("window").unwrap().parse().unwrap();
+                let mut expected = vec!["app".to_owned()];
+                if window_number != 3 {
+                    expected.push(format!("pid-{}", 119 + window_number));
+                }
+                assert_eq!(command, &expected);
+            }
+        }
+    }
 }
 
 #[test]
@@ -807,27 +1087,7 @@ fn inference_preserves_window_association_structure_and_yaml_arguments() {
         assert_eq!(command, arguments);
         assert!(matches!(matcher, Matcher::AppId(app_id) if app_id == "shared-app"));
     }
-    // Ignore only the command values and added comment in a structural comparison.
-    let normalize = |draft: &str| {
-        let mut lines = Vec::new();
-        let mut in_command = false;
-        for line in draft.lines().filter(|line| !line.starts_with('#')) {
-            if line.trim_start().starts_with("command:") {
-                lines.push(format!(
-                    "{}command: null",
-                    " ".repeat(line.len() - line.trim_start().len())
-                ));
-                in_command = true;
-            } else if in_command && line.trim_start().starts_with("- ") {
-                continue;
-            } else {
-                in_command = false;
-                lines.push(line.to_owned());
-            }
-        }
-        lines.join("\n")
-    };
-    assert_eq!(normalize(&inferred), normalize(&default));
+    assert_eq!(without_commands(&inferred), without_commands(&default));
 }
 
 #[test]

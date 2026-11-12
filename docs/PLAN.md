@@ -1,6 +1,7 @@
 # Release roadmap
 
-Loading supports all four native group layouts. Behavior is defined in the
+Loading and capture support all four native group layouts. Stage 4 capture and offline
+serialization round-trip checks are complete. Behavior is defined in the
 [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
@@ -10,8 +11,10 @@ Loading supports all four native group layouts. Behavior is defined in the
   root and nested groups, singleton ancestry, sibling insertion, and empty workspaces with
   initial tabbed/stacked layouts against the installed Sway version. Offline tree/event
   fixtures verify reactions, not the compositor's actual construction behavior.
-- **Native groups, Stage 4.** Add tabbed/stacked capture support; capture currently refuses
-  these structures.
+- **Native groups, Stage 5.** Extend the manual integration harness with native-group
+  construction and capture/reload scenarios after review. Verify mixed nesting, singleton
+  preservation, split proportions, first-child defaults, and global focus against Sway;
+  offline serialization checks do not establish compositor reconstruction behavior.
 
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release

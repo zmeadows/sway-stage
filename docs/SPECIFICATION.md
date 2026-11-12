@@ -54,8 +54,8 @@ two children; `tabbed` and `stacked` require at least one. Groups and windows ca
 arbitrarily within validation limits. The old `split` field and `horizontal`/`vertical`
 values are rejected; the configuration version remains `1`.
 
-`check` and loading support all four group types, including singleton tabbed/stacked
-groups and mixed nesting. Capture still refuses tabbed/stacked structures.
+`check`, loading, and capture support all four group types, including singleton
+tabbed/stacked groups and mixed nesting.
 
 A window node has the following fields:
 
@@ -108,8 +108,8 @@ numbers. Explicit nulls never trigger optional defaults.
 
 Layouts describe new applications in ordered split, tabbed, and stacked groups. There is no
 session restoration, existing-window reuse, daemon, ongoing enforcement, workspace/output
-assignment, or management of application lifetimes after launch. Capture supports split
-groups only. Floating and fullscreen arrangements are outside the layout format.
+assignment, or management of application lifetimes after launch. Floating and fullscreen
+arrangements are outside the layout format.
 
 The following safeguards apply to standalone and menu loading:
 
@@ -200,15 +200,23 @@ command counts. Unresolved commands require manual editing; fully inferred comma
 need review and are best-effort, with no promise of recreating the original windows.
 These counts cover launch commands only, independently of `match: null` placeholders.
 
-The draft emits `group: splith` or `group: splitv` and preserves split hierarchy,
-orientations, visual order, and focused window. IDs are `window1`, `window2`, … in
-depth-first order. Child weights are percentages of summed
-sibling extents on the split axis, rounded to hundredths with a minimum of `0.01`; the root
-has no weight. A single window becomes the root. Single-child wrappers collapse after
-validation; multi-child groups remain even if their orientation matches their parent's.
+The draft preserves `splith`, `splitv`, `tabbed`, and `stacked` groups, their nesting,
+child order, and the globally focused window. IDs are `window1`, `window2`, … in
+depth-first order. Children of splits receive weights from their observed widths or
+heights, including when the child is a tabbed/stacked group. Weights are percentages of
+summed sibling extents on the split axis, rounded to hundredths with a minimum of `0.01`.
+Children directly inside tabbed/stacked groups have no weights; nested splits still receive
+weights on their own children. The root has no weight. Single-child split wrappers collapse
+after validation, including at the workspace root; singleton tabbed/stacked groups remain.
+Multi-child splits remain even if their orientation matches their parent's. A window with
+only split wrappers becomes the root.
 Selectors prefer nonempty Wayland app IDs, then Xwayland classes, otherwise `match: null`.
 Commands default to `command: null`. Workspace names, outputs, titles, container IDs, PIDs,
 cwd, and environment are not serialized.
+
+Capture records only global focus, not independently selected tabs in inactive groups.
+Reloading uses the first-child defaults described above, then applies global focus along
+its ancestry. Capture does not query additional snapshots or infer inactive selections.
 
 Inferred commands use compact flow sequences such as `command: [foot, --app-id=term]`
 when the YAML-escaped line, including indentation, fits within 120 characters. Longer
@@ -216,10 +224,11 @@ commands use block sequences. Layout `children` remain block sequences, and unre
 commands remain `command: null`. Both command styles are accepted by `check` and `load`.
 
 Capture refuses empty workspaces, floating containers, fullscreen windows/groups,
-scratchpad content (even shown), tabbed/stacked containers (even with one child), unsupported
-or malformed nodes, nonpositive split-axis extents, ambiguous/absent focus, focus on a group
-rather than a window, and layouts exceeding the format's depth/node limits. The workspace's
-own fullscreen flag is not treated as a fullscreen window.
+scratchpad content (even shown), unsupported layouts or malformed nodes (including empty
+groups), nonpositive sibling extents in multi-child splits, ambiguous/absent focus, focus
+on a group rather than a window, and layouts exceeding the format's depth/node limits.
+Tabbed/stacked children need no split-axis geometry. The workspace's own fullscreen flag
+is not treated as a fullscreen window.
 
 `--infer-commands` uses each saved window's actual PID. Before and after inference, it
 compares the process start time from `/proc/PID/stat` (bounded to 4 KiB) and the executable's
