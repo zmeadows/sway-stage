@@ -61,6 +61,7 @@ fn buffered_events_cannot_extend_an_expired_observation_deadline() {
         pending: line.clone(),
     };
     let error = subscription.next_event(Instant::now()).unwrap_err();
+
     assert_eq!(error, "event observation deadline expired");
     assert_eq!(subscription.pending, line);
     assert!(matches!(
@@ -72,6 +73,7 @@ fn buffered_events_cannot_extend_an_expired_observation_deadline() {
 #[test]
 fn monitor_lines_decode_by_their_distinct_keys() {
     let tick = decode_event(br#"{"first": false, "payload": "sway-stage-integration:00"}"#);
+
     assert!(matches!(
         tick,
         Ok(Event::Tick(TickEvent { first: false, ref payload })) if payload == "sway-stage-integration:00"
@@ -137,6 +139,7 @@ fn tree_child_focus_history_is_required_and_distinct_from_global_focus() {
     let tree = mixed_native_desktop(&scenario);
     let observed: TreeNode = serde_json::from_value(tree.clone()).unwrap();
     let tabs = crate::fixtures::find(&observed, 31);
+
     assert!(!tabs.focused);
     assert_eq!(tabs.focus, [33, 32]);
     for invalid in [serde_json::Value::Null, serde_json::json!(["33"])] {

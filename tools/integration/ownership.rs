@@ -24,7 +24,7 @@ pub type AcceptedWindows = BTreeMap<i64, String>;
 
 /// A close this run requested: the closing window and the owned windows that remain.
 pub struct ExpectedClose<'a> {
-    pub closing_id: i64,
+    pub closing_window_id: i64,
     pub remaining: &'a AcceptedWindows,
 }
 
@@ -50,7 +50,7 @@ pub fn require_quiet(
         let container_id = event.container.id;
         if let Some(close) = expected_close {
             let is_requested_close =
-                event.change == WindowChange::Close && container_id == close.closing_id;
+                event.change == WindowChange::Close && container_id == close.closing_window_id;
             let is_focus_on_remaining =
                 event.change == WindowChange::Focus && close.remaining.contains_key(&container_id);
             if is_requested_close || is_focus_on_remaining {
@@ -76,29 +76,29 @@ pub fn bind_launches(
     layout: &ConfiguredNode,
     preexisting_ids: &HashSet<i64>,
 ) -> Result<AcceptedWindows, Failure> {
-    let mut new_ids = Vec::new();
+    let mut new_window_ids = Vec::new();
     for event in window_events {
         if event.change != WindowChange::New {
             continue;
         }
         let container_id = event.container.id;
-        if preexisting_ids.contains(&container_id) || new_ids.contains(&container_id) {
+        if preexisting_ids.contains(&container_id) || new_window_ids.contains(&container_id) {
             return Err(Failure::Uncertain(format!(
                 "preexisting or repeated new event: id={container_id}"
             )));
         }
-        new_ids.push(container_id);
+        new_window_ids.push(container_id);
     }
 
     let leaves = layout.leaves();
-    if new_ids.len() != leaves.len() {
+    if new_window_ids.len() != leaves.len() {
         return Err(Failure::Uncertain(format!(
-            "expected {} sequential new windows, observed IDs {new_ids:?}",
+            "expected {} sequential new windows, observed IDs {new_window_ids:?}",
             leaves.len()
         )));
     }
     let leaves_by_container: HashMap<i64, &ConfiguredWindow> =
-        new_ids.iter().copied().zip(leaves).collect();
+        new_window_ids.iter().copied().zip(leaves).collect();
 
     for event in window_events {
         if is_harmless(event.change) {
@@ -156,15 +156,15 @@ pub fn verify_ownership(
     accepted: &AcceptedWindows,
 ) -> Result<(), Failure> {
     let leaves = layout.leaves();
-    let mut found = AcceptedWindows::new();
+    let mut verified_windows = AcceptedWindows::new();
     for placed in walk(tree) {
         let node = placed.node;
         let container_id = node.id;
-        let on_target = placed
+        let on_target_workspace = placed
             .workspace
             .is_some_and(|workspace| workspace.id == target_workspace_id);
         let is_preexisting = preexisting_ids.contains(&container_id);
-        if is_preexisting && !on_target {
+        if is_preexisting && !on_target_workspace {
             continue;
         }
 
@@ -173,14 +173,17 @@ pub fn verify_ownership(
             .any(|leaf| observed_identifier(node, &leaf.selector) == Some(leaf.selector.value()));
         let is_candidate = accepted.contains_key(&container_id)
             || matches_a_selector
-            || (on_target && is_window(node));
+            || (on_target_workspace && is_window(node));
         if !is_candidate {
             continue;
         }
 
         let owned_layout_id = match accepted.get(&container_id) {
             Some(layout_id)
-                if !is_preexisting && on_target && !placed.unsafe_state && is_window(node) =>
+                if !is_preexisting
+                    && on_target_workspace
+                    && !placed.unsafe_state
+                    && is_window(node) =>
             {
                 layout_id
             }
@@ -239,12 +242,12 @@ pub fn verify_ownership(
             require_process_command(node, leaf)?;
         }
 
-        found.insert(container_id, owned_layout_id.clone());
+        verified_windows.insert(container_id, owned_layout_id.clone());
     }
 
-    if &found != accepted {
+    if &verified_windows != accepted {
         return Err(Failure::Uncertain(format!(
-            "owned windows changed: expected {accepted:?}, observed {found:?}"
+            "owned windows changed: expected {accepted:?}, observed {verified_windows:?}"
         )));
     }
     Ok(())

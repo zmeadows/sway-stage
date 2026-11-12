@@ -37,25 +37,25 @@ pub fn verify_capture(
     scenario: &Scenario,
     measurements: &LayoutMeasurements,
 ) -> Result<String, String> {
-    let actual_lines = capture_lines(draft);
-    let expected = expected_draft(scenario, &measurements.shares)?;
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    if actual_lines.len() != expected_lines.len() {
+    let observed_lines = capture_lines(draft);
+    let expected_draft_yaml = expected_draft(scenario, &measurements.shares)?;
+    let expected_lines: Vec<&str> = expected_draft_yaml.lines().collect();
+    if observed_lines.len() != expected_lines.len() {
         return Err("capture draft has unexpected fields/structure".into());
     }
 
     let mut placeholder_count = 0;
     let mut filled_lines = Vec::new();
-    for (actual_line, expected_line) in actual_lines.into_iter().zip(expected_lines) {
-        let actual_field = actual_line.trim_start_matches([' ', '-']);
+    for (observed_line, expected_line) in observed_lines.into_iter().zip(expected_lines) {
+        let observed_field = observed_line.trim_start_matches([' ', '-']);
         let expected_field = expected_line.trim_start_matches([' ', '-']);
-        let actual_arrangement = &actual_line[..actual_line.len() - actual_field.len()];
+        let observed_arrangement = &observed_line[..observed_line.len() - observed_field.len()];
         let expected_arrangement = &expected_line[..expected_line.len() - expected_field.len()];
-        if actual_arrangement != expected_arrangement {
+        if observed_arrangement != expected_arrangement {
             return Err("capture indentation/arrangement".into());
         }
 
-        let Some((key, actual_scalar)) = actual_field.split_once(':') else {
+        let Some((key, observed_scalar)) = observed_field.split_once(':') else {
             return Err("capture field".into());
         };
         let (expected_key, expected_scalar) = expected_field
@@ -64,11 +64,11 @@ pub fn verify_capture(
         if key != expected_key {
             return Err("capture field".into());
         }
-        let actual_scalar = actual_scalar.trim();
+        let observed_scalar = observed_scalar.trim();
         let expected_scalar = expected_scalar.trim();
 
         if key == "weight" {
-            let weight: f64 = actual_scalar
+            let weight: f64 = observed_scalar
                 .parse()
                 .map_err(|_| "capture weight is not numeric".to_owned())?;
             let expected_weight: f64 = expected_scalar
@@ -78,21 +78,21 @@ pub fn verify_capture(
                 return Err("capture sizing".into());
             }
         } else {
-            let actual_value = if IDENTIFIER_KEYS.contains(&key) {
-                strip_quotes(actual_scalar)
+            let observed_value = if IDENTIFIER_KEYS.contains(&key) {
+                strip_quotes(observed_scalar)
             } else {
-                actual_scalar
+                observed_scalar
             };
-            if actual_value != expected_scalar {
+            if observed_value != expected_scalar {
                 return Err("capture value".into());
             }
         }
 
         if key == "command" {
             placeholder_count += 1;
-            filled_lines.push(actual_line.replace("command: null", r#"command: ["true"]"#));
+            filled_lines.push(observed_line.replace("command: null", r#"command: ["true"]"#));
         } else {
-            filled_lines.push(actual_line.to_owned());
+            filled_lines.push(observed_line.to_owned());
         }
     }
 
@@ -239,9 +239,9 @@ pub fn verify_inferred_capture(
 /// A dynamic package fixture has exactly one root window. Decode its arbitrary observed
 /// selector as YAML rather than assuming the simple identifiers of our Foot fixtures.
 pub fn verify_package_default_capture(draft: &str, selector: &Selector) -> Result<(), String> {
-    let actual: serde_json::Value = serde_saphyr::from_str(draft)
+    let observed_draft: serde_json::Value = serde_saphyr::from_str(draft)
         .map_err(|_| "package capture is not a valid YAML document")?;
-    let expected = serde_json::json!({
+    let expected_draft_value = serde_json::json!({
         "version": 1,
         "focus": "window1",
         "layout": {
@@ -249,7 +249,7 @@ pub fn verify_package_default_capture(draft: &str, selector: &Selector) -> Resul
             "match": { (selector.kind()): selector.value() }
         }
     });
-    if actual != expected {
+    if observed_draft != expected_draft_value {
         return Err(
             "ordinary package capture differs from the independently observed window".into(),
         );

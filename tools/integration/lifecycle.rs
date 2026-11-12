@@ -1177,7 +1177,7 @@ fn parse_flatpak_id(application: &str) -> Result<String, String> {
 fn verify_package_state(
     observed: &Snapshot,
     foreign: &ForeignWindows,
-    target_id: i64,
+    target_workspace_id: i64,
     progress: &ScenarioProgress,
     baseline: &Snapshot,
     launch: &Launch,
@@ -1186,7 +1186,7 @@ fn verify_package_state(
     foreign.verify(observed)?;
     verify_unchanged(
         observed,
-        target_id,
+        target_workspace_id,
         progress,
         &signature(baseline.focused_workspace()),
     )?;
@@ -1458,14 +1458,14 @@ fn restoration_refusal(
 
 fn verify_unchanged(
     observed: &Snapshot,
-    target_id: i64,
+    target_workspace_id: i64,
     progress: &ScenarioProgress,
     baseline: &Signature,
 ) -> Result<(), Failure> {
     require_quiet(&observed.window_events, None)?;
     verify_ownership(
         &observed.tree,
-        target_id,
+        target_workspace_id,
         &progress.scenario.layout,
         progress
             .preexisting_ids
@@ -1517,7 +1517,7 @@ fn prepare_close(
     context: &CleanupContext,
     remaining: &AcceptedWindows,
     baseline: &Signature,
-    closing_id: i64,
+    closing_window_id: i64,
     trusted: bool,
 ) -> Result<ClosePlan, Failure> {
     let workspace = observed.focused_workspace();
@@ -1540,6 +1540,7 @@ fn prepare_close(
             "dynamic package cleanup requires independent package provenance".into(),
         ));
     }
+
     context.foreign.verify(observed)?;
     require_quiet(&observed.window_events, None)?;
     verify_ownership(
@@ -1554,10 +1555,11 @@ fn prepare_close(
         baseline,
         "workspace changed before cleanup; ownership/state uncertain",
     )?;
+
     if let Some(package) = &context.package {
         let window = walk(&observed.tree)
             .into_iter()
-            .find(|placed| placed.node.id == closing_id)
+            .find(|placed| placed.node.id == closing_window_id)
             .ok_or_else(|| Failure::Uncertain("package cleanup window disappeared".into()))?
             .node;
         package
@@ -1565,14 +1567,16 @@ fn prepare_close(
             .verify(package.launch, window)
             .map_err(Failure::Uncertain)?;
     }
-    if !remaining.contains_key(&closing_id) || closing_id <= 0 {
+
+    if !remaining.contains_key(&closing_window_id) || closing_window_id <= 0 {
         return Err(Failure::Uncertain(
             "close requires an individually verified owned window".into(),
         ));
     }
-    let hierarchy = remove_from_shape(shape(workspace)?, closing_id);
+
+    let hierarchy = remove_from_shape(shape(workspace)?, closing_window_id);
     let mut expected_remaining = remaining.clone();
-    expected_remaining.remove(&closing_id);
+    expected_remaining.remove(&closing_window_id);
     Ok(ClosePlan {
         remaining: expected_remaining,
         hierarchy,
@@ -1604,7 +1608,7 @@ fn cleanup(
     // Accepted windows are sorted by container ID, which need not follow launch order.
     // Derive close order from configured leaves so windows always close in launch order.
     for leaf in context.layout.leaves() {
-        let closing_id = accepted
+        let closing_window_id = accepted
             .iter()
             .find(|(_, layout_id)| **layout_id == leaf.layout_id)
             .map(|(&id, _)| id)
@@ -1617,26 +1621,31 @@ fn cleanup(
             context,
             &remaining,
             &baseline,
-            closing_id,
+            closing_window_id,
             events.focus_history_trusted(),
         )?;
 
         // The sole destructive desktop command. IPC cannot make the guard/command atomic.
         interruption_check()?;
-        sway.close_owned_window(closing_id)?;
+        sway.close_owned_window(closing_window_id)?;
         let deadline = Instant::now() + IPC_TIMEOUT;
         let after = loop {
             interruption_check()?;
             let observed = snapshot(sway, events, None)?;
             require_package_workspace_history(context, events.workspace_revision())?;
             if verify_close_observation(
-                &observed, context, &remaining, &plan, &baseline, closing_id,
+                &observed,
+                context,
+                &remaining,
+                &plan,
+                &baseline,
+                closing_window_id,
             )? {
                 break observed;
             }
             if Instant::now() >= deadline {
                 return Err(Failure::Check(format!(
-                    "cleanup timeout: container {closing_id} did not disappear"
+                    "cleanup timeout: container {closing_window_id} did not disappear"
                 )));
             }
             thread::sleep(CLOSE_POLL_INTERVAL);
@@ -1657,17 +1666,17 @@ fn verify_close_observation(
     remaining: &AcceptedWindows,
     plan: &ClosePlan,
     baseline: &Signature,
-    closing_id: i64,
+    closing_window_id: i64,
 ) -> Result<bool, Failure> {
     context.foreign.verify(observed)?;
     let expected_close = ExpectedClose {
-        closing_id,
+        closing_window_id,
         remaining: &plan.remaining,
     };
     require_quiet(&observed.window_events, Some(&expected_close))?;
     let disappeared = !walk(&observed.tree)
         .iter()
-        .any(|placed| placed.node.id == closing_id);
+        .any(|placed| placed.node.id == closing_window_id);
     let expected_owned = if disappeared {
         &plan.remaining
     } else {
@@ -1686,7 +1695,7 @@ fn verify_close_observation(
         if let Some(package) = &context.package {
             let window = walk(&observed.tree)
                 .into_iter()
-                .find(|placed| placed.node.id == closing_id)
+                .find(|placed| placed.node.id == closing_window_id)
                 .expect("disappearance checked above")
                 .node;
             package

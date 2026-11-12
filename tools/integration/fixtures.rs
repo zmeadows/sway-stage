@@ -46,7 +46,7 @@ pub fn selector_value(scenario: &Scenario, layout_id: &str) -> String {
     leaf.selector.value().to_owned()
 }
 
-pub fn accepted(windows: &[(i64, &str)]) -> AcceptedWindows {
+pub fn accepted_windows(windows: &[(i64, &str)]) -> AcceptedWindows {
     windows
         .iter()
         .map(|&(container_id, layout_id)| (container_id, layout_id.to_owned()))
@@ -59,7 +59,7 @@ pub fn rect(x: i32, y: i32, width: i32, height: i32) -> Value {
 
 /// A structural container with every field Sway serializes for one.
 pub fn container(
-    id: i64,
+    container_id: i64,
     node_type: &str,
     layout: &str,
     rect: Value,
@@ -67,7 +67,7 @@ pub fn container(
 ) -> Value {
     let empty = json!({"x": 0, "y": 0, "width": 0, "height": 0});
     json!({
-        "id": id, "type": node_type, "name": null, "layout": layout,
+        "id": container_id, "type": node_type, "name": null, "layout": layout,
         "orientation": if layout == "splitv" { "vertical" } else { "horizontal" },
         "percent": null, "urgent": false, "marks": [], "focused": false, "focus": [],
         "border": "none", "current_border_width": 0, "sticky": false,
@@ -78,20 +78,20 @@ pub fn container(
     })
 }
 
-pub fn group(id: i64, layout: &str, rect: Value, children: Vec<Value>) -> Value {
-    container(id, "con", layout, rect, children)
+pub fn group(container_id: i64, layout: &str, rect: Value, children: Vec<Value>) -> Value {
+    container(container_id, "con", layout, rect, children)
 }
 
 /// Fixture PIDs exceed Linux's maximum PID, 2^22, so they never name a real process.
 pub const UNUSED_PID_BASE: i64 = 5_000_000;
 
 /// A tiled native Wayland view.
-pub fn wayland_window(id: i64, app_id: &str, rect: Value) -> Value {
-    let mut window = container(id, "con", "none", rect, Vec::new());
+pub fn wayland_window(container_id: i64, app_id: &str, rect: Value) -> Value {
+    let mut window = container(container_id, "con", "none", rect, Vec::new());
     window["name"] = json!("a title, which is never ownership evidence");
     window["app_id"] = json!(app_id);
     window["shell"] = json!("xdg_shell");
-    window["pid"] = json!(UNUSED_PID_BASE + id);
+    window["pid"] = json!(UNUSED_PID_BASE + container_id);
     window["visible"] = json!(true);
     window["inhibit_idle"] = json!(false);
     window["idle_inhibitors"] = json!({"user": "none", "application": "none"});
@@ -102,19 +102,25 @@ pub fn wayland_window(id: i64, app_id: &str, rect: Value) -> Value {
 }
 
 /// A tiled Xwayland view: no app ID, an X11 window, and a `WM_CLASS` class.
-pub fn xwayland_window(id: i64, class: &str, rect: Value) -> Value {
-    let mut window = wayland_window(id, "", rect);
+pub fn xwayland_window(container_id: i64, class: &str, rect: Value) -> Value {
+    let mut window = wayland_window(container_id, "", rect);
     window["app_id"] = Value::Null;
     window["shell"] = json!("xwayland");
-    window["window"] = json!(8_000_000 + id);
+    window["window"] = json!(8_000_000 + container_id);
     window["window_properties"] = json!({
         "class": class, "instance": "xterm", "title": "xterm", "transient_for": null
     });
     window
 }
 
-fn workspace(id: i64, name: &str, layout: &str, children: Vec<Value>) -> Value {
-    let mut workspace = container(id, "workspace", layout, rect(0, 0, 1920, 1080), children);
+fn workspace(workspace_id: i64, name: &str, layout: &str, children: Vec<Value>) -> Value {
+    let mut workspace = container(
+        workspace_id,
+        "workspace",
+        layout,
+        rect(0, 0, 1920, 1080),
+        children,
+    );
     workspace["name"] = json!(name);
     workspace["num"] = json!(name.parse::<i32>().unwrap_or(-1));
     workspace["output"] = json!("DP-1");
@@ -124,8 +130,12 @@ fn workspace(id: i64, name: &str, layout: &str, children: Vec<Value>) -> Value {
 
 /// A desktop of one 1920x1080 output with workspace "1", holding a preexisting Firefox
 /// window, and target workspace "9" with `target_layout` and `target_children`; plus
-/// Sway's hidden scratchpad output. Only the container `focused_id` is focused.
-pub fn desktop(target_layout: &str, target_children: Vec<Value>, focused_id: i64) -> Value {
+/// Sway's hidden scratchpad output. Only the container `focused_container_id` is focused.
+pub fn desktop(
+    target_layout: &str,
+    target_children: Vec<Value>,
+    focused_container_id: i64,
+) -> Value {
     let mut scratchpad = workspace(
         SCRATCHPAD_WORKSPACE_ID,
         "__i3_scratch",
@@ -162,23 +172,23 @@ pub fn desktop(target_layout: &str, target_children: Vec<Value>, focused_id: i64
         vec![scratchpad_output, output],
     );
     root["name"] = json!("root");
-    set_focus(&mut root, focused_id);
+    set_focus(&mut root, focused_container_id);
     root
 }
 
-/// Marks only the container `focused_id` as focused.
-pub fn set_focus(node: &mut Value, focused_id: i64) {
-    node["focused"] = json!(node["id"] == focused_id);
+/// Marks only the container `focused_container_id` as focused.
+pub fn set_focus(node: &mut Value, focused_container_id: i64) {
+    node["focused"] = json!(node["id"] == focused_container_id);
     for children in ["nodes", "floating_nodes"] {
         for child in node[children].as_array_mut().expect("a child list") {
-            set_focus(child, focused_id);
+            set_focus(child, focused_container_id);
         }
     }
 }
 
 /// The node with `id` anywhere in a JSON tree, for modifying a desktop fixture.
-pub fn node_mut(node: &mut Value, id: i64) -> &mut Value {
-    try_node_mut(node, id).expect("a container ID in the fixture")
+pub fn node_mut(node: &mut Value, container_id: i64) -> &mut Value {
+    try_node_mut(node, container_id).expect("a container ID in the fixture")
 }
 
 fn try_node_mut(node: &mut Value, id: i64) -> Option<&mut Value> {

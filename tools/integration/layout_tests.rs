@@ -1,7 +1,7 @@
 use super::*;
 use crate::fixtures::{
-    TARGET_WORKSPACE_ID, accepted, assert_contains, check_message, desktop, find, group, node_mut,
-    parse_tree, rect, selector_value, set_focus, standard_scenario, uncertain_message,
+    TARGET_WORKSPACE_ID, accepted_windows, assert_contains, check_message, desktop, find, group,
+    node_mut, parse_tree, rect, selector_value, set_focus, standard_scenario, uncertain_message,
     wayland_window, xwayland_window,
 };
 use serde_json::{Value, json};
@@ -44,7 +44,7 @@ fn deep_nesting_desktop(scenario: &Scenario) -> Value {
 }
 
 fn deep_nesting_accepted() -> AcceptedWindows {
-    accepted(&[
+    accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
@@ -54,39 +54,43 @@ fn deep_nesting_accepted() -> AcceptedWindows {
 }
 
 /// horizontal-pair (3:2) on a workspace 1000 pixels wide, so widths are tenths of percent.
-fn horizontal_pair_desktop(scenario: &Scenario, widths: (i32, i32), focused_id: i64) -> Value {
-    let (first_width, second_width) = widths;
+fn horizontal_pair_desktop(
+    scenario: &Scenario,
+    widths: (i32, i32),
+    focused_container_id: i64,
+) -> Value {
+    let (first_width_pixels, second_width_pixels) = widths;
     desktop(
         "splith",
         vec![
             wayland_window(
                 20,
                 &selector_value(scenario, "window1"),
-                rect(0, 0, first_width, 1080),
+                rect(0, 0, first_width_pixels, 1080),
             ),
             wayland_window(
                 21,
                 &selector_value(scenario, "window2"),
-                rect(first_width, 0, second_width, 1080),
+                rect(first_width_pixels, 0, second_width_pixels, 1080),
             ),
         ],
-        focused_id,
+        focused_container_id,
     )
 }
 
-fn verify(
+fn verify_recorded_layout(
     tree: Value,
     scenario: &Scenario,
-    accepted: &AcceptedWindows,
+    accepted_windows: &AcceptedWindows,
 ) -> Result<LayoutMeasurements, Failure> {
     let tree = parse_tree(tree);
-    verify_layout(find(&tree, TARGET_WORKSPACE_ID), scenario, accepted)
+    verify_layout(find(&tree, TARGET_WORKSPACE_ID), scenario, accepted_windows)
 }
 
 #[test]
 fn nested_hierarchy_through_a_wrapper_verifies_with_measured_shares() {
     let scenario = standard_scenario("deep-nesting");
-    let measurements = verify(
+    let measurements = verify_recorded_layout(
         deep_nesting_desktop(&scenario),
         &scenario,
         &deep_nesting_accepted(),
@@ -98,7 +102,7 @@ fn nested_hierarchy_through_a_wrapper_verifies_with_measured_shares() {
         "{:?}",
         measurements.sizing_notes
     );
-    let paths: Vec<&Vec<usize>> = measurements.shares.keys().collect();
+    let observed_paths: Vec<&Vec<usize>> = measurements.shares.keys().collect();
     let expected_paths: [&[usize]; 8] = [
         &[0],
         &[0, 0],
@@ -109,13 +113,13 @@ fn nested_hierarchy_through_a_wrapper_verifies_with_measured_shares() {
         &[0, 1, 1, 1],
         &[1],
     ];
-    assert_eq!(paths, expected_paths);
-    let share = |path: &[usize]| measurements.shares[path];
-    assert_eq!(share(&[0]), 60.0);
-    assert_eq!(share(&[1]), 40.0);
-    assert_eq!(share(&[0, 0]), 40.0);
-    assert!((share(&[0, 1, 0]) - 100.0 * 461.0 / 1152.0).abs() < 1e-9);
-    assert!((share(&[0, 1, 1, 0]) - 100.0 * 389.0 / 648.0).abs() < 1e-9);
+    assert_eq!(observed_paths, expected_paths);
+    let measured_share = |path: &[usize]| measurements.shares[path];
+    assert_eq!(measured_share(&[0]), 60.0);
+    assert_eq!(measured_share(&[1]), 40.0);
+    assert_eq!(measured_share(&[0, 0]), 40.0);
+    assert!((measured_share(&[0, 1, 0]) - 100.0 * 461.0 / 1152.0).abs() < 1e-9);
+    assert!((measured_share(&[0, 1, 1, 0]) - 100.0 * 389.0 / 648.0).abs() < 1e-9);
 }
 
 #[test]
@@ -130,7 +134,12 @@ fn flattened_or_reoriented_groups_are_hierarchy_mismatches() {
     let mut outer_children = vec![outer_row["nodes"][0].take()];
     outer_children.extend(inner_children);
     outer_row["nodes"] = json!(outer_children);
-    let message = uncertain_message(verify(flattened, &scenario, &deep_nesting_accepted()));
+    let message = uncertain_message(verify_recorded_layout(
+        flattened,
+        &scenario,
+        &deep_nesting_accepted(),
+    ));
+
     assert_contains(
         &message,
         "layout.children[0]: expected splith with 2 children",
@@ -140,7 +149,11 @@ fn flattened_or_reoriented_groups_are_hierarchy_mismatches() {
 
     let mut reoriented = deep_nesting_desktop(&scenario);
     node_mut(&mut reoriented, 33)["layout"] = json!("splith");
-    let message = uncertain_message(verify(reoriented, &scenario, &deep_nesting_accepted()));
+    let message = uncertain_message(verify_recorded_layout(
+        reoriented,
+        &scenario,
+        &deep_nesting_accepted(),
+    ));
     assert_contains(
         &message,
         "layout.children[0].children[1].children[1]: expected splitv",
@@ -150,14 +163,15 @@ fn flattened_or_reoriented_groups_are_hierarchy_mismatches() {
 #[test]
 fn identities_order_and_focus_must_match_exactly() {
     let scenario = standard_scenario("horizontal-pair");
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
 
-    let swapped = accepted(&[(20, "window2"), (21, "window1")]);
-    let message = uncertain_message(verify(
+    let swapped = accepted_windows(&[(20, "window2"), (21, "window1")]);
+    let message = uncertain_message(verify_recorded_layout(
         horizontal_pair_desktop(&scenario, (600, 400), 21),
         &scenario,
         &swapped,
     ));
+
     assert_contains(&message, "window order differs");
 
     let mut extra = horizontal_pair_desktop(&scenario, (600, 400), 21);
@@ -171,41 +185,41 @@ fn identities_order_and_focus_must_match_exactly() {
             wayland_window(99, "unrelated", rect(600, 540, 400, 540)),
         ],
     );
-    let message = uncertain_message(verify(extra, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_layout(extra, &scenario, &owned_windows));
     assert_contains(&message, "unexpected windows");
 
-    let missing = accepted(&[(20, "window1"), (21, "window2"), (22, "window3")]);
-    let message = uncertain_message(verify(
+    let missing = accepted_windows(&[(20, "window1"), (21, "window2"), (22, "window3")]);
+    let message = uncertain_message(verify_recorded_layout(
         horizontal_pair_desktop(&scenario, (600, 400), 21),
         &scenario,
         &missing,
     ));
     assert_contains(&message, "unexpected windows");
 
-    for focused_id in [20, TARGET_WORKSPACE_ID] {
-        let message = uncertain_message(verify(
-            horizontal_pair_desktop(&scenario, (600, 400), focused_id),
+    for focused_container_id in [20, TARGET_WORKSPACE_ID] {
+        let message = uncertain_message(verify_recorded_layout(
+            horizontal_pair_desktop(&scenario, (600, 400), focused_container_id),
             &scenario,
-            &owned,
+            &owned_windows,
         ));
         assert_contains(&message, "final focus differs: expected window2 id=21");
     }
 
     let mut vertical = horizontal_pair_desktop(&scenario, (600, 400), 21);
     node_mut(&mut vertical, TARGET_WORKSPACE_ID)["layout"] = json!("splitv");
-    let message = uncertain_message(verify(vertical, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_layout(vertical, &scenario, &owned_windows));
     assert_contains(&message, "layout: expected splith with 2 children");
 }
 
 #[test]
 fn sizing_is_noted_above_one_point_and_fails_above_five() {
     let scenario = standard_scenario("horizontal-pair");
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
     let measure = |widths| {
-        verify(
+        verify_recorded_layout(
             horizontal_pair_desktop(&scenario, widths, 21),
             &scenario,
-            &owned,
+            &owned_windows,
         )
     };
 
@@ -228,6 +242,7 @@ fn sizing_is_noted_above_one_point_and_fails_above_five() {
     }
 
     let message = check_message(measure((651, 349)));
+
     assert_contains(
         &message,
         "sizing exceeds 5 percentage points (check application minimum sizes): \
@@ -239,25 +254,30 @@ fn sizing_is_noted_above_one_point_and_fails_above_five() {
 #[test]
 fn unusable_geometry_fails_ordinarily_but_overlap_is_uncertain() {
     let scenario = standard_scenario("horizontal-pair");
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
 
-    let message = check_message(verify(
+    let message = check_message(verify_recorded_layout(
         horizontal_pair_desktop(&scenario, (1000, 0), 21),
         &scenario,
-        &owned,
+        &owned_windows,
     ));
+
     assert_contains(&message, "layout: unusable rectangles");
 
     let mut overlapping = horizontal_pair_desktop(&scenario, (600, 400), 21);
     node_mut(&mut overlapping, 21)["rect"]["x"] = json!(599);
-    let message = uncertain_message(verify(overlapping, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_layout(
+        overlapping,
+        &scenario,
+        &owned_windows,
+    ));
     assert_contains(&message, "layout: visual order/overlap differs");
 
     // Gaps between siblings are expected and excluded from shares.
     let mut gapped = horizontal_pair_desktop(&scenario, (600, 400), 21);
     node_mut(&mut gapped, 21)["rect"]["x"] = json!(620);
     assert!(
-        verify(gapped, &scenario, &owned)
+        verify_recorded_layout(gapped, &scenario, &owned_windows)
             .unwrap()
             .sizing_notes
             .is_empty()
@@ -271,11 +291,12 @@ fn failure_context_omits_launch_arguments_and_environment() {
     leaf.command.push("sensitive-launch-argument".into());
     leaf.env
         .push(("PRIVATE_VALUE".into(), "sensitive-environment-value".into()));
-    let message = check_message(verify(
+    let message = check_message(verify_recorded_layout(
         horizontal_pair_desktop(&scenario, (700, 300), 21),
         &scenario,
-        &accepted(&[(20, "window1"), (21, "window2")]),
+        &accepted_windows(&[(20, "window1"), (21, "window2")]),
     ));
+
     assert_contains(&message, "Expected layout:");
     assert!(!message.contains("sensitive-") && !message.contains("PRIVATE_VALUE"));
 }
@@ -283,7 +304,7 @@ fn failure_context_omits_launch_arguments_and_environment() {
 #[test]
 fn floating_fullscreen_scratchpad_and_unsupported_containers_are_uncertain() {
     let scenario = standard_scenario("horizontal-pair");
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
     let state_message = "floating/fullscreen/scratchpad state";
 
     let mut cases: Vec<(Value, &str)> = Vec::new();
@@ -330,7 +351,7 @@ fn floating_fullscreen_scratchpad_and_unsupported_containers_are_uncertain() {
 
     for (tree, expected) in cases {
         assert_contains(
-            &uncertain_message(verify(tree, &scenario, &owned)),
+            &uncertain_message(verify_recorded_layout(tree, &scenario, &owned_windows)),
             expected,
         );
     }
@@ -384,6 +405,7 @@ fn shape_keeps_identities_and_removal_collapses_like_sway() {
         layout: Layout::SplitH,
         children: vec![window(20, Some("first"), None), column],
     };
+
     assert_eq!(observed, expected);
 
     let without_second = remove_from_shape(observed, 21).unwrap();
@@ -406,6 +428,7 @@ fn shape_keeps_identities_and_removal_collapses_like_sway() {
 fn an_empty_workspace_has_an_empty_shape() {
     let tree = parse_tree(desktop("splith", Vec::new(), TARGET_WORKSPACE_ID));
     let observed = shape(find(&tree, TARGET_WORKSPACE_ID)).unwrap();
+
     assert_eq!(
         observed,
         Shape::Group {
@@ -430,6 +453,7 @@ fn signature_ignores_titles_and_marks_but_not_geometry_or_focus() {
     node_mut(&mut cosmetic, 20)["name"] = json!("a new title");
     node_mut(&mut cosmetic, 20)["marks"] = json!(["mark"]);
     node_mut(&mut cosmetic, 20)["urgent"] = json!(true);
+
     assert_eq!(signature_of(cosmetic), baseline);
 
     let mut resized = original.clone();
@@ -464,6 +488,7 @@ fn outline_names_identities_and_layouts_without_titles() {
         20,
     ));
     let outline = outline(find(&tree, TARGET_WORKSPACE_ID));
+
     assert_eq!(outline, "7:splith(20:app, 30:splitv(21:Class, 22:none))");
     assert!(!outline.contains("title"));
 }
@@ -492,13 +517,14 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
         ],
     );
     let tree = desktop("splith", vec![left, right], 22);
-    let owned = accepted(&[
+    let owned_windows = accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
         (23, "window4"),
     ]);
-    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    let measurements = verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
+
     assert_eq!(
         measurements.shares,
         BTreeMap::from([
@@ -517,10 +543,17 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
         .as_array_mut()
         .unwrap()
         .swap(0, 1);
-    assert!(verify(swapped, &scenario, &owned).is_err());
+    assert!(verify_recorded_layout(swapped, &scenario, &owned_windows).is_err());
     let mut wrong_size = tree;
     node_mut(&mut wrong_size, 22)["rect"]["height"] = json!(400);
-    assert!(check_message(verify(wrong_size, &scenario, &owned)).contains("sizing exceeds"));
+    assert!(
+        check_message(verify_recorded_layout(
+            wrong_size,
+            &scenario,
+            &owned_windows
+        ))
+        .contains("sizing exceeds")
+    );
 
     let scenario = standard_scenario("default-focus");
     let column = group(
@@ -552,13 +585,16 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
         ],
         20,
     );
-    let owned = accepted(&[(20, "window1"), (21, "window2"), (22, "window3")]);
-    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2"), (22, "window3")]);
+    let measurements = verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
     let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
     assert!(draft.contains("focus: window1"));
     crate::capture::verify_capture(&draft, &scenario, &measurements).unwrap();
     set_focus(&mut tree, 22);
-    assert!(uncertain_message(verify(tree, &scenario, &owned)).contains("final focus differs"));
+    assert!(
+        uncertain_message(verify_recorded_layout(tree, &scenario, &owned_windows))
+            .contains("final focus differs")
+    );
 }
 
 #[test]
@@ -570,22 +606,23 @@ fn replay_geometry_is_judged_against_captured_weights_instead_of_original_weight
     };
     let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
     let (_, replay) = crate::capture::executable_capture(&draft, &scenario, &measurements).unwrap();
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
     let tree = horizontal_pair_desktop(&scenario, (700, 300), 21);
-    assert!(verify(tree.clone(), &scenario, &owned).is_err());
-    verify(tree, &replay, &owned).unwrap();
+
+    assert!(verify_recorded_layout(tree.clone(), &scenario, &owned_windows).is_err());
+    verify_recorded_layout(tree, &replay, &owned_windows).unwrap();
     // Small differences from captured geometry retain the ordinary five-point tolerance.
-    verify(
+    verify_recorded_layout(
         horizontal_pair_desktop(&scenario, (710, 290), 21),
         &replay,
-        &owned,
+        &owned_windows,
     )
     .unwrap();
     assert!(
-        verify(
+        verify_recorded_layout(
             horizontal_pair_desktop(&scenario, (760, 240), 21),
             &replay,
-            &owned
+            &owned_windows
         )
         .is_err()
     );
@@ -593,7 +630,7 @@ fn replay_geometry_is_judged_against_captured_weights_instead_of_original_weight
 
 #[test]
 fn root_header_groups_check_selection_without_split_geometry() {
-    for (name, layout, focused_id, history) in [
+    for (name, layout, focused_container_id, history) in [
         ("root-tabbed", "tabbed", 20, json!([20, 22, 21])),
         ("root-stacked", "stacked", 21, json!([21, 22, 20])),
     ] {
@@ -607,11 +644,11 @@ fn root_header_groups_check_selection_without_split_geometry() {
                 )
             })
             .collect();
-        let mut tree = desktop(layout, windows, focused_id);
+        let mut tree = desktop(layout, windows, focused_container_id);
         node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = history;
-        let owned = accepted(&[(20, "window1"), (21, "window2"), (22, "window3")]);
+        let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2"), (22, "window3")]);
         assert!(
-            verify(tree.clone(), &scenario, &owned)
+            verify_recorded_layout(tree.clone(), &scenario, &owned_windows)
                 .unwrap()
                 .shares
                 .is_empty()
@@ -620,13 +657,13 @@ fn root_header_groups_check_selection_without_split_geometry() {
             let mut changed = tree.clone();
             node_mut(&mut changed, TARGET_WORKSPACE_ID)["focus"] = invalid;
             assert_contains(
-                &uncertain_message(verify(changed, &scenario, &owned)),
+                &uncertain_message(verify_recorded_layout(changed, &scenario, &owned_windows)),
                 "selected child differs",
             );
         }
         node_mut(&mut tree, TARGET_WORKSPACE_ID)["layout"] = json!("splith");
         assert_contains(
-            &uncertain_message(verify(tree, &scenario, &owned)),
+            &uncertain_message(verify_recorded_layout(tree, &scenario, &owned_windows)),
             "expected",
         );
     }
@@ -636,13 +673,14 @@ fn root_header_groups_check_selection_without_split_geometry() {
 fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
     let scenario = standard_scenario("mixed-capture-reload");
     let tree = crate::fixtures::mixed_native_desktop(&scenario);
-    let owned = accepted(&[
+    let owned_windows = accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
         (23, "window4"),
     ]);
-    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    let measurements = verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
+
     assert_eq!(
         measurements.shares,
         BTreeMap::from([
@@ -658,14 +696,14 @@ fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
     let leaf = node_mut(&mut collapsed, 32)["nodes"][0].take();
     node_mut(&mut collapsed, 31)["nodes"][0] = leaf;
     assert_contains(
-        &uncertain_message(verify(collapsed, &scenario, &owned)),
+        &uncertain_message(verify_recorded_layout(collapsed, &scenario, &owned_windows)),
         "expected stacked with 1 children",
     );
 
     for (id, layout) in [(31, "stacked"), (32, "tabbed"), (33, "splitv")] {
         let mut changed = tree.clone();
         node_mut(&mut changed, id)["layout"] = json!(layout);
-        assert!(verify(changed, &scenario, &owned).is_err());
+        assert!(verify_recorded_layout(changed, &scenario, &owned_windows).is_err());
     }
     let mut reordered = tree.clone();
     node_mut(&mut reordered, 31)["nodes"]
@@ -673,7 +711,7 @@ fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
         .unwrap()
         .swap(0, 1);
     assert_contains(
-        &uncertain_message(verify(reordered, &scenario, &owned)),
+        &uncertain_message(verify_recorded_layout(reordered, &scenario, &owned_windows)),
         "window order differs",
     );
 
@@ -682,7 +720,11 @@ fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
     node_mut(&mut bad_nested_size, 22)["rect"]["x"] = json!(800);
     node_mut(&mut bad_nested_size, 22)["rect"]["width"] = json!(200);
     assert_contains(
-        &check_message(verify(bad_nested_size, &scenario, &owned)),
+        &check_message(verify_recorded_layout(
+            bad_nested_size,
+            &scenario,
+            &owned_windows,
+        )),
         "layout.children[0].children[1] splith",
     );
 }
@@ -726,7 +768,7 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
     );
     right["focus"] = json!([33, 25]);
     let tree = desktop("splith", vec![left, right], 22);
-    let owned = accepted(&[
+    let owned_windows = accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
@@ -734,7 +776,7 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
         (24, "window5"),
         (25, "window6"),
     ]);
-    verify(tree.clone(), &scenario, &owned).unwrap();
+    verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
     for (id, bad_history) in [
         (30, json!([20, 31])),
         (31, json!([21, 22])),
@@ -744,7 +786,7 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
         let mut changed = tree.clone();
         node_mut(&mut changed, id)["focus"] = bad_history;
         assert_contains(
-            &uncertain_message(verify(changed, &scenario, &owned)),
+            &uncertain_message(verify_recorded_layout(changed, &scenario, &owned_windows)),
             "selected child differs",
         );
     }
@@ -756,10 +798,11 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
     node_mut(&mut elsewhere, 30)["focus"] = json!([20, 31]);
     node_mut(&mut elsewhere, 31)["focus"] = json!([21, 22]);
     node_mut(&mut elsewhere, 32)["focus"] = json!([25, 33]);
-    verify(elsewhere.clone(), &scenario, &owned).unwrap();
+    verify_recorded_layout(elsewhere.clone(), &scenario, &owned_windows).unwrap();
     node_mut(&mut elsewhere, 31)["focus"] = json!([22, 21]);
+
     assert_contains(
-        &uncertain_message(verify(elsewhere, &scenario, &owned)),
+        &uncertain_message(verify_recorded_layout(elsewhere, &scenario, &owned_windows)),
         "selected child differs",
     );
 }
@@ -772,6 +815,7 @@ fn signature_preserves_child_focus_history_across_capture() {
     let baseline = signature(find(&before, TARGET_WORKSPACE_ID));
     node_mut(&mut tree, 31)["focus"] = json!([32, 33]);
     let after = parse_tree(tree);
+
     assert_ne!(signature(find(&after, TARGET_WORKSPACE_ID)), baseline);
 }
 
@@ -789,6 +833,7 @@ fn cleanup_shape_retains_singleton_headers_and_reaps_only_empty_ancestors() {
         .unwrap()
         .remove(0);
     let after_first = remove_from_shape(shape_of(tree), 20).unwrap();
+
     assert_eq!(after_first, shape_of(expected.clone()));
     // Removing window2 leaves a redundant split, but the tabbed parent remains.
     node_mut(&mut expected, 33)["nodes"]

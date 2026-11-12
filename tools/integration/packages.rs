@@ -150,7 +150,7 @@ pub fn discover<'a>(
     tree: &'a TreeNode,
     events: &[WindowEvent],
     preexisting: &HashSet<i64>,
-    target_id: i64,
+    target_workspace_id: i64,
 ) -> Result<Option<&'a TreeNode>, String> {
     let new_ids: Vec<_> = events
         .iter()
@@ -180,7 +180,7 @@ pub fn discover<'a>(
         || candidates.iter().any(|placed| {
             placed
                 .workspace
-                .is_none_or(|workspace| workspace.id != target_id)
+                .is_none_or(|workspace| workspace.id != target_workspace_id)
                 || placed.unsafe_state
         })
     {

@@ -154,9 +154,9 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
 /// Predict view-unmap reaping: empty ancestors disappear; surviving tabbed/stacked
 /// groups retain their identity even with one child. Only redundant splits normalize away.
 /// See Sway view_unmap/container_reap_empty; this is not container_flatten.
-pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
+pub fn remove_from_shape(shape: Shape, closing_window_id: i64) -> Option<Shape> {
     match shape {
-        Shape::Window { container_id, .. } if container_id == closing_id => None,
+        Shape::Window { container_id, .. } if container_id == closing_window_id => None,
         Shape::Window { .. } => Some(shape),
         Shape::Group {
             container_id,
@@ -165,7 +165,7 @@ pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
         } => {
             let mut remaining_children: Vec<Shape> = children
                 .into_iter()
-                .filter_map(|child| remove_from_shape(child, closing_id))
+                .filter_map(|child| remove_from_shape(child, closing_window_id))
                 .collect();
             match remaining_children.len() {
                 0 => None,
@@ -296,20 +296,20 @@ pub fn verify_layout(
         )));
     }
 
-    let Some(&focus_id) = container_ids.get(scenario.expected_focus) else {
+    let Some(&expected_focus_window_id) = container_ids.get(scenario.expected_focus) else {
         return Err(Failure::Uncertain(format!(
             "no accepted window for focus {}",
             scenario.expected_focus
         )));
     };
-    let focused_ids: Vec<i64> = placed_nodes
+    let observed_focused_container_ids: Vec<i64> = placed_nodes
         .iter()
         .filter(|placed| placed.node.focused)
         .map(|placed| placed.node.id)
         .collect();
-    if focused_ids != [focus_id] {
+    if observed_focused_container_ids != [expected_focus_window_id] {
         return Err(Failure::Uncertain(format!(
-            "final focus differs: expected {} id={focus_id}, observed {}",
+            "final focus differs: expected {} id={expected_focus_window_id}, observed {}",
             scenario.expected_focus,
             outline(workspace)
         )));

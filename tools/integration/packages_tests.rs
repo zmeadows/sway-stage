@@ -46,6 +46,7 @@ fn appimage_normalization_resolves_aliases_and_rejects_nonimages() {
     bytes[..4].copy_from_slice(b"\x7fELF");
     bytes[8..11].copy_from_slice(b"AI\x02");
     fs::write(&image, &bytes).unwrap();
+
     assert!(normalize_appimage(&image).is_err());
     fs::set_permissions(&image, fs::Permissions::from_mode(0o700)).unwrap();
     symlink(&image, &alias).unwrap();
@@ -118,6 +119,7 @@ fn flatpak_cli_identity_is_a_complete_id_not_an_option_or_reference() {
 #[test]
 fn flatpak_cli_identity_enforces_the_total_length_boundary() {
     let longest_id = format!("a.b.{}", "c".repeat(251));
+
     assert_eq!(longest_id.len(), 255);
     validate_flatpak_id(&longest_id).unwrap();
     assert!(validate_flatpak_id(&format!("{longest_id}c")).is_err());
@@ -128,15 +130,16 @@ fn flatpak_cli_identity_enforces_the_total_length_boundary() {
     assert!(validate_flatpak_id(&format!("a{long_domain}")).is_err());
 }
 
-fn metadata() -> String {
+fn flatpak_metadata() -> String {
     "[Application]\nname=org.example.App\n[Instance]\ninstance-id=123\narch=aarch64\nbranch=beta\n"
         .into()
 }
 
 #[test]
 fn flatpak_expected_command_comes_from_the_running_instance_table() {
-    let fields = flatpak_fields(&metadata()).unwrap();
+    let fields = flatpak_fields(&flatpak_metadata()).unwrap();
     let rows = "999 org.other.App x86_64 stable 10 11\n123 org.example.App aarch64 beta 42 43\n";
+
     assert_eq!(
         verify_flatpak_instance("org.example.App", &fields, rows)
             .unwrap()
@@ -149,7 +152,7 @@ fn flatpak_expected_command_comes_from_the_running_instance_table() {
             "org.example.App"
         ]
     );
-    for bad in [
+    for invalid_reply in [
         "",
         "123 org.other.App aarch64 beta 42 43",
         "123 org.example.App x86_64 beta 42 43",
@@ -159,20 +162,20 @@ fn flatpak_expected_command_comes_from_the_running_instance_table() {
         "123 org.example.App aarch64 beta 42 43\n123 org.example.App aarch64 beta 42 43",
     ] {
         assert!(
-            verify_flatpak_instance("org.example.App", &fields, bad).is_err(),
-            "{bad}"
+            verify_flatpak_instance("org.example.App", &fields, invalid_reply).is_err(),
+            "{invalid_reply}"
         );
     }
 }
 
 #[test]
 fn missing_duplicate_and_contradictory_sandbox_metadata_fail() {
-    for bad in [
-        metadata().replace("arch=aarch64\n", ""),
-        metadata().replace("name=org.example.App", "name=org.other.App"),
-        metadata().replace("instance-id=123", "instance-id=456"),
+    for invalid_reply in [
+        flatpak_metadata().replace("arch=aarch64\n", ""),
+        flatpak_metadata().replace("name=org.example.App", "name=org.other.App"),
+        flatpak_metadata().replace("instance-id=123", "instance-id=456"),
     ] {
-        let fields = flatpak_fields(&bad).unwrap();
+        let fields = flatpak_fields(&invalid_reply).unwrap();
         assert!(
             verify_flatpak_instance(
                 "org.example.App",
@@ -182,13 +185,16 @@ fn missing_duplicate_and_contradictory_sandbox_metadata_fail() {
             .is_err()
         );
     }
-    for bad in [
-        format!("{}[Runtime]\nname=org.example.Runtime\n", metadata()),
-        format!("{}branch=stable\n", metadata()),
-        format!("{}[Instance]\n", metadata()),
+    for invalid_reply in [
+        format!(
+            "{}[Runtime]\nname=org.example.Runtime\n",
+            flatpak_metadata()
+        ),
+        format!("{}branch=stable\n", flatpak_metadata()),
+        format!("{}[Instance]\n", flatpak_metadata()),
         "name=org.example.App".into(),
     ] {
-        assert!(flatpak_fields(&bad).is_err());
+        assert!(flatpak_fields(&invalid_reply).is_err());
     }
 }
 
@@ -239,6 +245,7 @@ fn appimage_metadata_needs_mount_and_executable_evidence() {
                 .is_err()
         );
     }
+
     assert_eq!(
         decode_mount_path("/tmp/mount\\040with\\134slash").unwrap(),
         PathBuf::from("/tmp/mount with\\slash")
@@ -247,13 +254,13 @@ fn appimage_metadata_needs_mount_and_executable_evidence() {
         environment_field(b"APPIMAGE=/apps/AppImage\0", "APPIMAGE").unwrap(),
         "/apps/AppImage"
     );
-    for bad in [
+    for invalid_reply in [
         b"APPDIR=/tmp/mount\0".as_slice(),
         b"APPIMAGE=\0",
         b"APPIMAGE=a\0APPIMAGE=b\0",
         b"APPIMAGE=a",
     ] {
-        assert!(environment_field(bad, "APPIMAGE").is_err());
+        assert!(environment_field(invalid_reply, "APPIMAGE").is_err());
     }
 }
 
@@ -331,6 +338,7 @@ fn discovery_needs_one_fresh_creation_and_discovers_the_real_identity() {
     let window = discover(&tree, &[event], &preexisting, TARGET_WORKSPACE_ID)
         .unwrap()
         .unwrap();
+
     assert_eq!(
         selector(window).unwrap(),
         Selector::AppId("real.application".into())
@@ -381,6 +389,7 @@ fn discovery_rejects_extra_unrelated_preexisting_or_foreign_windows() {
         ],
         20,
     );
+
     assert!(
         discover(
             &parse_tree(extra.clone()),
@@ -425,6 +434,7 @@ fn discovery_waits_for_metadata_but_does_not_accept_an_unknown_selector() {
         20,
     );
     node_mut(&mut tree, 20)["app_id"] = serde_json::Value::Null;
+
     assert!(
         discover(
             &parse_tree(tree),
@@ -446,6 +456,7 @@ fn process_handles_detect_disappearance_and_cannot_authorize_unrelated_ancestry(
         pid: own.pid,
         start: own.start + 1,
     };
+
     assert!(wrong_start.require_present().is_err());
     assert!(require_ancestry(&own, &wrong_start).is_err());
     assert!(ProcessHandle::open(5_000_000).is_err());
@@ -472,6 +483,7 @@ fn ordinary_tree_ownership_still_rejects_unaccepted_package_windows() {
         &AcceptedWindows::new(),
     )
     .unwrap_err();
+
     assert!(uncertain_message::<()>(Err(error)).contains("ownership"));
 }
 
@@ -480,6 +492,7 @@ fn package_registration_adds_two_cases_without_replacing_existing_assertions() {
     use crate::fixtures::{FOOT, RUN_ID, SLEEP};
     let standard = crate::scenarios::standard_scenarios(RUN_ID, FOOT, SLEEP);
     let extended = crate::scenarios::extended_scenarios(RUN_ID, FOOT, SLEEP);
+
     assert_eq!(standard.len(), 17);
     assert_eq!(extended.len() + SCENARIOS.len(), 8);
     assert!(
@@ -518,6 +531,7 @@ fn retained_process_and_matching_selector_cannot_replace_package_evidence() {
     let mut tree = candidate_tree();
     let window = &mut tree.nodes[1].nodes[1].nodes[0];
     window.pid = Some(pid);
+
     assert!(ownership.verify(&launch, window).is_err());
     ownership.executable_identity.inode ^= 1;
     assert!(
@@ -554,6 +568,7 @@ fn retained_process_observation_refuses_replacement_and_disappearance() {
     };
     handle.require_present().unwrap();
     fs::write(directory.join("stat"), stat.replace("100\n", "101\n")).unwrap();
+
     assert!(
         handle
             .require_present()

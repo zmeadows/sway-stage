@@ -7,25 +7,26 @@ use serde_json::{Value, json};
 
 #[test]
 fn reporting_uncertainty_permanently_invalidates_history() {
-    let mut trusted = true;
+    let mut history_trusted = true;
+
     assert_eq!(
-        Failure::Check("sizing".into()).report_history(&mut trusted),
+        Failure::Check("sizing".into()).report_history(&mut history_trusted),
         "sizing"
     );
-    assert!(trusted);
+    assert!(history_trusted);
     assert_eq!(
-        Failure::Uncertain("ownership".into()).report_history(&mut trusted),
+        Failure::Uncertain("ownership".into()).report_history(&mut history_trusted),
         "ownership"
     );
-    assert!(!trusted);
-    Failure::Check("later failure".into()).report_history(&mut trusted);
-    assert!(!trusted);
-    Failure::Uncertain("interrupted".into()).report_history(&mut trusted);
-    assert!(!trusted);
+    assert!(!history_trusted);
+    Failure::Check("later failure".into()).report_history(&mut history_trusted);
+    assert!(!history_trusted);
+    Failure::Uncertain("interrupted".into()).report_history(&mut history_trusted);
+    assert!(!history_trusted);
 }
 
 /// The target workspace holding one focused window.
-fn focused_target() -> Value {
+fn tree_with_focused_target_window() -> Value {
     desktop(
         "splith",
         vec![wayland_window(20, "app", rect(0, 0, 1920, 1080))],
@@ -33,7 +34,7 @@ fn focused_target() -> Value {
     )
 }
 
-fn validate(
+fn validate_recorded_snapshot(
     tree: Value,
     workspaces: &[Workspace],
     current: Option<&WorkspaceIdentity>,
@@ -50,21 +51,27 @@ fn target_identity() -> WorkspaceIdentity {
 
 #[test]
 fn consistent_snapshot_returns_the_focused_workspace() {
-    let focused_id = validate(focused_target(), &workspaces_reply("9"), None).unwrap();
-    assert_eq!(focused_id, TARGET_WORKSPACE_ID);
+    let focused_container_id = validate_recorded_snapshot(
+        tree_with_focused_target_window(),
+        &workspaces_reply("9"),
+        None,
+    )
+    .unwrap();
 
-    let focused_id = validate(
-        focused_target(),
+    assert_eq!(focused_container_id, TARGET_WORKSPACE_ID);
+
+    let focused_container_id = validate_recorded_snapshot(
+        tree_with_focused_target_window(),
         &workspaces_reply("9"),
         Some(&target_identity()),
     )
     .unwrap();
-    assert_eq!(focused_id, TARGET_WORKSPACE_ID);
+    assert_eq!(focused_container_id, TARGET_WORKSPACE_ID);
 
     // An empty workspace may itself hold focus.
     let empty = desktop("splith", Vec::new(), TARGET_WORKSPACE_ID);
     assert_eq!(
-        validate(empty, &workspaces_reply("9"), None).unwrap(),
+        validate_recorded_snapshot(empty, &workspaces_reply("9"), None).unwrap(),
         TARGET_WORKSPACE_ID
     );
 }
@@ -73,7 +80,7 @@ fn consistent_snapshot_returns_the_focused_workspace() {
 fn snapshot_inconsistencies_are_rejected() {
     let mut cases: Vec<(Value, Vec<Workspace>, Option<WorkspaceIdentity>, &str)> = Vec::new();
 
-    let mut duplicate_ids = focused_target();
+    let mut duplicate_ids = tree_with_focused_target_window();
     node_mut(&mut duplicate_ids, 20)["id"] = json!(PREEXISTING_WINDOW_ID);
     cases.push((
         duplicate_ids,
@@ -82,14 +89,14 @@ fn snapshot_inconsistencies_are_rejected() {
         "duplicate container identities",
     ));
 
-    let mut not_root = focused_target();
+    let mut not_root = tree_with_focused_target_window();
     not_root["type"] = json!("output");
     cases.push((not_root, workspaces_reply("9"), None, "invalid tree"));
 
     let mut duplicate_names = workspaces_reply("9");
     duplicate_names[0].name = "9".into();
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         duplicate_names,
         None,
         "ambiguous workspace identities",
@@ -98,7 +105,7 @@ fn snapshot_inconsistencies_are_rejected() {
     let mut no_focused_workspace = workspaces_reply("9");
     no_focused_workspace[1].focused = false;
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         no_focused_workspace,
         None,
         "exactly one focused workspace",
@@ -107,7 +114,7 @@ fn snapshot_inconsistencies_are_rejected() {
     let mut two_focused_workspaces = workspaces_reply("9");
     two_focused_workspaces[0].focused = true;
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         two_focused_workspaces,
         None,
         "exactly one focused workspace",
@@ -118,7 +125,7 @@ fn snapshot_inconsistencies_are_rejected() {
         name: "renamed".into(),
     };
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         workspaces_reply("9"),
         Some(renamed),
         "focus or identity changed",
@@ -128,20 +135,20 @@ fn snapshot_inconsistencies_are_rejected() {
         name: "1".into(),
     };
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         workspaces_reply("9"),
         Some(elsewhere),
         "focus or identity changed",
     ));
 
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         workspaces_reply("1"),
         None,
         "tree and workspace focus disagree",
     ));
 
-    let mut two_focused_nodes = focused_target();
+    let mut two_focused_nodes = tree_with_focused_target_window();
     node_mut(&mut two_focused_nodes, TARGET_WORKSPACE_ID)["focused"] = json!(true);
     cases.push((
         two_focused_nodes,
@@ -153,13 +160,13 @@ fn snapshot_inconsistencies_are_rejected() {
     let mut missing_workspace = workspaces_reply("9");
     missing_workspace.remove(0);
     cases.push((
-        focused_target(),
+        tree_with_focused_target_window(),
         missing_workspace,
         None,
         "identities disagree",
     ));
 
-    let mut renamed_in_tree = focused_target();
+    let mut renamed_in_tree = tree_with_focused_target_window();
     node_mut(&mut renamed_in_tree, OTHER_WORKSPACE_ID)["name"] = json!("one");
     cases.push((
         renamed_in_tree,
@@ -169,7 +176,7 @@ fn snapshot_inconsistencies_are_rejected() {
     ));
 
     for (tree, workspaces, current, expected) in cases {
-        let error = validate(tree, &workspaces, current.as_ref()).unwrap_err();
+        let error = validate_recorded_snapshot(tree, &workspaces, current.as_ref()).unwrap_err();
         assert_contains(&error, expected);
     }
 }
@@ -231,6 +238,7 @@ fn walk_inherits_workspaces_and_unsafe_placement() {
         (40, Some(TARGET_WORKSPACE_ID), true),
         (22, Some(TARGET_WORKSPACE_ID), true),
     ];
+
     assert_eq!(placements, expected);
 }
 
@@ -354,6 +362,7 @@ fn expected_switch_is_accepted_and_establishes_its_destination() {
 
     // Creating the destination is not the switch.
     fence.assert_accepts(&workspace_event("init", None, Some(&target)));
+
     assert!(!fence.switched);
     assert_eq!(fence.current_workspace, Some(original.clone()));
 

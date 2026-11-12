@@ -33,26 +33,26 @@ struct PreservedWindow {
 /// Only observation evidence: this never authorizes closing any window in the baseline.
 #[derive(Debug)]
 pub struct ForeignWindows {
-    target_id: i64,
-    target_output: Vec<(i64, Option<String>)>,
+    target_workspace_id: i64,
+    target_output_ancestry: Vec<(i64, Option<String>)>,
     windows: BTreeMap<i64, PreservedWindow>,
 }
 
 impl ForeignWindows {
-    pub fn record(observed: &Snapshot, target_id: i64) -> Result<Self, Failure> {
+    pub fn record(observed: &Snapshot, target_workspace_id: i64) -> Result<Self, Failure> {
         observed.validate()?;
-        let target_output = output_ancestry(&observed.tree, target_id)?;
+        let target_output_ancestry = output_ancestry(&observed.tree, target_workspace_id)?;
         let mut windows = BTreeMap::new();
         record_windows(
             &observed.tree,
-            target_id,
+            target_workspace_id,
             false,
             &mut Vec::new(),
             &mut windows,
         )?;
         Ok(Self {
-            target_id,
-            target_output,
+            target_workspace_id,
+            target_output_ancestry,
             windows,
         })
     }
@@ -60,11 +60,11 @@ impl ForeignWindows {
     /// Verify every recorded foreign window, including those in the scratchpad. New
     /// windows remain the responsibility of the existing strict global event checks.
     pub fn verify(&self, observed: &Snapshot) -> Result<(), Failure> {
-        let current = Self::record(observed, self.target_id)?;
-        if current.target_output != self.target_output {
+        let current = Self::record(observed, self.target_workspace_id)?;
+        if current.target_output_ancestry != self.target_output_ancestry {
             return Err(Failure::Uncertain(format!(
                 "target workspace id={} changed output ancestry",
-                self.target_id
+                self.target_workspace_id
             )));
         }
         for (window_id, baseline) in &self.windows {
@@ -94,12 +94,12 @@ impl ForeignWindows {
 
 fn record_windows(
     node: &TreeNode,
-    target_id: i64,
+    target_workspace_id: i64,
     inside_target: bool,
     ancestry: &mut Vec<Ancestor>,
     windows: &mut BTreeMap<i64, PreservedWindow>,
 ) -> Result<(), Failure> {
-    let inside_target = inside_target || node.id == target_id;
+    let inside_target = inside_target || node.id == target_workspace_id;
     if is_window(node) && !inside_target {
         let has_workspace = ancestry
             .iter()
@@ -166,7 +166,7 @@ fn record_windows(
         });
     }
     for child in node.nodes.iter().chain(&node.floating_nodes) {
-        record_windows(child, target_id, inside_target, ancestry, windows)?;
+        record_windows(child, target_workspace_id, inside_target, ancestry, windows)?;
     }
     if node.node_type != NodeType::Root {
         ancestry.pop();

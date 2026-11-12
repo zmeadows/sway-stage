@@ -299,21 +299,21 @@ fn collect_until_exit(
 struct CapturedOutput {
     name: &'static str,
     socket: UnixStream,
-    limit: usize,
+    byte_limit: usize,
     bytes: Vec<u8>,
     /// Set once the stream reports end of file: every writer has closed it.
     closed: bool,
 }
 
 impl CapturedOutput {
-    fn new(name: &'static str, socket: UnixStream, limit: usize) -> Result<Self, String> {
+    fn new(name: &'static str, socket: UnixStream, byte_limit: usize) -> Result<Self, String> {
         socket
             .set_nonblocking(true)
             .map_err(|error| format!("configure {name} socket: {error}"))?;
         Ok(Self {
             name,
             socket,
-            limit,
+            byte_limit,
             bytes: Vec::new(),
             closed: false,
         })
@@ -332,11 +332,11 @@ impl CapturedOutput {
                     self.closed = true;
                     return Ok(true);
                 }
-                Ok(count) => {
-                    if self.bytes.len() + count > self.limit {
-                        return Err(format!("{} exceeded {} bytes", self.name, self.limit));
+                Ok(bytes_read) => {
+                    if self.bytes.len() + bytes_read > self.byte_limit {
+                        return Err(format!("{} exceeded {} bytes", self.name, self.byte_limit));
                     }
-                    self.bytes.extend_from_slice(&chunk[..count]);
+                    self.bytes.extend_from_slice(&chunk[..bytes_read]);
                     return Ok(true);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(false),

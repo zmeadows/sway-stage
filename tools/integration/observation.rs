@@ -291,9 +291,9 @@ pub struct Snapshot {
 impl Snapshot {
     /// Also used by preservation decisions on recorded snapshots in offline tests.
     pub fn validate(&self) -> Result<(), Failure> {
-        let focused_id =
+        let focused_workspace_id =
             validate_snapshot(&self.tree, &self.workspaces, None).map_err(Failure::Uncertain)?;
-        if focused_id != self.focused_workspace_id {
+        if focused_workspace_id != self.focused_workspace_id {
             return Err(Failure::Uncertain(
                 "snapshot focus evidence contradicts its tree".into(),
             ));

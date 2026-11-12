@@ -1,9 +1,9 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, SCRATCHPAD_WORKSPACE_ID, TARGET_WORKSPACE_ID,
-    accepted, assert_contains, container_ids, desktop, extended_scenario, node_mut, parse_tree,
-    rect, selector_value, standard_scenario, uncertain_message, wayland_window, window_event,
-    xwayland_window,
+    accepted_windows, assert_contains, container_ids, desktop, extended_scenario, node_mut,
+    parse_tree, rect, selector_value, standard_scenario, uncertain_message, wayland_window,
+    window_event, xwayland_window,
 };
 use crate::scenarios::Scenario;
 use serde_json::{Value, json};
@@ -19,7 +19,7 @@ fn preexisting_ids() -> HashSet<i64> {
 }
 
 /// horizontal-pair as loaded: windows 20 and 21 on the target, window2 focused.
-fn loaded_pair(scenario: &Scenario) -> Value {
+fn loaded_pair_tree(scenario: &Scenario) -> Value {
     desktop(
         "splith",
         vec![
@@ -38,14 +38,14 @@ fn loaded_pair(scenario: &Scenario) -> Value {
     )
 }
 
-fn owned_pair() -> AcceptedWindows {
-    accepted(&[(20, "window1"), (21, "window2")])
+fn accepted_pair_windows() -> AcceptedWindows {
+    accepted_windows(&[(20, "window1"), (21, "window2")])
 }
 
-fn check_ownership(
+fn verify_recorded_ownership(
     tree: Value,
     scenario: &Scenario,
-    owned: &AcceptedWindows,
+    owned_windows: &AcceptedWindows,
 ) -> Result<(), Failure> {
     let tree = parse_tree(tree);
     verify_ownership(
@@ -53,26 +53,27 @@ fn check_ownership(
         TARGET_WORKSPACE_ID,
         &scenario.layout,
         &preexisting_ids(),
-        owned,
+        owned_windows,
     )
 }
 
 #[test]
 fn ordered_new_events_bind_launches_to_leaves() {
     let scenario = standard_scenario("horizontal-pair");
-    let window2 = selector_value(&scenario, "window2");
+    let second_window_app_id = selector_value(&scenario, "window2");
     // The first window's app ID arrives after its new event, which is not a mismatch.
     let events = [
         window_event("new", 20, None),
         window_event("focus", 20, None),
         window_event("title", 20, Some("anything")),
-        window_event("new", 21, Some(&window2)),
-        window_event("focus", 21, Some(&window2)),
+        window_event("new", 21, Some(&second_window_app_id)),
+        window_event("focus", 21, Some(&second_window_app_id)),
         window_event("mark", 21, None),
         window_event("urgent", PREEXISTING_WINDOW_ID, Some("firefox-esr")),
     ];
     let bound = bind_launches(&events, &scenario.layout, &preexisting_ids()).unwrap();
-    assert_eq!(bound, owned_pair());
+
+    assert_eq!(bound, accepted_pair_windows());
 }
 
 #[test]
@@ -84,6 +85,7 @@ fn binding_rejects_preexisting_repeated_missing_or_extra_new_windows() {
         window_event("new", 20, None),
         window_event("new", PREEXISTING_WINDOW_ID, None),
     ];
+
     assert_contains(
         &uncertain_message(bind(&preexisting)),
         "preexisting or repeated new event: id=6",
@@ -115,8 +117,8 @@ fn binding_rejects_preexisting_repeated_missing_or_extra_new_windows() {
 #[test]
 fn binding_rejects_structural_activity_and_contradicting_identities() {
     let scenario = standard_scenario("horizontal-pair");
-    let window1 = selector_value(&scenario, "window1");
-    let window2 = selector_value(&scenario, "window2");
+    let first_window_app_id = selector_value(&scenario, "window1");
+    let second_window_app_id = selector_value(&scenario, "window2");
     let launches = || vec![window_event("new", 20, None), window_event("new", 21, None)];
 
     for (change, container_id) in [
@@ -135,17 +137,18 @@ fn binding_rejects_structural_activity_and_contradicting_identities() {
     }
 
     let mut swapped_identity = launches();
-    swapped_identity.push(window_event("focus", 20, Some(&window2)));
+    swapped_identity.push(window_event("focus", 20, Some(&second_window_app_id)));
     let message = uncertain_message(bind_launches(
         &swapped_identity,
         &scenario.layout,
         &preexisting_ids(),
     ));
+
     assert_contains(
         &message,
-        &format!("event identity differs: id=20 app_id=Some({window2:?})"),
+        &format!("event identity differs: id=20 app_id=Some({second_window_app_id:?})"),
     );
-    assert_contains(&message, &format!("expected {window1:?}"));
+    assert_contains(&message, &format!("expected {first_window_app_id:?}"));
 }
 
 #[test]
@@ -158,14 +161,15 @@ fn quiet_history_allows_only_harmless_events_or_the_requested_close() {
     require_quiet(&harmless, None).unwrap();
 
     let focus = [window_event("focus", 20, None)];
+
     assert_contains(
         &uncertain_message(require_quiet(&focus, None)),
         "unexpected window activity",
     );
 
-    let remaining = accepted(&[(21, "window2")]);
+    let remaining = accepted_windows(&[(21, "window2")]);
     let closing = ExpectedClose {
-        closing_id: 20,
+        closing_window_id: 20,
         remaining: &remaining,
     };
     let expected = [
@@ -188,36 +192,41 @@ fn quiet_history_allows_only_harmless_events_or_the_requested_close() {
 fn ownership_accepts_exactly_the_owned_windows() {
     let scenario = standard_scenario("horizontal-pair");
     // The preexisting browser window on workspace 1 is ignored.
-    check_ownership(loaded_pair(&scenario), &scenario, &owned_pair()).unwrap();
+    verify_recorded_ownership(
+        loaded_pair_tree(&scenario),
+        &scenario,
+        &accepted_pair_windows(),
+    )
+    .unwrap();
 }
 
 #[test]
 fn ownership_rejects_uncertain_windows_anywhere() {
     let scenario = standard_scenario("horizontal-pair");
-    let window1 = selector_value(&scenario, "window1");
-    let window2 = selector_value(&scenario, "window2");
+    let first_window_app_id = selector_value(&scenario, "window1");
+    let second_window_app_id = selector_value(&scenario, "window2");
     let placement = "ownership/placement uncertain";
     let mut cases: Vec<(Value, String)> = Vec::new();
 
     // A matching new window on another workspace is fatal, not ignored or moved.
-    let mut matching_elsewhere = loaded_pair(&scenario);
+    let mut matching_elsewhere = loaded_pair_tree(&scenario);
     let other = node_mut(&mut matching_elsewhere, OTHER_WORKSPACE_ID);
     other["nodes"].as_array_mut().unwrap().push(wayland_window(
         30,
-        &window1,
+        &first_window_app_id,
         rect(0, 0, 960, 1080),
     ));
     cases.push((matching_elsewhere, format!("{placement}: id=30")));
 
     // So is a matching window in the scratchpad.
-    let mut in_scratchpad = loaded_pair(&scenario);
-    let mut hidden = wayland_window(31, &window2, rect(0, 0, 960, 1080));
+    let mut in_scratchpad = loaded_pair_tree(&scenario);
+    let mut hidden = wayland_window(31, &second_window_app_id, rect(0, 0, 960, 1080));
     hidden["scratchpad_state"] = json!("fresh");
     node_mut(&mut in_scratchpad, SCRATCHPAD_WORKSPACE_ID)["floating_nodes"] = json!([hidden]);
     cases.push((in_scratchpad, format!("{placement}: id=31")));
 
     // A preexisting window moved onto the target.
-    let mut moved_in = loaded_pair(&scenario);
+    let mut moved_in = loaded_pair_tree(&scenario);
     let preexisting = node_mut(&mut moved_in, OTHER_WORKSPACE_ID)["nodes"][0].take();
     node_mut(&mut moved_in, OTHER_WORKSPACE_ID)["nodes"] = json!([]);
     node_mut(&mut moved_in, TARGET_WORKSPACE_ID)["nodes"]
@@ -227,7 +236,7 @@ fn ownership_rejects_uncertain_windows_anywhere() {
     cases.push((moved_in, format!("{placement}: id=6")));
 
     // An unrelated new window on the target.
-    let mut unrelated = loaded_pair(&scenario);
+    let mut unrelated = loaded_pair_tree(&scenario);
     node_mut(&mut unrelated, TARGET_WORKSPACE_ID)["nodes"]
         .as_array_mut()
         .unwrap()
@@ -235,28 +244,32 @@ fn ownership_rejects_uncertain_windows_anywhere() {
     cases.push((unrelated, format!("{placement}: id=32")));
 
     // An owned window that became floating or fullscreen.
-    let mut floating = loaded_pair(&scenario);
+    let mut floating = loaded_pair_tree(&scenario);
     let window = node_mut(&mut floating, TARGET_WORKSPACE_ID)["nodes"][1].take();
     node_mut(&mut floating, TARGET_WORKSPACE_ID)["nodes"] =
         json!([node_mut(&mut floating, 20).take()]);
     node_mut(&mut floating, TARGET_WORKSPACE_ID)["floating_nodes"] = json!([window]);
     cases.push((floating, format!("{placement}: id=21")));
 
-    let mut fullscreen = loaded_pair(&scenario);
+    let mut fullscreen = loaded_pair_tree(&scenario);
     node_mut(&mut fullscreen, 20)["fullscreen_mode"] = json!(1);
     cases.push((fullscreen, format!("{placement}: id=20")));
 
     // An owned window whose identity changed, or that disappeared.
-    let mut changed_identity = loaded_pair(&scenario);
-    node_mut(&mut changed_identity, 20)["app_id"] = json!(window2);
+    let mut changed_identity = loaded_pair_tree(&scenario);
+    node_mut(&mut changed_identity, 20)["app_id"] = json!(second_window_app_id);
     cases.push((changed_identity, "owned identity changed: id=20".into()));
 
-    let mut closed = loaded_pair(&scenario);
+    let mut closed = loaded_pair_tree(&scenario);
     node_mut(&mut closed, TARGET_WORKSPACE_ID)["nodes"] = json!([node_mut(&mut closed, 21).take()]);
     cases.push((closed, "owned windows changed".into()));
 
     for (tree, expected) in cases {
-        let message = uncertain_message(check_ownership(tree, &scenario, &owned_pair()));
+        let message = uncertain_message(verify_recorded_ownership(
+            tree,
+            &scenario,
+            &accepted_pair_windows(),
+        ));
         assert_contains(&message, &expected);
     }
 }
@@ -272,38 +285,55 @@ fn xterm_scenario() -> (Scenario, String) {
 #[test]
 fn ownership_distinguishes_native_wayland_from_xwayland_windows() {
     let (scenario, window_class) = xterm_scenario();
-    let window2 = selector_value(&scenario, "window2");
-    let owned = owned_pair();
+    let second_window_app_id = selector_value(&scenario, "window2");
+    let owned_windows = accepted_pair_windows();
     let loaded = || {
         desktop(
             "splith",
             vec![
                 xwayland_window(20, &window_class, rect(0, 0, 1152, 1080)),
-                wayland_window(21, &window2, rect(1152, 0, 768, 1080)),
+                wayland_window(21, &second_window_app_id, rect(1152, 0, 768, 1080)),
             ],
             21,
         )
     };
-    check_ownership(loaded(), &scenario, &owned).unwrap();
+    verify_recorded_ownership(loaded(), &scenario, &owned_windows).unwrap();
 
     let mut xwayland_with_app_id = loaded();
     node_mut(&mut xwayland_with_app_id, 20)["app_id"] = json!("xterm");
-    let message = uncertain_message(check_ownership(xwayland_with_app_id, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_ownership(
+        xwayland_with_app_id,
+        &scenario,
+        &owned_windows,
+    ));
+
     assert_contains(&message, "expected an Xwayland window with class: 20:xterm");
 
     let mut class_without_x11_window = loaded();
     node_mut(&mut class_without_x11_window, 20)["window"] = Value::Null;
-    let message = uncertain_message(check_ownership(class_without_x11_window, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_ownership(
+        class_without_x11_window,
+        &scenario,
+        &owned_windows,
+    ));
     assert_contains(&message, "expected an Xwayland window");
 
     let mut app_id_under_xwayland = loaded();
     node_mut(&mut app_id_under_xwayland, 21)["shell"] = json!("xwayland");
-    let message = uncertain_message(check_ownership(app_id_under_xwayland, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_ownership(
+        app_id_under_xwayland,
+        &scenario,
+        &owned_windows,
+    ));
     assert_contains(&message, "expected a native Wayland window: 21:");
 
     let mut app_id_with_x11_window = loaded();
     node_mut(&mut app_id_with_x11_window, 21)["window"] = json!(1234);
-    let message = uncertain_message(check_ownership(app_id_with_x11_window, &scenario, &owned));
+    let message = uncertain_message(verify_recorded_ownership(
+        app_id_with_x11_window,
+        &scenario,
+        &owned_windows,
+    ));
     assert_contains(&message, "expected a native Wayland window");
 }
 
@@ -326,6 +356,7 @@ fn process_evidence_compares_every_argument_after_the_executable() {
     ];
     let command: Vec<String> = launched.map(str::to_owned).to_vec();
     let proves = |raw: &[u8]| command_line_proves_launch(raw, &command);
+
     assert!(proves(&command_line(&launched)));
 
     // A distribution wrapper may exec the real binary under another name.
@@ -392,6 +423,7 @@ fn process_evidence_reads_the_windows_process_arguments() {
         &window_of_this_process(this_process),
         leaf,
     ));
+
     assert_eq!(
         message,
         format!(
@@ -436,7 +468,12 @@ fn ownership_requires_process_evidence_for_repeated_app_ids() {
     );
     // This test process cannot have Foot's arguments.
     node_mut(&mut loaded, 20)["pid"] = json!(std::process::id());
-    let message = uncertain_message(check_ownership(loaded, &scenario, &owned_pair()));
+    let message = uncertain_message(verify_recorded_ownership(
+        loaded,
+        &scenario,
+        &accepted_pair_windows(),
+    ));
+
     assert_contains(
         &message,
         "process argv does not prove this launch: container=20",
@@ -490,6 +527,7 @@ fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
         leaf.command.join("\0") + "\0",
     )
     .unwrap();
+
     assert_eq!(
         verify_process_evidence(&process_directory, 101, leaf),
         Err("process argv does not prove this launch")
@@ -547,7 +585,7 @@ fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
     let preexisting_ids = HashSet::from([20]);
     let events = vec![window_event("new", 40, Some(leaf.selector.value()))];
     let fresh = bind_launches(&events, &replay.layout, &preexisting_ids).unwrap();
-    assert_eq!(fresh, accepted(&[(40, "window1")]));
+    assert_eq!(fresh, accepted_windows(&[(40, "window1")]));
     assert!(bind_launches(&[], &replay.layout, &preexisting_ids).is_err());
     let stale = vec![window_event("new", 20, Some(leaf.selector.value()))];
     assert!(bind_launches(&stale, &replay.layout, &preexisting_ids).is_err());
@@ -557,10 +595,10 @@ fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
     let window = wayland_window(20, leaf.selector.value(), rect(0, 0, 1920, 1080));
     let tree = desktop("splith", vec![window], 20);
     for phase in [&scenario, &replay] {
-        let message = uncertain_message(check_ownership(
+        let message = uncertain_message(verify_recorded_ownership(
             tree.clone(),
             phase,
-            &accepted(&[(20, "window1")]),
+            &accepted_windows(&[(20, "window1")]),
         ));
         assert_contains(&message, "cannot verify process argv");
     }

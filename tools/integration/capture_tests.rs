@@ -16,12 +16,12 @@ const INFERENCE_HEADER: &str = "\
 # best-effort, may contain secrets, and may not reproduce the original application.
 ";
 
-fn app_id(scenario: &str, layout_id: &str) -> String {
+fn scenario_app_id(scenario: &str, layout_id: &str) -> String {
     format!("sway-stage-it-{RUN_ID}-{scenario}-{layout_id}")
 }
 
 /// horizontal-pair measured at 1150:770 pixels.
-fn pair_measurements() -> LayoutMeasurements {
+fn horizontal_pair_measurements() -> LayoutMeasurements {
     LayoutMeasurements {
         shares: BTreeMap::from([
             (vec![0], 100.0 * 1150.0 / 1920.0),
@@ -32,7 +32,7 @@ fn pair_measurements() -> LayoutMeasurements {
 }
 
 /// A default capture of horizontal-pair as sway-stage prints it.
-fn pair_draft() -> String {
+fn horizontal_pair_draft() -> String {
     format!(
         "{DRAFT_HEADER}\
 version: 1
@@ -51,26 +51,33 @@ layout:
       match:
         app_id: {}
 ",
-        app_id("horizontal-pair", "window1"),
-        app_id("horizontal-pair", "window2"),
+        scenario_app_id("horizontal-pair", "window1"),
+        scenario_app_id("horizontal-pair", "window2"),
     )
 }
 
 #[test]
 fn capture_lines_drop_comments_blank_lines_and_trailing_space() {
     let draft = "# header\n\nversion: 1  \n  # indented comment\n   \nlayout:\n";
+
     assert_eq!(capture_lines(draft), ["version: 1", "layout:"]);
 }
 
 #[test]
 fn matching_default_capture_is_filled_for_check() {
     let scenario = standard_scenario("horizontal-pair");
-    let filled = verify_capture(&pair_draft(), &scenario, &pair_measurements()).unwrap();
+    let filled = verify_capture(
+        &horizontal_pair_draft(),
+        &scenario,
+        &horizontal_pair_measurements(),
+    )
+    .unwrap();
 
-    let expected = pair_draft()
+    let expected = horizontal_pair_draft()
         .strip_prefix(DRAFT_HEADER)
         .unwrap()
         .replace("command: null", r#"command: ["true"]"#);
+
     assert_eq!(filled, expected);
 }
 
@@ -88,7 +95,7 @@ fn nested_capture_matches_the_measured_hierarchy() {
         shares: BTreeMap::from(shares),
         sizing_notes: Vec::new(),
     };
-    let id = |layout_id: &str| app_id("mixed-nesting", layout_id);
+    let id = |layout_id: &str| scenario_app_id("mixed-nesting", layout_id);
     // Quoted identifiers are equivalent YAML and must still compare equal.
     let draft = format!(
         "{DRAFT_HEADER}\
@@ -128,6 +135,7 @@ layout:
     );
 
     let filled = verify_capture(&draft, &scenario, &measurements).unwrap();
+
     assert_eq!(filled.matches(r#"command: ["true"]"#).count(), 4);
     assert!(!filled.contains('#'));
 }
@@ -135,7 +143,7 @@ layout:
 #[test]
 fn capture_differences_report_the_failed_comparison() {
     let scenario = standard_scenario("horizontal-pair");
-    let window1 = app_id("horizontal-pair", "window1");
+    let window1 = scenario_app_id("horizontal-pair", "window1");
     let cases = [
         ("focus: window2", "focus: window1", "capture value"),
         ("weight: 59.9", "weight: 59.92", "capture sizing"),
@@ -177,29 +185,35 @@ fn capture_differences_report_the_failed_comparison() {
         ),
     ];
     for (original, replacement, expected) in cases {
-        let draft = pair_draft().replacen(original, replacement, 1);
-        assert_ne!(draft, pair_draft(), "{original:?} is not in the draft");
-        let error = verify_capture(&draft, &scenario, &pair_measurements()).unwrap_err();
+        let draft = horizontal_pair_draft().replacen(original, replacement, 1);
+        assert_ne!(
+            draft,
+            horizontal_pair_draft(),
+            "{original:?} is not in the draft"
+        );
+        let error = verify_capture(&draft, &scenario, &horizontal_pair_measurements()).unwrap_err();
         assert_contains(&error, expected);
     }
 
     let extra_field =
-        pair_draft().replace("version: 1\n", "version: 1\nwindow_timeout_ms: 20000\n");
-    let error = verify_capture(&extra_field, &scenario, &pair_measurements()).unwrap_err();
+        horizontal_pair_draft().replace("version: 1\n", "version: 1\nwindow_timeout_ms: 20000\n");
+    let error =
+        verify_capture(&extra_field, &scenario, &horizontal_pair_measurements()).unwrap_err();
+
     assert_contains(&error, "capture draft has unexpected fields/structure");
 
     let unmeasured = LayoutMeasurements {
         shares: BTreeMap::new(),
         sizing_notes: Vec::new(),
     };
-    let error = verify_capture(&pair_draft(), &scenario, &unmeasured).unwrap_err();
+    let error = verify_capture(&horizontal_pair_draft(), &scenario, &unmeasured).unwrap_err();
     assert_eq!(error, "no measured share for layout.children[0]");
 }
 
 /// An `--infer-commands` capture of horizontal-pair whose recovered commands are the
 /// given lines, each already indented as a block sequence item.
-fn inferred_pair_draft(first_command: &str, second_command: &str) -> String {
-    pair_draft()
+fn inferred_horizontal_pair_draft(first_command: &str, second_command: &str) -> String {
+    horizontal_pair_draft()
         .replacen(
             DRAFT_HEADER,
             &format!("{DRAFT_HEADER}{INFERENCE_HEADER}"),
@@ -232,13 +246,13 @@ fn foot_command(app_id_arguments: &[&str]) -> String {
 #[test]
 fn inferred_capture_accepts_either_app_id_argument_form() {
     let scenario = standard_scenario("horizontal-pair");
-    let window1 = app_id("horizontal-pair", "window1");
-    let window2 = app_id("horizontal-pair", "window2");
-    let inferred = inferred_pair_draft(
+    let window1 = scenario_app_id("horizontal-pair", "window1");
+    let window2 = scenario_app_id("horizontal-pair", "window2");
+    let inferred = inferred_horizontal_pair_draft(
         &foot_command(&[&format!("--app-id={window1}")]),
         &foot_command(&["--app-id", &format!("\"{window2}\"")]),
     );
-    verify_inferred_capture(&inferred, &pair_draft(), &scenario.layout).unwrap();
+    verify_inferred_capture(&inferred, &horizontal_pair_draft(), &scenario.layout).unwrap();
 }
 
 #[test]
@@ -246,16 +260,16 @@ fn inferred_capture_accepts_mixed_command_styles_with_literal_arguments() {
     let scenario = standard_scenario("horizontal-pair");
     let first = vec![
         "/usr/bin/foot".to_owned(),
-        format!("--app-id={}", app_id("horizontal-pair", "window1")),
+        format!("--app-id={}", scenario_app_id("horizontal-pair", "window1")),
         "literal: [a,b] # 'quote' \\ $HOME\nnext".to_owned(),
         "".to_owned(),
         "null".to_owned(),
     ];
     let second = foot_command(&[&format!(
         "--app-id={}",
-        app_id("horizontal-pair", "window2")
+        scenario_app_id("horizontal-pair", "window2")
     )]);
-    let inferred = pair_draft()
+    let inferred = horizontal_pair_draft()
         .replacen(
             "      command: null\n",
             &format!(
@@ -269,23 +283,25 @@ fn inferred_capture_accepts_mixed_command_styles_with_literal_arguments() {
             &format!("      command:\n{second}"),
             1,
         );
-    verify_inferred_capture(&inferred, &pair_draft(), &scenario.layout).unwrap();
-    let commands = inferred_commands(&inferred, &pair_draft()).unwrap();
+    verify_inferred_capture(&inferred, &horizontal_pair_draft(), &scenario.layout).unwrap();
+    let commands = inferred_commands(&inferred, &horizontal_pair_draft()).unwrap();
+
     assert_eq!(commands[0], first);
 }
 
 #[test]
 fn inferred_capture_mismatches_fail_without_revealing_arguments() {
     let scenario = standard_scenario("horizontal-pair");
-    let window1 = app_id("horizontal-pair", "window1");
-    let window2 = app_id("horizontal-pair", "window2");
+    let window1 = scenario_app_id("horizontal-pair", "window1");
+    let window2 = scenario_app_id("horizontal-pair", "window2");
     let secret = "--token=hunter2";
     let correct_first = foot_command(&[&format!("--app-id={window1}"), secret]);
     let correct_second = foot_command(&[&format!("--app-id={window2}")]);
 
-    let swapped = inferred_pair_draft(&correct_second, &correct_first);
-    let missing_value = inferred_pair_draft(&correct_first, &foot_command(&["--app-id"]));
-    let other_option = inferred_pair_draft(
+    let swapped = inferred_horizontal_pair_draft(&correct_second, &correct_first);
+    let missing_value =
+        inferred_horizontal_pair_draft(&correct_first, &foot_command(&["--app-id"]));
+    let other_option = inferred_horizontal_pair_draft(
         &correct_first,
         &foot_command(&[&format!("--title={window2}")]),
     );
@@ -303,16 +319,16 @@ fn inferred_capture_mismatches_fail_without_revealing_arguments() {
             "inferred command does not identify the correct Foot window: window2",
         ),
         (
-            inferred_pair_draft(&correct_first, "        - ''\n"),
+            inferred_horizontal_pair_draft(&correct_first, "        - ''\n"),
             "inferred capture has an empty executable",
         ),
         (
-            inferred_pair_draft(&correct_first, ""),
+            inferred_horizontal_pair_draft(&correct_first, ""),
             "inferred capture has an empty executable",
         ),
         (
             // Inference missed the second window, so its placeholder remains.
-            pair_draft().replacen(
+            horizontal_pair_draft().replacen(
                 "      command: null\n",
                 &format!("      command:\n{correct_first}"),
                 1,
@@ -320,18 +336,18 @@ fn inferred_capture_mismatches_fail_without_revealing_arguments() {
             "inferred capture lacks a command array",
         ),
         (
-            inferred_pair_draft(&correct_first, &correct_second)
+            inferred_horizontal_pair_draft(&correct_first, &correct_second)
                 .replace("weight: 40.1", "weight: 40.2"),
             "inference changed capture hierarchy, order, sizing, matchers, IDs, or focus",
         ),
         (
-            inferred_pair_draft(&correct_first, &correct_second)
+            inferred_horizontal_pair_draft(&correct_first, &correct_second)
                 .replace("focus: window2", "focus: window1"),
             "inference changed capture hierarchy",
         ),
         (
             // A misindented argument is not part of the command sequence.
-            inferred_pair_draft(&correct_first, &correct_second).replace(
+            inferred_horizontal_pair_draft(&correct_first, &correct_second).replace(
                 "        - /usr/bin/sleep\n        - '300'\n      match",
                 "      - '300'\n      match",
             ),
@@ -340,8 +356,8 @@ fn inferred_capture_mismatches_fail_without_revealing_arguments() {
     ];
 
     for (inferred, expected) in cases {
-        let error =
-            verify_inferred_capture(&inferred, &pair_draft(), &scenario.layout).unwrap_err();
+        let error = verify_inferred_capture(&inferred, &horizontal_pair_draft(), &scenario.layout)
+            .unwrap_err();
         assert_contains(&error, expected);
         assert!(!error.contains("hunter2") && !error.contains("/usr/bin"));
     }
@@ -350,7 +366,7 @@ fn inferred_capture_mismatches_fail_without_revealing_arguments() {
 #[test]
 fn inferred_capture_needs_one_command_per_window() {
     let scenario = standard_scenario("single-window");
-    let window1 = app_id("single-window", "window1");
+    let window1 = scenario_app_id("single-window", "window1");
     let default_draft = format!(
         "{DRAFT_HEADER}version: 1\nfocus: window1\nlayout:\n  id: window1\n  command: null\n  match:\n    app_id: {window1}\n"
     );
@@ -362,6 +378,7 @@ fn inferred_capture_needs_one_command_per_window() {
 
     let pair = standard_scenario("horizontal-pair");
     let error = verify_inferred_capture(&inferred, &default_draft, &pair.layout).unwrap_err();
+
     assert_eq!(error, "inferred command count differs");
 }
 
@@ -383,6 +400,7 @@ fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() 
     verify_desktop_replay_capture(&inferred, &default, &fixture).unwrap();
     verify_desktop_replay_capture(&default, &default, &fixture).unwrap();
     // GLib 2.84's replay miss cannot satisfy initial inference verification.
+
     assert!(verify_desktop_launcher_capture(&default, &default, &fixture).is_err());
     // Preserve the existing Foot-only assertion: gio argv cannot satisfy it.
     assert!(verify_inferred_capture(&inferred, &default, &scenario.layout).is_err());
@@ -428,14 +446,16 @@ fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
         "quotes ' \" and \\ newline\n $HOME ; $(literal) *".into(),
         String::new(),
     ]);
-    let draft = pair_draft().replace("id: window1", "id: 'window1'");
-    let (yaml, replay) = executable_capture(&draft, &scenario, &pair_measurements()).unwrap();
+    let draft = horizontal_pair_draft().replace("id: window1", "id: 'window1'");
+    let (yaml, replay) =
+        executable_capture(&draft, &scenario, &horizontal_pair_measurements()).unwrap();
     let mut normalized = yaml.clone();
     for leaf in scenario.layout.leaves() {
         let serialized = json_sequence(&leaf.command);
         normalized = normalized.replacen(&format!("command: {serialized}"), "command: null", 1);
     }
     // Comments, quoted IDs and measured decimal weights are from the capture itself.
+
     assert_eq!(normalized, draft);
     let commands: Vec<Vec<String>> = yaml
         .lines()
@@ -470,26 +490,34 @@ fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
 fn replay_rejects_missing_extra_relocated_or_misassociated_placeholders() {
     let scenario = standard_scenario("horizontal-pair");
     for draft in [
-        pair_draft().replacen("      command: null\n", "", 1),
-        pair_draft() + "command: null\n",
-        pair_draft().replacen("      command: null", "    command: null", 1),
-        pair_draft().replace(
+        horizontal_pair_draft().replacen("      command: null\n", "", 1),
+        horizontal_pair_draft() + "command: null\n",
+        horizontal_pair_draft().replacen("      command: null", "    command: null", 1),
+        horizontal_pair_draft().replace(
             "      weight: 59.9\n      command: null",
             "      command: null\n      weight: 59.9",
         ),
-        pair_draft().replacen("id: window1", "id: window2", 1),
-        pair_draft().replacen(
-            &app_id("horizontal-pair", "window1"),
-            &app_id("horizontal-pair", "window2"),
+        horizontal_pair_draft().replacen("id: window1", "id: window2", 1),
+        horizontal_pair_draft().replacen(
+            &scenario_app_id("horizontal-pair", "window1"),
+            &scenario_app_id("horizontal-pair", "window2"),
             1,
         ),
-        pair_draft().replacen("      command: null", "      command: [\"true\"]", 1),
+        horizontal_pair_draft().replacen("      command: null", "      command: [\"true\"]", 1),
     ] {
-        assert!(executable_capture(&draft, &scenario, &pair_measurements()).is_err());
+        assert!(executable_capture(&draft, &scenario, &horizontal_pair_measurements()).is_err());
     }
     let mut no_command = scenario;
     no_command.layout.first_leaf_mut().command.clear();
-    assert!(executable_capture(&pair_draft(), &no_command, &pair_measurements()).is_err());
+
+    assert!(
+        executable_capture(
+            &horizontal_pair_draft(),
+            &no_command,
+            &horizontal_pair_measurements()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -513,6 +541,7 @@ fn nested_replay_retains_focus_shape_and_every_captured_weight() {
     else {
         panic!("root split")
     };
+
     assert_eq!(*layout, crate::scenarios::GroupLayout::Horizontal);
     assert_eq!(
         children
@@ -564,6 +593,7 @@ fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
         .iter()
         .map(|leaf| option_values(&leaf.command, "--title")[0])
         .collect();
+
     assert_ne!(titles[0], titles[1]);
     let first = foot_command(&[
         &format!("--app-id={shared_id}"),
@@ -733,6 +763,7 @@ fn package_capture_compares_exact_host_commands_and_all_other_fields() {
         extra.push("unexpected".into());
         assert!(verify_package_capture(&inferred, &default, &extra).is_err());
     }
+
     assert!(
         verify_package_default_capture(
             &default.replace("command: null", "command: [unexpected]"),
@@ -771,6 +802,7 @@ fn mixed_capture_replay_aligns_only_split_child_weights_and_retains_actual_yaml(
             1,
         );
     }
+
     assert_eq!(normalized, draft);
     let ConfiguredNode::Group { children, .. } = &replay.layout else {
         panic!("root group")
@@ -843,10 +875,10 @@ fn header_only_capture_replay_needs_no_weights() {
 #[test]
 fn measured_mixed_replay_is_verified_against_fresh_tree_geometry() {
     use crate::fixtures::{
-        TARGET_WORKSPACE_ID, accepted, find, mixed_native_desktop, node_mut, parse_tree,
+        TARGET_WORKSPACE_ID, accepted_windows, find, mixed_native_desktop, node_mut, parse_tree,
     };
     let scenario = standard_scenario("mixed-capture-reload");
-    let owned = accepted(&[
+    let owned = accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
@@ -862,6 +894,7 @@ fn measured_mixed_replay_is_verified_against_fresh_tree_geometry() {
     let tree = parse_tree(tree);
     let workspace = find(&tree, TARGET_WORKSPACE_ID);
     let measured = crate::layout::verify_layout(workspace, &scenario, &owned).unwrap();
+
     assert_eq!(measured.sizing_notes.len(), 2);
     let draft = expected_draft(&scenario, &measured.shares).unwrap();
     let (_, replay) = executable_capture(&draft, &scenario, &measured).unwrap();

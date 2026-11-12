@@ -7,7 +7,7 @@ use crate::fixtures::{
 use crate::ownership::require_quiet;
 use serde_json::{Value, json};
 
-fn observed(tree: Value) -> Snapshot {
+fn recorded_snapshot(tree: Value) -> Snapshot {
     Snapshot {
         tree: parse_tree(tree),
         workspaces: workspaces_reply("9"),
@@ -16,7 +16,7 @@ fn observed(tree: Value) -> Snapshot {
     }
 }
 
-fn baseline_tree() -> Value {
+fn foreign_window_baseline_tree() -> Value {
     let mut tree = desktop("splith", Vec::new(), TARGET_WORKSPACE_ID);
     node_mut(&mut tree, OTHER_WORKSPACE_ID)["nodes"] = json!([group(
         30,
@@ -30,34 +30,40 @@ fn baseline_tree() -> Value {
     tree
 }
 
-fn baseline() -> ForeignWindows {
-    ForeignWindows::record(&observed(baseline_tree()), TARGET_WORKSPACE_ID).unwrap()
+fn foreign_window_baseline() -> ForeignWindows {
+    ForeignWindows::record(
+        &recorded_snapshot(foreign_window_baseline_tree()),
+        TARGET_WORKSPACE_ID,
+    )
+    .unwrap()
 }
 
 #[test]
 fn unchanged_foreign_windows_survive_target_construction_capture_and_cleanup() {
-    let baseline = baseline();
+    let foreign_window_baseline = foreign_window_baseline();
     for target_windows in [
         Vec::new(),
         vec![wayland_window(20, "owned", rect(0, 0, 1920, 1080))],
     ] {
-        let mut tree = baseline_tree();
+        let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, TARGET_WORKSPACE_ID)["nodes"] = json!(target_windows);
-        baseline.verify(&observed(tree)).unwrap();
+        foreign_window_baseline
+            .verify(&recorded_snapshot(tree))
+            .unwrap();
     }
-    let mut title_change = baseline_tree();
+    let mut title_change = foreign_window_baseline_tree();
     node_mut(&mut title_change, PREEXISTING_WINDOW_ID)["name"] = json!("new title");
-    let mut snapshot = observed(title_change);
+    let mut snapshot = recorded_snapshot(title_change);
     snapshot
         .window_events
         .push(window_event("title", PREEXISTING_WINDOW_ID, None));
-    baseline.verify(&snapshot).unwrap();
+    foreign_window_baseline.verify(&snapshot).unwrap();
     require_quiet(&snapshot.window_events, None).unwrap();
 }
 
 #[test]
 fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
-    let baseline = baseline();
+    let foreign_window_baseline = foreign_window_baseline();
     let changes = [
         ("rect", rect(1, 0, 1920, 540)),
         ("floating", json!("user_on")),
@@ -67,10 +73,10 @@ fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
         ("app_id", json!("different")),
     ];
     for (field, changed) in changes {
-        let mut tree = baseline_tree();
+        let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, PREEXISTING_WINDOW_ID)[field] = changed;
         assert_contains(
-            &uncertain_message(baseline.verify(&observed(tree))),
+            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
             "identity/geometry/state changed",
         );
     }
@@ -79,10 +85,10 @@ fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
         (30, "fullscreen_mode", json!(1)),
         (OTHER_WORKSPACE_ID, "rect", rect(0, 0, 900, 1080)),
     ] {
-        let mut tree = baseline_tree();
+        let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, ancestor)[field] = changed;
         assert_contains(
-            &uncertain_message(baseline.verify(&observed(tree))),
+            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
             "ancestry/parent/order/ancestor state changed",
         );
     }
@@ -90,22 +96,22 @@ fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
 
 #[test]
 fn changed_foreign_parent_order_workspace_output_or_disappearance_fails() {
-    let baseline = baseline();
-    let mut reordered = baseline_tree();
+    let foreign_window_baseline = foreign_window_baseline();
+    let mut reordered = foreign_window_baseline_tree();
     node_mut(&mut reordered, 30)["nodes"]
         .as_array_mut()
         .unwrap()
         .reverse();
-    let mut reparented = baseline_tree();
+    let mut reparented = foreign_window_baseline_tree();
     let children = node_mut(&mut reparented, 30)["nodes"].take();
     node_mut(&mut reparented, OTHER_WORKSPACE_ID)["nodes"] = children;
-    let mut moved_to_target = baseline_tree();
+    let mut moved_to_target = foreign_window_baseline_tree();
     let window = node_mut(&mut moved_to_target, 30)["nodes"]
         .as_array_mut()
         .unwrap()
         .remove(0);
     node_mut(&mut moved_to_target, TARGET_WORKSPACE_ID)["nodes"] = json!([window]);
-    let mut moved_to_scratchpad = baseline_tree();
+    let mut moved_to_scratchpad = foreign_window_baseline_tree();
     let window = node_mut(&mut moved_to_scratchpad, 30)["nodes"]
         .as_array_mut()
         .unwrap()
@@ -114,18 +120,18 @@ fn changed_foreign_parent_order_workspace_output_or_disappearance_fails() {
         &mut moved_to_scratchpad,
         crate::fixtures::SCRATCHPAD_WORKSPACE_ID,
     )["floating_nodes"] = json!([window]);
-    let mut floating_list = baseline_tree();
+    let mut floating_list = foreign_window_baseline_tree();
     let window = node_mut(&mut floating_list, 30)["nodes"]
         .as_array_mut()
         .unwrap()
         .remove(0);
     node_mut(&mut floating_list, OTHER_WORKSPACE_ID)["floating_nodes"] = json!([window]);
-    let mut disappeared = baseline_tree();
+    let mut disappeared = foreign_window_baseline_tree();
     node_mut(&mut disappeared, 30)["nodes"]
         .as_array_mut()
         .unwrap()
         .remove(0);
-    let mut output_moved = baseline_tree();
+    let mut output_moved = foreign_window_baseline_tree();
     // A different output now contains the foreign workspace, while the target stays put.
     let workspace = node_mut(&mut output_moved, 4)["nodes"]
         .as_array_mut()
@@ -150,43 +156,46 @@ fn changed_foreign_parent_order_workspace_output_or_disappearance_fails() {
         output_moved,
     ] {
         assert_contains(
-            &uncertain_message(baseline.verify(&observed(tree))),
+            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
             "foreign window id=6",
         );
     }
-    let mut target_output_changed = baseline_tree();
+    let mut target_output_changed = foreign_window_baseline_tree();
     node_mut(&mut target_output_changed, 4)["id"] = json!(41);
+
     assert_contains(
-        &uncertain_message(baseline.verify(&observed(target_output_changed))),
+        &uncertain_message(
+            foreign_window_baseline.verify(&recorded_snapshot(target_output_changed)),
+        ),
         "target workspace id=7 changed output ancestry",
     );
 }
 
 #[test]
 fn contradictory_or_missing_snapshot_evidence_never_establishes_preservation() {
-    let baseline = baseline();
-    let mut missing_workspace = observed(baseline_tree());
+    let foreign_window_baseline = foreign_window_baseline();
+    let mut missing_workspace = recorded_snapshot(foreign_window_baseline_tree());
     missing_workspace.workspaces.remove(0);
-    let mut contradictory_focus = observed(baseline_tree());
+    let mut contradictory_focus = recorded_snapshot(foreign_window_baseline_tree());
     contradictory_focus.focused_workspace_id = OTHER_WORKSPACE_ID;
-    let mut duplicate = baseline_tree();
+    let mut duplicate = foreign_window_baseline_tree();
     node_mut(&mut duplicate, 31)["id"] = json!(PREEXISTING_WINDOW_ID);
-    let mut missing_target = observed(baseline_tree());
+    let mut missing_target = recorded_snapshot(foreign_window_baseline_tree());
     missing_target.tree.nodes[1].nodes.pop();
     for snapshot in [
         missing_workspace,
         contradictory_focus,
-        observed(duplicate),
+        recorded_snapshot(duplicate),
         missing_target,
     ] {
-        uncertain_message(baseline.verify(&snapshot));
+        uncertain_message(foreign_window_baseline.verify(&snapshot));
         uncertain_message(ForeignWindows::record(&snapshot, TARGET_WORKSPACE_ID));
     }
 }
 
 #[test]
 fn structural_events_fail_even_when_a_foreign_window_returns_to_its_baseline() {
-    let baseline = baseline();
+    let foreign_window_baseline = foreign_window_baseline();
     for change in [
         "move",
         "floating",
@@ -195,11 +204,11 @@ fn structural_events_fail_even_when_a_foreign_window_returns_to_its_baseline() {
         "new",
         "focus",
     ] {
-        let mut snapshot = observed(baseline_tree());
+        let mut snapshot = recorded_snapshot(foreign_window_baseline_tree());
         snapshot
             .window_events
             .push(window_event(change, PREEXISTING_WINDOW_ID, None));
-        baseline.verify(&snapshot).unwrap();
+        foreign_window_baseline.verify(&snapshot).unwrap();
         uncertain_message(require_quiet(&snapshot.window_events, None));
     }
 }
@@ -207,13 +216,16 @@ fn structural_events_fail_even_when_a_foreign_window_returns_to_its_baseline() {
 #[test]
 fn absent_window_state_fields_cannot_establish_a_preservation_baseline() {
     for field in ["floating", "fullscreen_mode", "scratchpad_state"] {
-        let mut tree = baseline_tree();
+        let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, PREEXISTING_WINDOW_ID)
             .as_object_mut()
             .unwrap()
             .remove(field);
         assert_contains(
-            &uncertain_message(ForeignWindows::record(&observed(tree), TARGET_WORKSPACE_ID)),
+            &uncertain_message(ForeignWindows::record(
+                &recorded_snapshot(tree),
+                TARGET_WORKSPACE_ID,
+            )),
             "lacks floating/fullscreen/scratchpad evidence",
         );
     }

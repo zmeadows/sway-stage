@@ -1,6 +1,6 @@
 use super::*;
 use crate::fixtures::{
-    OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, TARGET_WORKSPACE_ID, accepted,
+    OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, TARGET_WORKSPACE_ID, accepted_windows,
     assert_contains, container_ids, desktop, find, group, node_mut, parse_tree, rect,
     selector_value, standard_scenario, uncertain_message, wayland_window, window_event,
     workspaces_reply,
@@ -8,7 +8,7 @@ use crate::fixtures::{
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
-fn observed(tree: Value, focused_name: &str, focused_workspace_id: i64) -> Snapshot {
+fn recorded_snapshot(tree: Value, focused_name: &str, focused_workspace_id: i64) -> Snapshot {
     Snapshot {
         tree: parse_tree(tree),
         workspaces: workspaces_reply(focused_name),
@@ -18,7 +18,7 @@ fn observed(tree: Value, focused_name: &str, focused_workspace_id: i64) -> Snaps
 }
 
 fn starting_snapshot() -> Snapshot {
-    observed(
+    recorded_snapshot(
         desktop("splith", Vec::new(), PREEXISTING_WINDOW_ID),
         "1",
         OTHER_WORKSPACE_ID,
@@ -128,6 +128,7 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
 #[test]
 fn preflight_accepts_only_an_empty_or_absent_designated_workspace() {
     let eligibility = preflight_eligibility(&starting_snapshot(), "9").unwrap();
+
     assert_eq!(eligibility.original, original_identity());
     assert_eq!(eligibility.designated_id, Some(TARGET_WORKSPACE_ID));
 
@@ -146,7 +147,7 @@ fn preflight_accepts_only_an_empty_or_absent_designated_workspace() {
         let child_key = if floating { "floating_nodes" } else { "nodes" };
         // Even a structural container with no windows counts as occupancy.
         target[child_key] = json!([group(30, "splith", rect(0, 0, 1920, 1080), Vec::new())]);
-        let snapshot = observed(tree, "1", OTHER_WORKSPACE_ID);
+        let snapshot = recorded_snapshot(tree, "1", OTHER_WORKSPACE_ID);
         assert_contains(
             &preflight_eligibility(&snapshot, "9").err().unwrap(),
             "occupied",
@@ -156,11 +157,12 @@ fn preflight_accepts_only_an_empty_or_absent_designated_workspace() {
 
 #[test]
 fn preflight_refuses_the_starting_workspace_ambiguous_numbers_and_unsafe_names() {
-    let focused_target = observed(
+    let focused_target = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
     );
+
     assert_contains(
         &preflight_eligibility(&focused_target, "9").err().unwrap(),
         "starting workspace",
@@ -217,8 +219,8 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
     }
 }
 
-fn loaded_pair(scenario: &Scenario) -> Snapshot {
-    observed(
+fn loaded_pair_snapshot(scenario: &Scenario) -> Snapshot {
+    recorded_snapshot(
         desktop(
             "splith",
             vec![
@@ -244,26 +246,35 @@ fn loaded_pair(scenario: &Scenario) -> Snapshot {
 fn cleanup_plan_revalidates_ownership_and_calculates_the_remaining_hierarchy() {
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
-    let preexisting = container_ids(&starting_snapshot().tree);
-    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
+    let preexisting_container_ids = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair_snapshot(&scenario), target.id).unwrap();
     let context = CleanupContext {
         package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
     };
-    let snapshot = loaded_pair(&scenario);
-    let baseline = signature(snapshot.focused_workspace());
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
-    let plan = prepare_close(&snapshot, &context, &owned, &baseline, 20, true).unwrap();
-    assert_eq!(plan.remaining, accepted(&[(21, "window2")]));
+    let snapshot = loaded_pair_snapshot(&scenario);
+    let workspace_baseline = signature(snapshot.focused_workspace());
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
+    let close_plan = prepare_close(
+        &snapshot,
+        &context,
+        &owned_windows,
+        &workspace_baseline,
+        20,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(close_plan.remaining, accepted_windows(&[(21, "window2")]));
     assert_eq!(
-        plan.hierarchy,
+        close_plan.hierarchy,
         Some(shape(find(&snapshot.tree, 21)).unwrap())
     );
 
-    let survivor = observed(
+    let survivor = recorded_snapshot(
         desktop(
             "splith",
             vec![wayland_window(
@@ -276,67 +287,87 @@ fn cleanup_plan_revalidates_ownership_and_calculates_the_remaining_hierarchy() {
         "9",
         TARGET_WORKSPACE_ID,
     );
-    let last = prepare_close(
+    let final_close_plan = prepare_close(
         &survivor,
         &context,
-        &plan.remaining,
+        &close_plan.remaining,
         &signature(survivor.focused_workspace()),
         21,
         true,
     )
     .unwrap();
-    assert!(last.remaining.is_empty());
-    assert_eq!(last.hierarchy, None);
+    assert!(final_close_plan.remaining.is_empty());
+    assert_eq!(final_close_plan.hierarchy, None);
 }
 
 #[test]
 fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
-    let preexisting = container_ids(&starting_snapshot().tree);
-    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
+    let preexisting_container_ids = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair_snapshot(&scenario), target.id).unwrap();
     let context = CleanupContext {
         package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
     };
-    let snapshot = loaded_pair(&scenario);
-    let baseline = signature(snapshot.focused_workspace());
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
+    let snapshot = loaded_pair_snapshot(&scenario);
+    let workspace_baseline = signature(snapshot.focused_workspace());
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
 
     assert_contains(
         &uncertain_message(prepare_close(
-            &snapshot, &context, &owned, &baseline, 20, false,
+            &snapshot,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            20,
+            false,
         )),
         "trusted",
     );
     assert_contains(
         &uncertain_message(prepare_close(
-            &snapshot, &context, &owned, &baseline, 99, true,
+            &snapshot,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            99,
+            true,
         )),
         "individually verified",
     );
-    let mut activity = loaded_pair(&scenario);
+    let mut activity = loaded_pair_snapshot(&scenario);
     activity.window_events.push(window_event("focus", 20, None));
     assert_contains(
         &uncertain_message(prepare_close(
-            &activity, &context, &owned, &baseline, 20, true,
+            &activity,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            20,
+            true,
         )),
         "unexpected window activity",
     );
 
-    let mut changed = loaded_pair(&scenario);
+    let mut changed = loaded_pair_snapshot(&scenario);
     changed.tree.nodes[1].nodes[1].nodes[0].rect.width += 1;
     assert_contains(
         &uncertain_message(prepare_close(
-            &changed, &context, &owned, &baseline, 20, true,
+            &changed,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            20,
+            true,
         )),
         "changed before cleanup",
     );
 
-    let mut foreign = loaded_pair(&scenario);
+    let mut foreign = loaded_pair_snapshot(&scenario);
     foreign.tree.nodes[1].nodes[1]
         .nodes
         .push(parse_tree(wayland_window(
@@ -346,16 +377,26 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
         )));
     assert_contains(
         &uncertain_message(prepare_close(
-            &foreign, &context, &owned, &baseline, 20, true,
+            &foreign,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            20,
+            true,
         )),
         "ownership/placement uncertain",
     );
 
-    let mut elsewhere = loaded_pair(&scenario);
+    let mut elsewhere = loaded_pair_snapshot(&scenario);
     elsewhere.focused_workspace_id = OTHER_WORKSPACE_ID;
     assert_contains(
         &uncertain_message(prepare_close(
-            &elsewhere, &context, &owned, &baseline, 20, true,
+            &elsewhere,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            20,
+            true,
         )),
         "trusted target",
     );
@@ -365,23 +406,42 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
 fn close_observation_allows_only_the_requested_disappearance_and_verified_survivors() {
     let scenario = standard_scenario("horizontal-pair");
     let target = target_identity();
-    let preexisting = container_ids(&starting_snapshot().tree);
-    let foreign = ForeignWindows::record(&loaded_pair(&scenario), target.id).unwrap();
+    let preexisting_container_ids = container_ids(&starting_snapshot().tree);
+    let foreign = ForeignWindows::record(&loaded_pair_snapshot(&scenario), target.id).unwrap();
     let context = CleanupContext {
         package: None,
         foreign: &foreign,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
     };
-    let before = loaded_pair(&scenario);
-    let baseline = signature(before.focused_workspace());
-    let owned = accepted(&[(20, "window1"), (21, "window2")]);
-    let plan = prepare_close(&before, &context, &owned, &baseline, 20, true).unwrap();
-    assert!(!verify_close_observation(&before, &context, &owned, &plan, &baseline, 20).unwrap());
+    let before = loaded_pair_snapshot(&scenario);
+    let workspace_baseline = signature(before.focused_workspace());
+    let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
+    let close_plan = prepare_close(
+        &before,
+        &context,
+        &owned_windows,
+        &workspace_baseline,
+        20,
+        true,
+    )
+    .unwrap();
+
+    assert!(
+        !verify_close_observation(
+            &before,
+            &context,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
+            20
+        )
+        .unwrap()
+    );
 
     let survivor = || {
-        let mut snapshot = observed(
+        let mut snapshot = recorded_snapshot(
             desktop(
                 "splith",
                 vec![wayland_window(
@@ -400,7 +460,17 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         ];
         snapshot
     };
-    assert!(verify_close_observation(&survivor(), &context, &owned, &plan, &baseline, 20).unwrap());
+    assert!(
+        verify_close_observation(
+            &survivor(),
+            &context,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
+            20
+        )
+        .unwrap()
+    );
 
     let mut unexpected_event = survivor();
     unexpected_event
@@ -410,9 +480,9 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         &uncertain_message(verify_close_observation(
             &unexpected_event,
             &context,
-            &owned,
-            &plan,
-            &baseline,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
             20,
         )),
         "unexpected window activity",
@@ -424,15 +494,15 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         &uncertain_message(verify_close_observation(
             &changed_hierarchy,
             &context,
-            &owned,
-            &plan,
-            &baseline,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
             20,
         )),
         "cleanup hierarchy changed",
     );
 
-    let mut changed_while_waiting = loaded_pair(&scenario);
+    let mut changed_while_waiting = loaded_pair_snapshot(&scenario);
     changed_while_waiting.tree.nodes[1].nodes[1].nodes[0]
         .rect
         .width -= 1;
@@ -440,9 +510,9 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         &uncertain_message(verify_close_observation(
             &changed_while_waiting,
             &context,
-            &owned,
-            &plan,
-            &baseline,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
             20,
         )),
         "while waiting for close",
@@ -453,24 +523,31 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
     // A fresh fence consumes the previous close/focus history before another close.
     let mut before_last = before_last;
     before_last.window_events.clear();
-    let last = prepare_close(
+    let final_close_plan = prepare_close(
         &before_last,
         &context,
-        &plan.remaining,
+        &close_plan.remaining,
         &last_baseline,
         21,
         true,
     )
     .unwrap();
-    let mut empty = observed(
+    let mut empty = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
     );
     empty.window_events.push(window_event("close", 21, None));
     assert!(
-        verify_close_observation(&empty, &context, &plan.remaining, &last, &last_baseline, 21)
-            .unwrap()
+        verify_close_observation(
+            &empty,
+            &context,
+            &close_plan.remaining,
+            &final_close_plan,
+            &last_baseline,
+            21
+        )
+        .unwrap()
     );
 }
 
@@ -478,11 +555,12 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
 fn restoration_requires_exact_original_identity_and_trusted_disposable_focus() {
     let original = original_identity();
     let target = target_identity();
-    let mut snapshot = observed(
+    let mut snapshot = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
     );
+
     assert!(controls_target(true, Some(&target), &target));
     assert!(!controls_target(false, Some(&target), &target));
     assert!(!controls_target(true, Some(&original), &target));
@@ -538,6 +616,7 @@ fn temporary_yaml_is_private_replaced_safely_and_automatically_removed() {
     let test_id = format!("{RUN_ID}-{}-private-yaml", std::process::id());
     let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
     let path = directory.path.clone();
+
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o700
@@ -583,6 +662,7 @@ fn foot_and_sleep_keep_their_path_names_through_symlinks() {
     let search_path = env::join_paths([&not_executable, &multicall]).unwrap();
 
     let sleep = unresolved_executable_text("sleep", &search_path).unwrap();
+
     assert_eq!(sleep, multicall.join("sleep").to_str().unwrap());
 
     let missing_target = unresolved_executable_text("foot", &search_path).unwrap_err();
@@ -596,6 +676,7 @@ fn foot_and_sleep_keep_their_path_names_through_symlinks() {
 fn private_process_directory_refuses_existing_entries_and_missing_parents() {
     let test_id = format!("{RUN_ID}-{}-process-cwd", std::process::id());
     let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
+
     assert!(TemporaryConfigurations::new(&directory.path.join("missing"), "nested").is_err());
     directory.create_process_cwd().unwrap();
     assert_eq!(
@@ -635,8 +716,8 @@ fn occupied_diagnostic() -> String {
 #[test]
 fn occupied_refusal_requires_the_specific_prelaunch_error_and_unchanged_desktop() {
     let scenario = standard_scenario("occupied-workspace-refusal");
-    let before = loaded_pair(&scenario);
-    let after = loaded_pair(&scenario);
+    let before = loaded_pair_snapshot(&scenario);
+    let after = loaded_pair_snapshot(&scenario);
     verify_refusal(
         &refused_output(1, &occupied_diagnostic()),
         &before,
@@ -677,7 +758,7 @@ fn occupied_refusal_requires_the_specific_prelaunch_error_and_unchanged_desktop(
 #[test]
 fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geometry() {
     let scenario = standard_scenario("occupied-workspace-refusal");
-    let before = loaded_pair(&scenario);
+    let before = loaded_pair_snapshot(&scenario);
     let output = refused_output(1, &occupied_diagnostic());
     for mutation in [
         "new",
@@ -688,7 +769,7 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
         "focus",
         "foreign-geometry",
     ] {
-        let mut after = loaded_pair(&scenario);
+        let mut after = loaded_pair_snapshot(&scenario);
         let workspace = &mut after.tree.nodes[1].nodes[1];
         match mutation {
             "new" => {
@@ -723,7 +804,7 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
         "floating",
         "fullscreen_mode",
     ] {
-        let mut after = loaded_pair(&scenario);
+        let mut after = loaded_pair_snapshot(&scenario);
         after.window_events.push(window_event(change, 99, None));
         assert_contains(
             &uncertain_message(verify_refusal(&output, &before, &after, false)),
@@ -735,6 +816,7 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
 #[test]
 fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_cleanup() {
     use crate::fixtures::{FOOT, SLEEP};
+
     assert!(fixture_eligibility("9", "8").is_ok());
     assert!(fixture_eligibility("9", "9").is_err());
     assert!(fixture_eligibility("9", "8;kill").is_err());
@@ -742,13 +824,17 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
     // original, and differently named workspaces never become fixtures.
     assert!(preflight_eligibility(&starting_snapshot(), "1").is_err());
     assert!(
-        preflight_eligibility(&loaded_pair(&standard_scenario("horizontal-pair")), "9").is_err()
+        preflight_eligibility(
+            &loaded_pair_snapshot(&standard_scenario("horizontal-pair")),
+            "9"
+        )
+        .is_err()
     );
 
     let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
     let selector = selector_value(&scenario, "window1");
-    let preexisting = container_ids(&starting_snapshot().tree);
-    let mut loaded = observed(
+    let preexisting_container_ids = container_ids(&starting_snapshot().tree);
+    let mut loaded = recorded_snapshot(
         desktop(
             "splith",
             vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
@@ -761,45 +847,68 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
         window_event("new", 20, Some(&selector)),
         window_event("focus", 20, Some(&selector)),
     ];
-    let owned = bind_launches(&loaded.window_events, &scenario.layout, &preexisting).unwrap();
+    let owned_windows = bind_launches(
+        &loaded.window_events,
+        &scenario.layout,
+        &preexisting_container_ids,
+    )
+    .unwrap();
     verify_ownership(
         &loaded.tree,
         TARGET_WORKSPACE_ID,
         &scenario.layout,
-        &preexisting,
-        &owned,
+        &preexisting_container_ids,
+        &owned_windows,
     )
     .unwrap();
-    verify_layout(loaded.focused_workspace(), &scenario, &owned).unwrap();
+    verify_layout(loaded.focused_workspace(), &scenario, &owned_windows).unwrap();
     loaded.window_events.clear();
-    let baseline = signature(loaded.focused_workspace());
+    let workspace_baseline = signature(loaded.focused_workspace());
     let foreign = ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap();
     let target = target_identity();
     let context = CleanupContext {
         package: None,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
         foreign: &foreign,
     };
-    let plan = prepare_close(&loaded, &context, &owned, &baseline, 20, true).unwrap();
-    for closing_id in [PREEXISTING_WINDOW_ID, 99] {
+    let close_plan = prepare_close(
+        &loaded,
+        &context,
+        &owned_windows,
+        &workspace_baseline,
+        20,
+        true,
+    )
+    .unwrap();
+    for closing_window_id in [PREEXISTING_WINDOW_ID, 99] {
         uncertain_message(prepare_close(
-            &loaded, &context, &owned, &baseline, closing_id, true,
+            &loaded,
+            &context,
+            &owned_windows,
+            &workspace_baseline,
+            closing_window_id,
+            true,
         ));
     }
     uncertain_message(prepare_close(
         &loaded,
         &context,
         &AcceptedWindows::new(),
-        &baseline,
+        &workspace_baseline,
         20,
         true,
     ));
     uncertain_message(prepare_close(
-        &loaded, &context, &owned, &baseline, 20, false,
+        &loaded,
+        &context,
+        &owned_windows,
+        &workspace_baseline,
+        20,
+        false,
     ));
-    let mut changed_foreign = observed(
+    let mut changed_foreign = recorded_snapshot(
         desktop(
             "splith",
             vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
@@ -813,8 +922,8 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
         &uncertain_message(prepare_close(
             &changed_foreign,
             &context,
-            &owned,
-            &baseline,
+            &owned_windows,
+            &workspace_baseline,
             20,
             true,
         )),
@@ -824,18 +933,28 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
     uncertain_message(verify_close_observation(
         &changed_foreign,
         &context,
-        &owned,
-        &plan,
-        &baseline,
+        &owned_windows,
+        &close_plan,
+        &workspace_baseline,
         20,
     ));
-    let mut cleaned = observed(
+    let mut cleaned = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
     );
     cleaned.window_events.push(window_event("close", 20, None));
-    assert!(verify_close_observation(&cleaned, &context, &owned, &plan, &baseline, 20).unwrap());
+    assert!(
+        verify_close_observation(
+            &cleaned,
+            &context,
+            &owned_windows,
+            &close_plan,
+            &workspace_baseline,
+            20
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -870,24 +989,28 @@ fn fixture_creation_evidence_survives_expected_focus_changes_but_never_changed_s
             focus,
         )
     };
-    let loaded = observed(make_tree(20), "9", TARGET_WORKSPACE_ID);
-    let baseline = signature(loaded.focused_workspace());
+    let loaded = recorded_snapshot(make_tree(20), "9", TARGET_WORKSPACE_ID);
+    let workspace_baseline = signature(loaded.focused_workspace());
     let fixture = ForeignFixture {
         workspace: target_identity(),
         progress: ScenarioProgress {
             scenario,
             preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
-            accepted: accepted(&[(20, "window1")]),
+            accepted: accepted_windows(&[(20, "window1")]),
         },
         foreign: ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap(),
-        loaded_signature: Some(baseline.clone()),
+        loaded_signature: Some(workspace_baseline.clone()),
     };
-    let elsewhere = observed(make_tree(PREEXISTING_WINDOW_ID), "1", OTHER_WORKSPACE_ID);
-    verify_fixture_state(&elsewhere, &fixture, &baseline).unwrap();
-    verify_fixture_state(&loaded, &fixture, &baseline).unwrap();
-    let mut changed = observed(make_tree(20), "9", TARGET_WORKSPACE_ID);
+    let elsewhere = recorded_snapshot(make_tree(PREEXISTING_WINDOW_ID), "1", OTHER_WORKSPACE_ID);
+    verify_fixture_state(&elsewhere, &fixture, &workspace_baseline).unwrap();
+    verify_fixture_state(&loaded, &fixture, &workspace_baseline).unwrap();
+    let mut changed = recorded_snapshot(make_tree(20), "9", TARGET_WORKSPACE_ID);
     changed.tree.nodes[1].nodes[1].nodes[0].rect.height -= 1;
-    uncertain_message(verify_fixture_state(&changed, &fixture, &baseline));
+    uncertain_message(verify_fixture_state(
+        &changed,
+        &fixture,
+        &workspace_baseline,
+    ));
 }
 
 #[test]
@@ -904,6 +1027,7 @@ fn refusal_notification_stub_is_private_and_scoped_to_the_refusal_command() {
 
     let notification_bin = directory.path.join("refusal-notification-bin");
     let stub = notification_bin.join("notify-send");
+
     assert_eq!(fs::read(&stub).unwrap(), b"#!/bin/sh\nexit 0\n");
     for path in [&notification_bin, &stub] {
         assert_eq!(
@@ -944,15 +1068,15 @@ fn refusal_notification_stub_is_private_and_scoped_to_the_refusal_command() {
 #[test]
 fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evidence() {
     let scenario = standard_scenario("horizontal-pair");
-    let loaded = loaded_pair(&scenario);
+    let loaded = loaded_pair_snapshot(&scenario);
     let foreign = ForeignWindows::record(&loaded, TARGET_WORKSPACE_ID).unwrap();
     let make_progress = || ScenarioProgress {
         scenario: scenario.clone(),
         preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
-        accepted: accepted(&[(20, "window1"), (21, "window2")]),
+        accepted: accepted_windows(&[(20, "window1"), (21, "window2")]),
     };
     let empty = || {
-        observed(
+        recorded_snapshot(
             desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
             "9",
             TARGET_WORKSPACE_ID,
@@ -966,7 +1090,7 @@ fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evid
     changed_foreign.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1;
     // An incomplete cleanup (one survivor), unexpected history, or changed foreign
     // window cannot authorize the transition to another construction cycle.
-    let mut survivor = loaded_pair(&scenario);
+    let mut survivor = loaded_pair_snapshot(&scenario);
     survivor.tree.nodes[1].nodes[1].nodes.remove(0);
     for incomplete in [loaded, survivor, activity, changed_foreign] {
         let mut progress = make_progress();
@@ -978,7 +1102,7 @@ fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evid
         );
         assert_eq!(
             progress.accepted,
-            accepted(&[(20, "window1"), (21, "window2")])
+            accepted_windows(&[(20, "window1"), (21, "window2")])
         );
         assert!(progress.preexisting_ids.is_some());
         assert!(retired.is_empty());
@@ -988,6 +1112,7 @@ fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evid
     progress
         .prepare_replay(&empty(), &foreign, scenario, &mut retired)
         .unwrap();
+
     assert_eq!(retired, HashSet::from([20, 21]));
     assert!(progress.accepted.is_empty());
     assert!(progress.preexisting_ids.is_none());
@@ -996,15 +1121,15 @@ fn replay_transition_requires_clean_empty_preserved_state_before_discarding_evid
 #[test]
 fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() {
     let scenario = standard_scenario("horizontal-pair");
-    let first = loaded_pair(&scenario);
+    let first = loaded_pair_snapshot(&scenario);
     let target = target_identity();
     let foreign = ForeignWindows::record(&first, target.id).unwrap();
     let mut progress = ScenarioProgress {
         scenario: scenario.clone(),
         preexisting_ids: Some(container_ids(&starting_snapshot().tree)),
-        accepted: accepted(&[(20, "window1"), (21, "window2")]),
+        accepted: accepted_windows(&[(20, "window1"), (21, "window2")]),
     };
-    let first_baseline = signature(first.focused_workspace());
+    let first_workspace_baseline = signature(first.focused_workspace());
     let first_context = CleanupContext {
         package: None,
         target: &target,
@@ -1016,24 +1141,25 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
         &first,
         &first_context,
         &progress.accepted,
-        &first_baseline,
+        &first_workspace_baseline,
         20,
         true,
     )
     .unwrap();
+
     assert!(
         prepare_close(
             &first,
             &first_context,
             &progress.accepted,
-            &first_baseline,
+            &first_workspace_baseline,
             40,
             true
         )
         .is_err()
     );
 
-    let mut empty = observed(
+    let mut empty = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
@@ -1051,21 +1177,21 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
             rect(0, 0, 10, 10),
         )));
     progress.begin_cycle(&empty, &retired).unwrap();
-    let preexisting = progress.preexisting_ids.as_ref().unwrap();
-    assert!(preexisting.contains(&99));
-    assert!(preexisting.contains(&20) && preexisting.contains(&21));
+    let preexisting_container_ids = progress.preexisting_ids.as_ref().unwrap();
+    assert!(preexisting_container_ids.contains(&99));
+    assert!(preexisting_container_ids.contains(&20) && preexisting_container_ids.contains(&21));
     assert!(progress.accepted.is_empty());
 
-    let mut second = loaded_pair(&scenario);
+    let mut second = loaded_pair_snapshot(&scenario);
     second.tree.nodes[1].nodes[1].nodes[0].id = 40;
     second.tree.nodes[1].nodes[1].nodes[1].id = 41;
-    let second_baseline = signature(second.focused_workspace());
+    let second_workspace_baseline = signature(second.focused_workspace());
     let context = CleanupContext {
         package: None,
         target: &target,
         foreign: &foreign,
         layout: &scenario.layout,
-        preexisting_ids: preexisting,
+        preexisting_ids: preexisting_container_ids,
     };
     // Failed/incomplete second loads leave no accepted evidence, so no close is legal.
     assert!(
@@ -1073,7 +1199,7 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
             &second,
             &context,
             &progress.accepted,
-            &second_baseline,
+            &second_workspace_baseline,
             40,
             true
         )
@@ -1085,23 +1211,87 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
             window_event("new", second, None),
         ]
     };
-    assert!(bind_launches(&new_events(20, 21), &scenario.layout, preexisting).is_err());
-    assert!(bind_launches(&new_events(40, 99), &scenario.layout, preexisting).is_err());
-    assert!(bind_launches(&new_events(40, 40), &scenario.layout, preexisting).is_err());
-    let owned = bind_launches(&new_events(40, 41), &scenario.layout, preexisting).unwrap();
+    assert!(
+        bind_launches(
+            &new_events(20, 21),
+            &scenario.layout,
+            preexisting_container_ids
+        )
+        .is_err()
+    );
+    assert!(
+        bind_launches(
+            &new_events(40, 99),
+            &scenario.layout,
+            preexisting_container_ids
+        )
+        .is_err()
+    );
+    assert!(
+        bind_launches(
+            &new_events(40, 40),
+            &scenario.layout,
+            preexisting_container_ids
+        )
+        .is_err()
+    );
+    let owned_windows = bind_launches(
+        &new_events(40, 41),
+        &scenario.layout,
+        preexisting_container_ids,
+    )
+    .unwrap();
     verify_ownership(
         &second.tree,
         target.id,
         &scenario.layout,
-        preexisting,
-        &owned,
+        preexisting_container_ids,
+        &owned_windows,
     )
     .unwrap();
-    verify_layout(second.focused_workspace(), &scenario, &owned).unwrap();
-    prepare_close(&second, &context, &owned, &second_baseline, 40, true).unwrap();
-    assert!(prepare_close(&second, &context, &owned, &second_baseline, 20, true).is_err());
-    assert!(prepare_close(&second, &context, &owned, &second_baseline, 41, false).is_err());
-    assert!(prepare_close(&second, &context, &owned, &first_baseline, 40, true).is_err());
+    verify_layout(second.focused_workspace(), &scenario, &owned_windows).unwrap();
+    prepare_close(
+        &second,
+        &context,
+        &owned_windows,
+        &second_workspace_baseline,
+        40,
+        true,
+    )
+    .unwrap();
+    assert!(
+        prepare_close(
+            &second,
+            &context,
+            &owned_windows,
+            &second_workspace_baseline,
+            20,
+            true
+        )
+        .is_err()
+    );
+    assert!(
+        prepare_close(
+            &second,
+            &context,
+            &owned_windows,
+            &second_workspace_baseline,
+            41,
+            false
+        )
+        .is_err()
+    );
+    assert!(
+        prepare_close(
+            &second,
+            &context,
+            &owned_windows,
+            &first_workspace_baseline,
+            40,
+            true
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1191,6 +1381,7 @@ fn hiding_a_launcher_refuses_unverified_or_out_of_scope_files_before_capture() {
         .unwrap();
     let mut outside = fixture.clone();
     outside.path = directory.path.join("outside.desktop");
+
     assert!(
         directory
             .with_unavailable_launcher(&outside, || panic!("outside file"))
@@ -1240,6 +1431,7 @@ fn package_options_are_independent_and_require_extended() {
         assert_eq!(parsed.flatpak.is_some(), options.contains(&"--flatpak"));
     }
     let parsed = Arguments::try_parse_from(base).unwrap();
+
     assert!(parsed.appimage.is_none() && parsed.flatpak.is_none());
     for bad in ["--flatpak", "--appimage"] {
         let mut arguments = base.to_vec();
@@ -1253,18 +1445,18 @@ fn package_options_are_independent_and_require_extended() {
 
 #[test]
 fn dynamic_window_identity_without_package_provenance_cannot_authorize_cleanup() {
-    let before = observed(
+    let before = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
         TARGET_WORKSPACE_ID,
     );
     let foreign = ForeignWindows::record(&before, TARGET_WORKSPACE_ID).unwrap();
-    let preexisting = container_ids(&before.tree);
+    let preexisting_container_ids = container_ids(&before.tree);
     let scenario = packages::captured_scenario(
         packages::SCENARIOS[0],
         crate::scenarios::Selector::AppId("actual.app".into()),
     );
-    let loaded = observed(
+    let loaded = recorded_snapshot(
         desktop(
             "splith",
             vec![wayland_window(20, "actual.app", rect(0, 0, 1920, 1080))],
@@ -1278,16 +1470,17 @@ fn dynamic_window_identity_without_package_provenance_cannot_authorize_cleanup()
         package: None,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
         foreign: &foreign,
     };
-    let baseline = signature(loaded.focused_workspace());
+    let workspace_baseline = signature(loaded.focused_workspace());
+
     assert_contains(
         &uncertain_message(prepare_close(
             &loaded,
             &context,
-            &accepted(&[(20, "window1")]),
-            &baseline,
+            &accepted_windows(&[(20, "window1")]),
+            &workspace_baseline,
             20,
             true,
         )),
@@ -1300,36 +1493,51 @@ fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close(
     use crate::fixtures::mixed_native_desktop;
     let scenario = standard_scenario("mixed-capture-reload");
     let mut tree = mixed_native_desktop(&scenario);
-    let initial = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
+    let initial = recorded_snapshot(tree.clone(), "9", TARGET_WORKSPACE_ID);
     let target = target_identity();
     let foreign = ForeignWindows::record(&initial, target.id).unwrap();
-    let preexisting = container_ids(&starting_snapshot().tree);
+    let preexisting_container_ids = container_ids(&starting_snapshot().tree);
     let context = CleanupContext {
         package: None,
         target: &target,
         layout: &scenario.layout,
-        preexisting_ids: &preexisting,
+        preexisting_ids: &preexisting_container_ids,
         foreign: &foreign,
     };
-    let mut remaining = accepted(&[
+    let mut remaining = accepted_windows(&[
         (20, "window1"),
         (21, "window2"),
         (22, "window3"),
         (23, "window4"),
     ]);
     verify_layout(initial.focused_workspace(), &scenario, &remaining).unwrap();
-    let mut baseline = signature(initial.focused_workspace());
-    for closing_id in 20..=23 {
-        let before = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
-        let plan =
-            prepare_close(&before, &context, &remaining, &baseline, closing_id, true).unwrap();
+    let mut workspace_baseline = signature(initial.focused_workspace());
+    for closing_window_id in 20..=23 {
+        let before = recorded_snapshot(tree.clone(), "9", TARGET_WORKSPACE_ID);
+        let close_plan = prepare_close(
+            &before,
+            &context,
+            &remaining,
+            &workspace_baseline,
+            closing_window_id,
+            true,
+        )
+        .unwrap();
         // A foreign/preexisting window and group IDs never authorize a close.
         for unowned_id in [PREEXISTING_WINDOW_ID, 31, 32, 99] {
             assert!(
-                prepare_close(&before, &context, &remaining, &baseline, unowned_id, true).is_err()
+                prepare_close(
+                    &before,
+                    &context,
+                    &remaining,
+                    &workspace_baseline,
+                    unowned_id,
+                    true
+                )
+                .is_err()
             );
         }
-        match closing_id {
+        match closing_window_id {
             20 => {
                 node_mut(&mut tree, 31)["nodes"]
                     .as_array_mut()
@@ -1357,35 +1565,47 @@ fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close(
             }
             _ => unreachable!(),
         }
-        let focused_id = if closing_id < 22 {
+        let focused_container_id = if closing_window_id < 22 {
             22
-        } else if closing_id == 22 {
+        } else if closing_window_id == 22 {
             23
         } else {
             TARGET_WORKSPACE_ID
         };
-        crate::fixtures::set_focus(&mut tree, focused_id);
-        let mut after = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
+        crate::fixtures::set_focus(&mut tree, focused_container_id);
+        let mut after = recorded_snapshot(tree.clone(), "9", TARGET_WORKSPACE_ID);
         after
             .window_events
-            .push(window_event("close", closing_id, None));
+            .push(window_event("close", closing_window_id, None));
         assert!(
-            verify_close_observation(&after, &context, &remaining, &plan, &baseline, closing_id)
-                .unwrap()
+            verify_close_observation(
+                &after,
+                &context,
+                &remaining,
+                &close_plan,
+                &workspace_baseline,
+                closing_window_id
+            )
+            .unwrap()
         );
 
-        if closing_id == 20 {
+        if closing_window_id == 20 {
             // A compositor that flattened the surviving tab group is not compatible.
             let mut flattened = tree.clone();
             let row = node_mut(&mut flattened, 31)["nodes"][0].take();
             node_mut(&mut flattened, TARGET_WORKSPACE_ID)["nodes"][0] = row;
-            let mut changed = observed(flattened, "9", TARGET_WORKSPACE_ID);
+            let mut changed = recorded_snapshot(flattened, "9", TARGET_WORKSPACE_ID);
             changed
                 .window_events
-                .push(window_event("close", closing_id, None));
+                .push(window_event("close", closing_window_id, None));
             assert_contains(
                 &uncertain_message(verify_close_observation(
-                    &changed, &context, &remaining, &plan, &baseline, closing_id,
+                    &changed,
+                    &context,
+                    &remaining,
+                    &close_plan,
+                    &workspace_baseline,
+                    closing_window_id,
                 )),
                 "cleanup hierarchy changed",
             );
@@ -1393,20 +1613,26 @@ fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close(
             for replacement in [json!("stacked"), json!("splith")] {
                 let mut changed_tree = tree.clone();
                 node_mut(&mut changed_tree, 31)["layout"] = replacement;
-                let mut changed = observed(changed_tree, "9", TARGET_WORKSPACE_ID);
+                let mut changed = recorded_snapshot(changed_tree, "9", TARGET_WORKSPACE_ID);
                 changed
                     .window_events
-                    .push(window_event("close", closing_id, None));
+                    .push(window_event("close", closing_window_id, None));
                 assert!(
                     verify_close_observation(
-                        &changed, &context, &remaining, &plan, &baseline, closing_id
+                        &changed,
+                        &context,
+                        &remaining,
+                        &close_plan,
+                        &workspace_baseline,
+                        closing_window_id
                     )
                     .is_err()
                 );
             }
         }
-        remaining = plan.remaining;
-        baseline = signature(after.focused_workspace());
+        remaining = close_plan.remaining;
+        workspace_baseline = signature(after.focused_workspace());
     }
+
     assert!(remaining.is_empty());
 }
