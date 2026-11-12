@@ -81,7 +81,10 @@ drafts, not executable session restorations.
 ## Documentation
 
 - [User reference](docs/SPECIFICATION.md): YAML, capture workflow, menu, safety, troubleshooting.
-- [Examples](examples): single-window, two-window, and nested layouts to adapt.
+- Reference configurations to adapt to your applications and directories:
+  [two terminals](examples/two-foot.yaml), [nested splits](examples/four-windows.yaml),
+  [mixed native groups](examples/mixed-groups.yaml), and
+  [working-directory selection](examples/working-directory.yaml).
 - [Development](docs/DEVELOPMENT.md): offline checks and user-only manual testing.
 - [Roadmap](docs/PLAN.md): remaining release work.
 - [Agent instructions](AGENTS.md): engineering and safety requirements.

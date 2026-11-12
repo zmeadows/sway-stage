@@ -37,9 +37,10 @@ no YAML. An output-stream failure can still interrupt delivery.
 
 ## YAML format, version 1
 
-See [`examples/four-windows.yaml`](../examples/four-windows.yaml) for a complete Firefox
-and three-terminal layout. Each file contains one UTF-8 YAML document with these
-top-level keys:
+See [`examples/four-windows.yaml`](../examples/four-windows.yaml) for nested splits,
+[`mixed-groups.yaml`](../examples/mixed-groups.yaml) for tabbed and stacked groups, and
+[`working-directory.yaml`](../examples/working-directory.yaml) for directory selection.
+Each file contains one UTF-8 YAML document with these top-level keys:
 
 | Key | Contract |
 | --- | --- |

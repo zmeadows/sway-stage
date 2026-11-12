@@ -1,9 +1,0 @@
-# Single-window load example. See ../docs/SPECIFICATION.md for the YAML contract.
-# Run manually on an empty disposable Sway workspace; requires Foot in the child PATH.
-version: 1
-window_timeout_ms: 20000
-layout:
-  id: terminal
-  command: [foot, --app-id=sway-stage-single-foot]
-  match:
-    app_id: sway-stage-single-foot

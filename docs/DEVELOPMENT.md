@@ -411,7 +411,7 @@ workspace, allow time to focus an empty target:
 sleep 5; ./target/release/sway-stage --layouts-dir examples load four-windows
 ```
 
-Keep that target focused until exit. `single-foot` opens one terminal; `two-foot` opens equal
+Keep that target focused until exit. `two-foot` opens equal
 columns with left focus; `four-windows` launches browser, middle terminal, upper-right,
 then lower-right, with width ratios 44:32:24, right heights 77:23, and browser focus.
 Expect exit 0 without stdout, proportions near 1 percentage point of target, and warnings

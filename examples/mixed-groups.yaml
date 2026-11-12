@@ -1,0 +1,39 @@
+# Browser/reference tabs beside a shell above stacked task terminals; requires Firefox and Foot.
+# Adapt Firefox's executable and exact app_id to your installation (or use class for Xwayland).
+# See ../docs/SPECIFICATION.md for the configuration contract.
+version: 1
+focus: tasks # Selects the second child of the stacked group at completion.
+layout:
+  group: splith
+  children:
+    - group: tabbed
+      weight: 3 # The whole tabbed group gets 3/5 of the width.
+      # Direct children of tabbed and stacked groups must omit weight.
+      children:
+        - id: browser
+          command: [firefox, --new-window]
+          match:
+            app_id: firefox
+        - id: reference
+          command: [foot, --app-id=sway-stage-reference]
+          match:
+            app_id: sway-stage-reference
+    - group: splitv
+      weight: 2
+      children:
+        - id: shell
+          weight: 2
+          command: [foot, --app-id=sway-stage-shell]
+          match:
+            app_id: sway-stage-shell
+        - group: stacked
+          weight: 1 # The stacked group gets 1/3 of this column's height.
+          children:
+            - id: build
+              command: [foot, --app-id=sway-stage-build]
+              match:
+                app_id: sway-stage-build
+            - id: tasks
+              command: [foot, --app-id=sway-stage-tasks]
+              match:
+                app_id: sway-stage-tasks

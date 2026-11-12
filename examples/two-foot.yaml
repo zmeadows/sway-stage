@@ -1,4 +1,5 @@
-# See docs/SPECIFICATION.md. Equal widths; final focus defaults to the left window.
+# Minimal splith layout; requires Foot. Distinct --app-id values match each new terminal.
+# Equal widths; final focus defaults to the left window. See ../docs/SPECIFICATION.md.
 version: 1
 layout:
   group: splith

@@ -1,0 +1,26 @@
+# Reusable project terminals; requires Foot. See ../docs/SPECIFICATION.md.
+# Customize ~/projects to an existing directory containing the desired project subdirectories.
+version: 1
+cwd: ~/projects
+# sway-stage menu offers a picker for immediate child directories of cwd.
+# Direct load uses cwd as configured unless --cwd PATH overrides it; it never prompts.
+cwd_select: true
+focus: shell
+layout:
+  group: splith
+  children:
+    # Both project terminals inherit the selected directory (or the load default).
+    - id: shell
+      command: [foot, --app-id=sway-stage-project-shell]
+      match:
+        app_id: sway-stage-project-shell
+    - id: tools
+      command: [foot, --app-id=sway-stage-project-tools]
+      match:
+        app_id: sway-stage-project-tools
+    - id: home
+      # This window stays in your home directory, overriding the picker and --cwd.
+      cwd: ~/
+      command: [foot, --app-id=sway-stage-home]
+      match:
+        app_id: sway-stage-home
