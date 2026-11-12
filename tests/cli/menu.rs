@@ -114,6 +114,21 @@ fn assert_log_preserved(fixture: &CliFixture) {
     );
 }
 
+fn assert_preload_notification(fixture: &CliFixture, expected_body: &str) {
+    let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+    assert!(
+        notification.ends_with(&format!("\n{expected_body}\n")),
+        "{notification}"
+    );
+    assert!(!notification.contains("last-run.log"), "{notification}");
+    assert!(
+        !notification.contains(fixture.path.to_str().unwrap()),
+        "{notification}"
+    );
+    assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
+    assert_log_preserved(fixture);
+}
+
 pub(super) fn capture_tree() -> Value {
     let mut window = sway_node(20, "con", 1920, vec![]);
     window["shell"] = json!("xdg_shell");
@@ -242,7 +257,10 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         assert!(stderr.contains(expected), "{stderr}");
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(notification.contains("sway-stage menu failed"));
-        assert_log_preserved(&fixture);
+        assert_preload_notification(
+            &fixture,
+            "Fuzzel did not return a valid choice. Check its configuration and use dmenu text output.",
+        );
         assert!(!fixture.path.join(".config").exists());
     }
 
@@ -253,7 +271,10 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("start Fuzzel"));
-    assert_log_preserved(&fixture);
+    assert_preload_notification(
+        &fixture,
+        "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable.",
+    );
 }
 
 #[test]
@@ -279,6 +300,10 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
         assert!(!log.contains("previous launch"));
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(notification.contains("sway-stage menu failed"));
+        assert!(
+            notification
+                .contains("Unable to communicate with Sway.\n\nSee last-run.log for details.")
+        );
         assert!(!fixture.path.join("name-opened").exists());
     }
 }
@@ -651,6 +676,10 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
             let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
             assert!(notification.contains("sway-stage menu failed"));
             assert!(!notification.contains("command:"));
+            assert_preload_notification(
+                &fixture,
+                "Could not save the captured layout. Check the layouts directory, permissions, and available storage.",
+            );
         } else {
             assert!(!fixture.path.join("notification").exists());
         }
@@ -1016,6 +1045,10 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
         );
         assert_log_preserved(&fixture);
         assert!(!fixture.path.join("name-opened").exists());
+        if expected.is_empty() {
+            assert!(output.stderr.is_empty());
+            assert!(!fixture.path.join("notification").exists());
+        }
     }
 }
 
@@ -1056,6 +1089,10 @@ fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
         assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
         if remove_before_prompt {
             assert!(stderr.contains("no selectable directories"), "{stderr}");
+            assert_preload_notification(
+                &fixture,
+                "No selectable directories found under the configured working directory.",
+            );
             assert!(!fixture.path.join("directories").exists());
             assert_log_preserved(&fixture);
         } else {
@@ -1071,7 +1108,7 @@ fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
 }
 
 #[test]
-fn directory_selection_reaches_child_launch_with_window_override_precedence() {
+fn successful_menu_load_is_silent_and_preserves_window_directory_precedence() {
     for window_override in [false, true] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -1118,9 +1155,19 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
             let mut events = accept();
             assert_eq!(read_ipc_message(&mut events).0, 2);
             write_ipc_message(&mut events, 2, &json!({"success": true}));
-            // Initial and immediately-before-launch snapshots. Any layout mutation
-            // instead of these read-only requests fails the fixture.
-            for _ in 0..2 {
+            let mut populated = capture_tree();
+            populated["nodes"][0]["nodes"][0]["nodes"][0]["app_id"] = json!("t");
+            // Initial/prelaunch emptiness, two acceptance observations, then the
+            // final focus command's before/after observations. All windows are recorded.
+            for snapshot_index in 0..6 {
+                if snapshot_index == 5 {
+                    let mut command = accept();
+                    let (kind, payload) = read_ipc_message(&mut command);
+                    assert_eq!(kind, 0);
+                    assert_eq!(String::from_utf8(payload).unwrap(), "[con_id=20] focus");
+                    write_ipc_message(&mut command, 0, &json!([{"success": true}]));
+                }
+
                 let mut query = accept();
                 assert_eq!(read_ipc_message(&mut query).0, 1);
                 write_ipc_message(
@@ -1133,7 +1180,12 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
                     }]),
                 );
                 assert_eq!(read_ipc_message(&mut query).0, 4);
-                write_ipc_message(&mut query, 4, &empty);
+                let tree = if snapshot_index < 2 {
+                    &empty
+                } else {
+                    &populated
+                };
+                write_ipc_message(&mut query, 4, tree);
                 let (kind, token) = read_ipc_message(&mut query);
                 assert_eq!(kind, 10);
                 write_ipc_message(
@@ -1143,10 +1195,7 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
                 );
                 write_ipc_message(&mut query, 10, &json!({"success": true}));
             }
-            // The harmless fixture child creates no window. Disconnect at observation
-            // after launch; construction must stop without issuing any mutation.
-            let mut query = accept();
-            assert_eq!(read_ipc_message(&mut query).0, 1);
+            assert_eq!(events.read(&mut [0]).unwrap(), 0);
         });
         let output = menu_command(&fixture, "writing\n", "")
             .env("SWAYSOCK", &socket)
@@ -1154,7 +1203,14 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
             .output()
             .unwrap();
         server.join().unwrap();
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        assert!(!fixture.path.join("notification").exists());
+        let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+        assert!(log.contains("final focus verified"), "{log}");
         let expected = fixture.path.join(if window_override {
             "override"
         } else {
@@ -1187,8 +1243,10 @@ fn empty_workspace_without_layouts_reports_an_error_without_fuzzel() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("no layouts available"));
     assert!(!fixture.path.join("arguments").exists());
-    assert!(fixture.path.join("notification").exists());
-    assert_log_preserved(&fixture);
+    assert_preload_notification(
+        &fixture,
+        "No saved layouts found. Add a YAML file to your layouts directory.",
+    );
 }
 
 #[test]
@@ -1274,7 +1332,9 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
             "{output:?}"
         );
         assert!(!fixture.path.join("arguments").exists());
-        assert!(fixture.path.join("notification").exists());
-        assert_log_preserved(&fixture);
+        assert_preload_notification(
+            &fixture,
+            "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus.",
+        );
     }
 }

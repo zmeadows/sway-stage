@@ -12,16 +12,51 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // Leave room for the five-byte .yaml suffix within Linux's usual 255-byte component limit.
 const MAX_DRAFT_NAME_BYTES: usize = 250;
 
+/// Pre-load failures carry a notification category separately from technical diagnostics.
+#[derive(Debug)]
+pub struct Error {
+    pub kind: FailureKind,
+    pub detail: String,
+}
+
+#[derive(Debug)]
+pub enum FailureKind {
+    Snapshot,
+    LayoutDiscovery,
+    NoLayouts,
+    Capture,
+    FuzzelStart,
+    FuzzelResponse,
+    DraftSave,
+    DirectoryRead,
+    NoDirectories,
+}
+
+impl Error {
+    pub fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
 pub fn select_layout(
     layouts_dir: Option<PathBuf>,
     output_name: Option<&str>,
-) -> Result<Option<String>, String> {
-    let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
-    let layouts = directory.discover()?;
+) -> Result<Option<String>, Error> {
+    let directory = discovery::LayoutDirectory::resolve(layouts_dir)
+        .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
+    let layouts = directory
+        .discover()
+        .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
     if layouts.is_empty() {
-        return Err(format!(
-            "no layouts available in {}; add a layout before loading",
-            directory.path.display()
+        return Err(Error::new(
+            FailureKind::NoLayouts,
+            format!(
+                "no layouts available in {}; add a layout before loading",
+                directory.path.display()
+            ),
         ));
     }
 
@@ -42,17 +77,17 @@ pub fn select_layout(
     };
 
     if !layouts.contains_key(&selection) {
-        return Err(
-            "selection: Fuzzel returned an option that was not offered; use dmenu text output"
-                .into(),
-        );
+        return Err(Error::new(
+            FailureKind::FuzzelResponse,
+            "selection: Fuzzel returned an option that was not offered; use dmenu text output",
+        ));
     }
 
     Ok(Some(selection))
 }
 
 /// Names and paths stay paired: typed Fuzzel input never becomes a filesystem path.
-pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option<PathBuf>, String> {
+pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option<PathBuf>, Error> {
     let choices = directory_choices(root)?;
     let input = choices
         .iter()
@@ -66,19 +101,31 @@ pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option
     let (_, directory) = choices
         .into_iter()
         .find(|(name, _)| name == &selection)
-        .ok_or("directory selection: Fuzzel returned a name that was not offered")?;
+        .ok_or_else(|| {
+            Error::new(
+                FailureKind::FuzzelResponse,
+                "directory selection: Fuzzel returned a name that was not offered",
+            )
+        })?;
     Ok(Some(directory))
 }
 
-fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
-    let entries = fs::read_dir(root)
-        .map_err(|error| format!("read project directory {}: {error}", root.display()))?;
+fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
+    let entries = fs::read_dir(root).map_err(|error| {
+        Error::new(
+            FailureKind::DirectoryRead,
+            format!("read project directory {}: {error}", root.display()),
+        )
+    })?;
     let mut choices = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
-            format!(
-                "read entry in project directory {}: {error}",
-                root.display()
+            Error::new(
+                FailureKind::DirectoryRead,
+                format!(
+                    "read entry in project directory {}: {error}",
+                    root.display()
+                ),
             )
         })?;
 
@@ -91,9 +138,12 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
         }
 
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("inspect project entry {}: {error}", path.display()))?;
+        let file_type = entry.file_type().map_err(|error| {
+            Error::new(
+                FailureKind::DirectoryRead,
+                format!("inspect project entry {}: {error}", path.display()),
+            )
+        })?;
         // Follow directory symlinks, including external targets; ignore unusable links.
         let is_directory = file_type.is_dir() || (file_type.is_symlink() && path.is_dir());
         if is_directory {
@@ -103,7 +153,10 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 
     choices.sort_by(|left, right| left.0.cmp(&right.0));
     if choices.is_empty() {
-        return Err(format!("no selectable directories in {}", root.display()));
+        return Err(Error::new(
+            FailureKind::NoDirectories,
+            format!("no selectable directories in {}", root.display()),
+        ));
     }
 
     Ok(choices)
@@ -115,11 +168,11 @@ pub fn capture_draft(
     snapshot: &capture::Snapshot,
     layouts_dir: Option<PathBuf>,
     infer_commands: bool,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Render the pre-menu state without querying Sway again.
     let draft = snapshot
         .render(infer_commands)
-        .map_err(|error| format!("capture: {error}"))?;
+        .map_err(|error| Error::new(FailureKind::Capture, format!("capture: {error}")))?;
     let mut placeholder = None;
     loop {
         let Some(name) = fuzzel(
@@ -132,7 +185,8 @@ pub fn capture_draft(
             return Ok(());
         };
 
-        let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir.clone())?;
+        let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir.clone())
+            .map_err(|error| Error::new(FailureKind::DraftSave, error))?;
         match save_draft(&layouts_directory.path, &name, &draft.yaml) {
             Ok(path) => {
                 diagnostics::notify_draft_saved(&path, &draft.commands);
@@ -141,7 +195,7 @@ pub fn capture_draft(
             Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {
                 placeholder = Some(name_error_placeholder(&name, &error));
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(Error::new(FailureKind::DraftSave, error.to_string())),
         }
     }
 }
@@ -153,7 +207,7 @@ fn fuzzel(
     input: Option<&str>,
     output_name: Option<&str>,
     placeholder: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, Error> {
     let mut command = Command::new("fuzzel");
     command.args(["--dmenu", "--no-exit-on-keyboard-focus-loss"]);
     if input.is_some() {
@@ -167,7 +221,7 @@ fn fuzzel(
         command.arg("--placeholder").arg(placeholder);
     }
 
-    let mut fuzzel_process = command
+    let fuzzel_process = command
         .arg(prompt)
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -176,8 +230,21 @@ fn fuzzel(
         })
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("start Fuzzel: {error}; install Fuzzel 1.11 or newer on PATH"))?;
+        .map_err(|error| {
+            Error::new(
+                FailureKind::FuzzelStart,
+                format!("start Fuzzel: {error}; install Fuzzel 1.11 or newer on PATH"),
+            )
+        })?;
 
+    read_fuzzel_response(fuzzel_process, input)
+        .map_err(|error| Error::new(FailureKind::FuzzelResponse, error))
+}
+
+fn read_fuzzel_response(
+    mut fuzzel_process: std::process::Child,
+    input: Option<&str>,
+) -> Result<Option<String>, String> {
     // Read stdout while feeding stdin: a large layout list must not deadlock if Fuzzel
     // returns a selection before consuming all the options. Always close stdin and reap.
     let (output_result, write_options_result) = std::thread::scope(|scope| {
@@ -447,7 +514,7 @@ mod tests {
             directory.directory_path.join("file"),
         ] {
             fs::write(directory.directory_path.join("file"), "not a directory").unwrap();
-            let error = directory_choices(&root).unwrap_err();
+            let error = directory_choices(&root).unwrap_err().detail;
             assert!(error.contains("read project directory"), "{error}");
             assert!(error.contains(root.to_str().unwrap()), "{error}");
         }

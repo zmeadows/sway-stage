@@ -469,8 +469,10 @@ notifications through `notify-send`. Sizing warnings also notify. Missing notifi
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
 notification refers to `last-run.log` only when logging remains available for that attempt.
-Successful loads do not notify; saved menu captures retain their save confirmation.
-Cancellation does not notify.
+Pre-load menu failures identify missing layouts, unavailable capture, Fuzzel problems,
+save failures, or working-directory selection problems without exposing paths or technical
+error chains. Successful loads do not notify; saved menu captures retain their save
+confirmation. Cancellation does not notify.
 
 Each load attempt, including a menu Load selection, replaces the private launch log at
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to

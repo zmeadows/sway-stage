@@ -209,14 +209,21 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
 }
 
 fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {
-    let snapshot = capture::snapshot()
-        .map_err(|error| report_menu_failure(format!("pre-menu workspace snapshot: {error}")))?;
+    let snapshot = capture::snapshot().map_err(|error| {
+        report_menu_failure(menu::Error::new(
+            menu::FailureKind::Snapshot,
+            format!("pre-menu workspace snapshot: {error}"),
+        ))
+    })?;
 
     if !snapshot.workspace_is_empty() {
         // Validate the saved arrangement without reading process arguments.
-        snapshot
-            .render(false)
-            .map_err(|error| report_menu_failure(format!("capture unavailable: {error}")))?;
+        snapshot.render(false).map_err(|error| {
+            report_menu_failure(menu::Error::new(
+                menu::FailureKind::Capture,
+                format!("capture unavailable: {error}"),
+            ))
+        })?;
 
         return menu::capture_draft(&snapshot, layouts_dir, infer_commands)
             .map_err(report_menu_failure);
@@ -261,7 +268,7 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
     .map_err(|error| diagnostics.report_failure(error))
 }
 
-fn report_menu_failure(error: String) -> String {
-    let _ = diagnostics::notify_failure("menu", &error);
-    format!("menu: {error}")
+fn report_menu_failure(error: menu::Error) -> String {
+    let _ = diagnostics::notify_menu_failure(&error);
+    format!("menu: {}", error.detail)
 }

@@ -2,7 +2,7 @@
 //!
 //! `last-run.log` is reserved for layout launches: only `Diagnostics::start` creates or
 //! replaces it. Operations that never load a selected layout report through
-//! `notify_failure`, which leaves the previous launch's log in place.
+//! `notify_failure` or `notify_menu_failure`, leaving the previous launch's log in place.
 
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -145,6 +145,44 @@ impl Diagnostics {
 /// returned, and the caller still reports `message` as the primary error.
 pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
     send_failure_notification(operation, &failure_body(operation, message, "", false))
+}
+
+/// Menu preparation never creates a launch log, so these summaries never offer one.
+pub fn notify_menu_failure(error: &crate::menu::Error) -> Result<(), String> {
+    send_failure_notification("menu", &menu_failure_body(error))
+}
+
+fn menu_failure_body(error: &crate::menu::Error) -> String {
+    use crate::menu::FailureKind;
+
+    let summary = match error.kind {
+        FailureKind::Snapshot => return failure_body("menu", &error.detail, "", false),
+        FailureKind::LayoutDiscovery => {
+            "Cannot list saved layouts. Check the layouts directory and filenames."
+        }
+        FailureKind::NoLayouts => {
+            "No saved layouts found. Add a YAML file to your layouts directory."
+        }
+        FailureKind::Capture => {
+            "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus."
+        }
+        FailureKind::FuzzelStart => {
+            "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable."
+        }
+        FailureKind::FuzzelResponse => {
+            "Fuzzel did not return a valid choice. Check its configuration and use dmenu text output."
+        }
+        FailureKind::DraftSave => {
+            "Could not save the captured layout. Check the layouts directory, permissions, and available storage."
+        }
+        FailureKind::DirectoryRead => {
+            "Cannot list working directories. Check the configured working directory and its permissions."
+        }
+        FailureKind::NoDirectories => {
+            "No selectable directories found under the configured working directory."
+        }
+    };
+    summary.to_owned()
 }
 
 fn send_failure_notification(operation: &str, message: &str) -> Result<(), String> {
@@ -398,6 +436,32 @@ mod tests {
             ),
             "Unable to capture the workspace. See terminal output for details."
         );
+    }
+
+    #[test]
+    fn menu_notifications_do_not_copy_untrusted_details_or_offer_an_old_log() {
+        use crate::menu::{Error, FailureKind};
+
+        let untrusted_detail = format!("/private/{}<b>secret</b>", "x".repeat(10000));
+        for kind in [
+            FailureKind::Snapshot,
+            FailureKind::LayoutDiscovery,
+            FailureKind::NoLayouts,
+            FailureKind::Capture,
+            FailureKind::FuzzelStart,
+            FailureKind::FuzzelResponse,
+            FailureKind::DraftSave,
+            FailureKind::DirectoryRead,
+            FailureKind::NoDirectories,
+        ] {
+            let error = Error::new(kind, untrusted_detail.clone());
+            let body = menu_failure_body(&error);
+            assert!(body.len() < 160, "{body}");
+            assert!(!body.contains("private"), "{body}");
+            assert!(!body.contains("secret"), "{body}");
+            assert!(!body.contains("last-run.log"), "{body}");
+            assert_eq!(error.detail, untrusted_detail);
+        }
     }
 
     #[test]
