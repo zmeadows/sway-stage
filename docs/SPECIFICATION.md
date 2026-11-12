@@ -382,23 +382,25 @@ snapshot is saved **before the first prompt**. Choices depend on the actual focu
 workspace in that snapshot, never its name or number:
 
 - **Empty:** both tiled and floating child lists must be empty, exactly as for loading.
-  Even an empty structural container counts as occupancy. Offer only discovered
-  `Load: NAME` entries in lexical order. If no layouts exist, report an error without
-  opening Fuzzel. Discovery does not parse files or imply that individual layouts are valid.
-- **Populated and capturable:** offer only `Capture current layout…`, after validating
-  the saved arrangement through capture rendering with command inference disabled.
-  Do not discover layouts; Capture remains available with no layouts or invalid discovery
+  Even an empty structural container counts as occupancy. Show discovered layout names
+  without prefixes in lexical order, with the prompt `Load layout: `. If no layouts exist,
+  report an error without opening Fuzzel. Discovery does not parse files or imply that
+  individual layouts are valid.
+- **Populated and capturable:** immediately ask for a draft name with the prompt
+  `Capture layout as: `, using Fuzzel's prompt-only mode, after validating the saved
+  arrangement through capture rendering with command inference disabled.
+  Do not discover layouts; capture remains available with no layouts or invalid discovery
   entries. `--infer-commands` does not change eligibility when commands cannot be inferred.
 - **Populated and noncapturable:** report the capture validation reason without opening
   Fuzzel, for example guidance to tile floating windows, exit fullscreen, or focus a window
   instead of its parent. Load is unavailable on any occupied workspace.
 
 Initial snapshot failures report an error without opening Fuzzel. No unavailable-action
-case writes the launch log. Choices are fixed while the prompt is open; eligibility is a
-convenience and does not replace operation-specific validation after selection.
+case writes the launch log. Layout choices are fixed while the prompt is open; eligibility
+is a convenience and does not replace operation-specific validation after selection.
 
-Only exact offered actions are accepted; arbitrary typed action text is an error. All prompts
-use the original output when known and disable automatic exit on keyboard-focus loss,
+Only exact offered layout names are accepted; arbitrary typed selection text is an error.
+All prompts use the original output when known and disable automatic exit on keyboard-focus loss,
 without changing Fuzzel's configured focus mode. Interactive input has no deadline. Escape
 at any offered prompt cancels successfully without saving/loading or replacing the launch
 log. Fuzzel cancellation requires exit status 2 and empty output; other failures, index
@@ -410,7 +412,7 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   changes while the menu is open need not be detected; construction then uses the normal
   continuous focus/output safeguards.
   With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
-  `Directory:`, before loading. It enumerates only immediate children of the resolved
+  `Launch in: `, before loading. It enumerates only immediate children of the resolved
   top-level `cwd` using filesystem directory reads, without recursive scanning.
   Names beginning with `.`, files, non-directory entries, non-UTF-8 names, and names
   containing control characters are excluded. Directory symlinks are included even when
@@ -427,10 +429,11 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   Both prompts retain the original output and workspace baseline; directory selection
   never captures a replacement baseline or bypasses fresh emptiness, focus, output,
   and ownership checks. With `cwd_select` omitted or false, Load uses one prompt.
-- **Capture:** render only the pre-menu snapshot, then ask for a draft name. Later workspace,
-  window, output, or focus changes during either prompt do not alter the draft. Unsupported
-  capture state fails before the name prompt. `--infer-commands` runs only after Capture is
-  selected, using the saved PIDs; process arguments may have changed during the wait.
+- **Capture:** render only the pre-menu snapshot, then ask for a draft name in a single
+  prompt. Later workspace, window, output, or focus changes do not alter the draft.
+  Unsupported capture state fails before the name prompt. `--infer-commands` runs after
+  eligibility validation and before the prompt, using the saved PIDs; process arguments
+  may have changed since the snapshot.
 
 After a successful save, the bounded, best-effort notification includes the saved YAML path,
 inference status, and unresolved-command count. It calls for manual editing when commands

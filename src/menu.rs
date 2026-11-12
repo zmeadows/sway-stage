@@ -9,62 +9,41 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const CAPTURE_OPTION: &str = "Capture current layout…";
 // Leave room for the five-byte .yaml suffix within Linux's usual 255-byte component limit.
 const MAX_DRAFT_NAME_BYTES: usize = 250;
 
-pub enum Action {
-    Load(String),
-    Capture,
-}
-
-pub enum AvailableAction {
-    Load,
-    Capture,
-}
-
-pub fn select(
-    available_action: AvailableAction,
+pub fn select_layout(
     layouts_dir: Option<PathBuf>,
     output_name: Option<&str>,
-) -> Result<Option<Action>, String> {
-    let action_options: Vec<(String, Action)> = match available_action {
-        AvailableAction::Load => {
-            let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
-            let layouts = directory.discover()?;
-            if layouts.is_empty() {
-                return Err(format!(
-                    "no layouts available in {}; add a layout before loading",
-                    directory.path.display()
-                ));
-            }
-
-            layouts
-                .into_keys()
-                .map(|name| (format!("Load: {name}"), Action::Load(name)))
-                .collect()
-        }
-        AvailableAction::Capture => vec![(CAPTURE_OPTION.into(), Action::Capture)],
-    };
+) -> Result<Option<String>, String> {
+    let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
+    let layouts = directory.discover()?;
+    if layouts.is_empty() {
+        return Err(format!(
+            "no layouts available in {}; add a layout before loading",
+            directory.path.display()
+        ));
+    }
 
     let mut prompt_input = String::new();
-    for (label, _) in &action_options {
-        prompt_input.push_str(label);
+    for name in layouts.keys() {
+        prompt_input.push_str(name);
         prompt_input.push('\n');
     }
 
-    let Some(selection) = fuzzel("--prompt=⊞ ", Some(&prompt_input), output_name)? else {
+    let Some(selection) = fuzzel("--prompt=Load layout: ", Some(&prompt_input), output_name)?
+    else {
         return Ok(None);
     };
 
-    action_options
-        .into_iter()
-        .find(|(label, _)| label == &selection)
-        .map(|(_, action)| Some(action))
-        .ok_or_else(|| {
+    if !layouts.contains_key(&selection) {
+        return Err(
             "selection: Fuzzel returned an option that was not offered; use dmenu text output"
-                .into()
-        })
+                .into(),
+        );
+    }
+
+    Ok(Some(selection))
 }
 
 /// Names and paths stay paired: typed Fuzzel input never becomes a filesystem path.
@@ -75,7 +54,7 @@ pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option
         .map(|(name, _)| format!("{name}\n"))
         .collect::<String>();
 
-    let Some(selection) = fuzzel("--prompt=Directory: ", Some(&input), output_name)? else {
+    let Some(selection) = fuzzel("--prompt=Launch in: ", Some(&input), output_name)? else {
         return Ok(None);
     };
 
@@ -132,11 +111,16 @@ pub fn capture_draft(
     layouts_dir: Option<PathBuf>,
     infer_commands: bool,
 ) -> Result<(), String> {
-    // The action prompt has exited. Render the pre-menu state without querying Sway again.
+    // Render the pre-menu state without querying Sway again.
     let draft = snapshot
         .render(infer_commands)
         .map_err(|error| format!("capture: {error}"))?;
-    let Some(name) = fuzzel("--prompt-only=Draft name: ", None, snapshot.output_name())? else {
+    let Some(name) = fuzzel(
+        "--prompt-only=Capture layout as: ",
+        None,
+        snapshot.output_name(),
+    )?
+    else {
         return Ok(());
     };
 

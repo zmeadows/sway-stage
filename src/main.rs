@@ -212,58 +212,53 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
     let snapshot = capture::snapshot()
         .map_err(|error| report_menu_failure(format!("pre-menu workspace snapshot: {error}")))?;
 
-    let available_action = if snapshot.workspace_is_empty() {
-        menu::AvailableAction::Load
-    } else {
+    if !snapshot.workspace_is_empty() {
         // Validate the saved arrangement without reading process arguments.
         snapshot
             .render(false)
             .map_err(|error| report_menu_failure(format!("capture unavailable: {error}")))?;
-        menu::AvailableAction::Capture
-    };
+
+        return menu::capture_draft(&snapshot, layouts_dir, infer_commands)
+            .map_err(report_menu_failure);
+    }
 
     let output_name = snapshot.output_name();
-    let action = menu::select(available_action, layouts_dir.clone(), output_name)
-        .map_err(report_menu_failure)?;
+    let Some(name) =
+        menu::select_layout(layouts_dir.clone(), output_name).map_err(report_menu_failure)?
+    else {
+        return Ok(());
+    };
 
-    match action {
-        None => Ok(()),
-        Some(menu::Action::Load(name)) => {
-            // Keep validation failures under launch diagnostics, but leave the old log
-            // intact while a directory prompt can still be canceled.
-            let layout_result = read_named_layout(&name, layouts_dir);
-            let selected_directory = if let Ok((_, config)) = &layout_result
-                && config.cwd_select
-            {
-                let root = config
-                    .cwd
-                    .as_deref()
-                    .expect("validated cwd_select requires cwd");
-                let Some(directory) =
-                    menu::select_directory(root, output_name).map_err(report_menu_failure)?
-                else {
-                    return Ok(());
-                };
-                Some(directory)
-            } else {
-                None
-            };
+    // Keep validation failures under launch diagnostics, but leave the old log
+    // intact while a directory prompt can still be canceled.
+    let layout_result = read_named_layout(&name, layouts_dir);
+    let selected_directory = if let Ok((_, config)) = &layout_result
+        && config.cwd_select
+    {
+        let root = config
+            .cwd
+            .as_deref()
+            .expect("validated cwd_select requires cwd");
+        let Some(directory) =
+            menu::select_directory(root, output_name).map_err(report_menu_failure)?
+        else {
+            return Ok(());
+        };
+        Some(directory)
+    } else {
+        None
+    };
 
-            let mut diagnostics = Diagnostics::start("menu");
-            diagnostics.stage(format!("menu load {name:?}: validation"));
-            load_named_layout(
-                &name,
-                layout_result,
-                selected_directory,
-                Some(snapshot.workspace_id()),
-                &mut diagnostics,
-            )
-            .map_err(|error| diagnostics.report_failure(error))
-        }
-        Some(menu::Action::Capture) => {
-            menu::capture_draft(&snapshot, layouts_dir, infer_commands).map_err(report_menu_failure)
-        }
-    }
+    let mut diagnostics = Diagnostics::start("menu");
+    diagnostics.stage(format!("menu load {name:?}: validation"));
+    load_named_layout(
+        &name,
+        layout_result,
+        selected_directory,
+        Some(snapshot.workspace_id()),
+        &mut diagnostics,
+    )
+    .map_err(|error| diagnostics.report_failure(error))
 }
 
 fn report_menu_failure(error: String) -> String {
