@@ -84,6 +84,15 @@ impl Snapshot {
         self.target
     }
 
+    /// Uses the loader's strict emptiness rule, including empty structural containers.
+    pub fn workspace_is_empty(&self) -> bool {
+        let workspace = self
+            .tree
+            .find_as_ref(|node| node.id == self.target)
+            .expect("snapshot verified the focused workspace");
+        workspace.nodes.is_empty() && workspace.floating_nodes.is_empty()
+    }
+
     fn from_tree(tree: Node) -> Result<Self, String> {
         if tree.node_type != NodeType::Root {
             return Err("snapshot: invalid tree root".into());

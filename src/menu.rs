@@ -18,16 +18,33 @@ pub enum Action {
     Capture,
 }
 
+pub enum AvailableAction {
+    Load,
+    Capture,
+}
+
 pub fn select(
+    available: AvailableAction,
     layouts_dir: Option<PathBuf>,
     output_name: Option<&str>,
 ) -> Result<Option<Action>, String> {
-    let layouts = discovery::Directory::resolve(layouts_dir)?.discover()?;
-    let mut options: Vec<(String, Action)> = layouts
-        .into_keys()
-        .map(|name| (format!("Load: {name}"), Action::Load(name)))
-        .collect();
-    options.push((CAPTURE_OPTION.into(), Action::Capture));
+    let options: Vec<(String, Action)> = match available {
+        AvailableAction::Load => {
+            let directory = discovery::Directory::resolve(layouts_dir)?;
+            let layouts = directory.discover()?;
+            if layouts.is_empty() {
+                return Err(format!(
+                    "no layouts available in {}; add a layout before loading",
+                    directory.path.display()
+                ));
+            }
+            layouts
+                .into_keys()
+                .map(|name| (format!("Load: {name}"), Action::Load(name)))
+                .collect()
+        }
+        AvailableAction::Capture => vec![(CAPTURE_OPTION.into(), Action::Capture)],
+    };
 
     let mut input = String::new();
     for (label, _) in &options {
@@ -100,7 +117,7 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(choices)
 }
 
-/// Saves into the same directory `select` discovered, so `--layouts-dir` controls both.
+/// Saves into the configured layouts directory without requiring discovery.
 /// The draft is not validated: placeholders stay until the user edits and checks it.
 pub fn capture_draft(
     snapshot: &capture::Snapshot,
