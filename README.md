@@ -77,10 +77,19 @@ incomplete layouts `[invalid]`. Invalid layouts cannot launch; run `sway-stage c
 for detailed validation errors. Validation does not guarantee applications will launch.
 
 Use `--layouts-dir PATH` to read layouts and save menu captures elsewhere.
-Captures preserve arrangement, sizes, selectors, and focus; they need commands filled in
-before loading. `capture --infer-commands` and `menu --infer-commands` can recover process
-arguments as a starting point. Review them for secrets and reproducibility: captures are
-drafts, not executable session restorations.
+Captures preserve arrangement, sizes, selectors, and focus, and automatically attempt to
+reconstruct launch commands. Inference is best-effort; unresolved commands remain `null`.
+Inspect and edit these drafts before loading. Review inferred commands before loading or
+sharing: arguments may contain secrets or private paths and may not reproduce the application.
+Use `--no-infer-commands` to leave all commands as `null`:
+
+```sh
+sway-stage capture
+sway-stage capture --no-infer-commands
+
+sway-stage menu
+sway-stage menu --no-infer-commands
+```
 
 ## Troubleshooting
 

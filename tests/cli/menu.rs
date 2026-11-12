@@ -36,6 +36,9 @@ case "$prompt" in
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
     : > "$MENU_DIRECTORY/name-opened"
+    if test -f "$MENU_DIRECTORY/retry.desktop"; then
+        : > "$MENU_DIRECTORY/retry.desktop"
+    fi
     attempt=1
     if test -f "$MENU_DIRECTORY/name-attempt"; then
         read -r attempt < "$MENU_DIRECTORY/name-attempt"
@@ -426,8 +429,8 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
         fixture.file("broken.yaml", "malformed: [");
         let mut menu_command = menu_command(&fixture, "writing\n", "");
         menu_command.args(["--layouts-dir", ".", "menu"]);
-        if infer_commands {
-            menu_command.arg("--infer-commands");
+        if !infer_commands {
+            menu_command.arg("--no-infer-commands");
         }
         let output = run_on_empty_workspace(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1));
@@ -466,7 +469,7 @@ fn initial_snapshot_failure_never_opens_fuzzel() {
 }
 
 #[test]
-fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference() {
+fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disabled_inference() {
     for (base, infer_commands, notification_status) in [
         (None, false, "0"),
         (Some(""), false, "0"),
@@ -494,8 +497,8 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
         if let Some(xdg_config_home) = &xdg_config_home {
             menu_command.env("XDG_CONFIG_HOME", xdg_config_home);
         }
-        if infer_commands {
-            menu_command.arg("--infer-commands");
+        if !infer_commands {
+            menu_command.arg("--no-infer-commands");
         }
         let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
@@ -540,17 +543,12 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(notification.contains("sway-stage draft saved"));
-        assert!(notification.contains(path.to_str().unwrap()));
+        assert!(notification.ends_with("\nSaved draft 'development'.\n"));
         assert!(!notification.contains("command:"));
-        if infer_commands {
-            assert!(notification.contains("Commands inferred: 1; unresolved: 0."));
-            assert!(notification.contains("Review best-effort commands before use."));
-            let executable = std::env::current_exe().unwrap();
-            assert!(!notification.contains(executable.to_str().unwrap()));
-        } else {
-            assert!(notification.contains("Command inference disabled; unresolved commands: 1."));
-            assert!(notification.contains("Manual editing required."));
-        }
+        assert!(!notification.contains("Commands inferred"));
+        assert!(!notification.contains("Review"));
+        let executable = std::env::current_exe().unwrap();
+        assert!(!notification.contains(executable.to_str().unwrap()));
 
         // Ordinary discovery in the same environment finds the saved layout.
         let mut list = fixture.command();
@@ -643,12 +641,57 @@ fn repeated_name_retries_save_the_original_snapshot() {
     fixture.file("name-4", "accepted\n");
     let mut menu_command = menu_command(&fixture, "", "My Workspace\n");
     menu_command.args(["--layouts-dir", "layouts", "menu"]);
+    // Infer a private launcher before the first prompt empties it. Repeating inference
+    // during a name retry would leave a null command instead of the original launcher.
+    fixture.file("retry.desktop", "[Desktop Entry]\nExec=unused\n");
+    let mut process = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "export GIO_LAUNCHED_DESKTOP_FILE_PID=$$; exec /bin/cat",
+        ])
+        .env(
+            "GIO_LAUNCHED_DESKTOP_FILE",
+            fixture.path.join("retry.desktop"),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let process_id = process.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let pid_marker = format!("GIO_LAUNCHED_DESKTOP_FILE_PID={process_id}");
+    let ready = loop {
+        let environment = fs::read(format!("/proc/{process_id}/environ")).unwrap();
+        if environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == pid_marker.as_bytes())
+        {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let mut tree = capture_tree();
+    tree["nodes"][0]["nodes"][0]["nodes"][0]["pid"] = json!(process_id);
+
     // The fake compositor accepts exactly one GET_TREE and closes after the snapshot.
-    let output = run_capture(&fixture, &mut menu_command);
+    let output = run_with_recorded_snapshot(&fixture, &mut menu_command, tree);
+    // EOF terminates only this test-owned process; no desktop application is involved.
+    drop(process.stdin.take());
+    assert!(process.wait().unwrap().success());
+    assert!(ready, "test process did not publish launcher metadata");
     assert!(output.status.success(), "{output:?}");
     let saved = fs::read_to_string(layouts.join("accepted.yaml")).unwrap();
     assert!(saved.contains("app_id: editor"), "{saved}");
-    assert!(saved.contains("command: null"), "{saved}");
+    assert!(
+        !saved.lines().any(|line| line.trim() == "command: null"),
+        "{saved}"
+    );
+    assert!(saved.contains("Review recovered commands"), "{saved}");
+    assert!(saved.contains("command: [gio, launch,"), "{saved}");
+    assert_eq!(fs::read(fixture.path.join("retry.desktop")).unwrap(), b"");
     assert_eq!(
         fs::read_to_string(layouts.join("development.yml")).unwrap(),
         "original"
@@ -728,7 +771,7 @@ fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     let mut capture_command = menu_command(&fixture, "", "development\n");
-    capture_command.arg("menu");
+    capture_command.args(["menu", "--no-infer-commands"]);
     let output = run_capture(&fixture, &mut capture_command);
 
     assert!(output.status.success(), "{output:?}");
@@ -1029,7 +1072,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
         let output = menu_command(&fixture, "writing\n", "")
             .env("SWAYSOCK", &socket)
             .env("REQUIRE_SNAPSHOT", "1")
-            .args(["--layouts-dir", ".", "menu", "--infer-commands"])
+            .args(["--layouts-dir", ".", "menu"])
             .output()
             .unwrap();
         server.join().unwrap();
@@ -1064,7 +1107,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
 }
 
 #[test]
-fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_commands() {
+fn partial_inference_keeps_unresolved_commands_and_the_short_save_notification() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     let mut tree = capture_tree();
@@ -1078,12 +1121,7 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
     workspace["nodes"].as_array_mut().unwrap().push(unresolved);
     let output = run_with_recorded_snapshot(
         &fixture,
-        menu_command(&fixture, "", "partial\n").args([
-            "--layouts-dir",
-            ".",
-            "menu",
-            "--infer-commands",
-        ]),
+        menu_command(&fixture, "", "partial\n").args(["--layouts-dir", ".", "menu"]),
         tree,
     );
 
@@ -1098,8 +1136,7 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
         1
     );
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-    assert!(notification.contains("Commands inferred: 1; unresolved: 1. Manual editing required."));
-    assert!(notification.contains("./partial.yaml"));
+    assert!(notification.ends_with("\nSaved draft 'partial'.\n"));
     assert!(!notification.contains(std::env::current_exe().unwrap().to_str().unwrap()));
 }
 
@@ -1505,12 +1542,7 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
         }
         let output = run_with_recorded_snapshot(
             &fixture,
-            menu_command(&fixture, "", "unused\n").args([
-                "--layouts-dir",
-                ".",
-                "menu",
-                "--infer-commands",
-            ]),
+            menu_command(&fixture, "", "unused\n").args(["--layouts-dir", ".", "menu"]),
             tree,
         );
         assert_eq!(output.status.code(), Some(1), "{arrangement}: {output:?}");

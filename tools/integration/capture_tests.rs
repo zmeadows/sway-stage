@@ -10,7 +10,7 @@ const DRAFT_HEADER: &str = "\
 # the enclosing split. Validate the edited file with `sway-stage check NAME`.
 ";
 
-/// The additional header of an `--infer-commands` draft.
+/// The additional header of an inferred draft.
 const INFERENCE_HEADER: &str = "\
 # Review recovered commands before executing or sharing: process arguments are
 # best-effort, may contain secrets, and may not reproduce the original application.
@@ -31,7 +31,7 @@ fn horizontal_pair_measurements() -> LayoutMeasurements {
     }
 }
 
-/// A default capture of horizontal-pair as sway-stage prints it.
+/// An inference-disabled capture of horizontal-pair as sway-stage prints it.
 fn horizontal_pair_draft() -> String {
     format!(
         "{DRAFT_HEADER}\
@@ -210,7 +210,7 @@ fn capture_differences_report_the_failed_comparison() {
     assert_eq!(error, "no measured share for layout.children[0]");
 }
 
-/// An `--infer-commands` capture of horizontal-pair whose recovered commands are the
+/// An inferred capture of horizontal-pair whose recovered commands are the
 /// given lines, each already indented as a block sequence item.
 fn inferred_horizontal_pair_draft(first_command: &str, second_command: &str) -> String {
     horizontal_pair_draft()

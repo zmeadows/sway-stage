@@ -202,13 +202,13 @@ The sixth extended case, `unresolved-launcher`, uses the same private GTK/Foot l
 infrastructure and prerequisites, with its own unique fixture. Exact Foot argv, matching
 GLib path/PID provenance, ordered window events, layout, focus, and foreign-window checks
 first establish ownership. The harness then renames only its private `.desktop` file within
-its private directory for one bounded `capture --infer-commands` invocation. It restores the
+its private directory for one bounded `capture` invocation. It restores the
 same file and independently checks its inode and contents before any subsequent ownership
 check or cleanup, including when capture fails or interruption is requested. A retained
 `/proc` directory descriptor and exact process evidence before and after establish that the
 original Foot process remained present across capture without following a reused PID.
 
-The capture must exit zero, retain the default draft's selectors, IDs, hierarchy, sizing,
+The capture must exit zero, retain the inference-disabled draft's selectors, IDs, hierarchy, sizing,
 and focus, and leave its single `command: null`. Stdout is checked independently of stderr,
 which must report `Commands inferred: 0; unresolved: 1. Manual editing required.` No
 speculative launcher or executable may substitute for the null. Fresh snapshots and event
@@ -310,7 +310,7 @@ For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID 
 the correct distinct run-specific title argument from each leaf's original launch array.
 Swapped, duplicate, or missing titles fail, even though both selectors agree. Titles reported
 by Sway are never ownership evidence. Normalizing only the inferred command arrays must
-reproduce the verified default capture exactly; tree, event-history, and foreign-window
+reproduce the verified inference-disabled capture exactly; tree, event-history, and foreign-window
 checks also establish that inference left the observed desktop unchanged. Recovered commands
 are never printed in diagnostics.
 
@@ -417,8 +417,9 @@ then lower-right, with width ratios 44:32:24, right heights 77:23, and browser f
 Expect exit 0 without stdout, proportions near 1 percentage point of target, and warnings
 only beyond 5 points. Inspect the launch log on failure.
 
-For capture, compare default and inferred drafts with the original hierarchy, selectors,
-proportions, and focus. Default commands must be null. `check` must reject placeholders;
+For capture, compare inference-disabled and default inferred drafts with the original hierarchy,
+selectors, proportions, and focus. Commands captured with `--no-infer-commands` must be null.
+`check` must reject placeholders;
 fill them, check, load on another empty target, and recapture. Expect at most small weight
 rounding/sizing differences (aim within 1 percentage point). Confirm floating, fullscreen,
 and structural-container focus refuse capture without YAML. Native tabbed/stacked groups,
@@ -436,7 +437,8 @@ capturable workspace, confirm `Capture layout as: ` opens directly as the only p
 including with no layouts or duplicate discovery names. With floating or fullscreen windows,
 empty structural containers, or parent focus, expect capture guidance and no prompt. Check normal Load sizing/focus, occupied-target refusal, Escape at each prompt,
 invalid/colliding names, saved draft discovery, placeholder rejection, and edited-draft
-validation. Repeat captures with `--infer-commands`, reviewing recovered arguments. Captures
+validation. Review automatically recovered arguments; repeat captures with `--no-infer-commands`.
+Captures
 must preserve pre-menu hierarchy, weights, selectors, and focus even when pointer/window
 focus or workspace changes during the name prompt. The prompt should use the original
 output. Capture/cancellation must leave the previous launch log untouched; Load replaces it.

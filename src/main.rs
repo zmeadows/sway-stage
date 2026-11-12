@@ -17,7 +17,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture defaults to null commands; --infer-commands optionally reads process arguments that may contain secrets. Review commands and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
 )]
 struct Cli {
     /// Read layouts, and save menu captures, in PATH instead of the XDG configuration directory
@@ -46,15 +46,15 @@ enum CliCommand {
     },
     /// Print an editable YAML draft of the focused workspace's tiled layout, read-only
     Capture {
-        /// Recover best-effort process arguments; review for secrets and reproducibility
+        /// Disable automatic launch-command inference; leave commands as null
         #[arg(long)]
-        infer_commands: bool,
+        no_infer_commands: bool,
     },
     /// Use Fuzzel to load a layout or save a capture as a named layout draft
     Menu {
-        /// Recover best-effort process arguments for captures only; review for secrets
+        /// Disable automatic launch-command inference for captures; leave commands as null
         #[arg(long)]
-        infer_commands: bool,
+        no_infer_commands: bool,
     },
 }
 
@@ -70,8 +70,8 @@ fn main() -> ExitCode {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
-        Some(CliCommand::Capture { infer_commands }) => capture(infer_commands),
-        Some(CliCommand::Menu { infer_commands }) => menu(cli.layouts_dir, infer_commands),
+        Some(CliCommand::Capture { no_infer_commands }) => capture(!no_infer_commands),
+        Some(CliCommand::Menu { no_infer_commands }) => menu(cli.layouts_dir, !no_infer_commands),
     };
 
     match command_result {

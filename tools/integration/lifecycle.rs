@@ -620,7 +620,7 @@ impl Harness {
 
             self.stage = format!("{cycle_name}: capture");
             let mut capture = Command::new(&self.binary);
-            capture.arg("capture");
+            capture.args(["capture", "--no-infer-commands"]);
             self.sway.select_socket(&mut capture);
             let draft = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
             let after_capture = snapshot(&self.sway, &mut self.events, None)?;
@@ -664,7 +664,7 @@ impl Harness {
                 verify_process_evidence(&retained_process, pid, leaf)
                     .map_err(|reason| Failure::Uncertain(reason.into()))?;
                 let mut capture = Command::new(&self.binary);
-                capture.args(["capture", "--infer-commands"]);
+                capture.arg("capture");
                 self.sway.select_socket(&mut capture);
                 let revision = self.events.workspace_revision();
                 let output = directory.with_unavailable_launcher(fixture, || {
@@ -696,7 +696,7 @@ impl Harness {
             ) {
                 self.stage = format!("{cycle_name}: inferred capture");
                 let mut capture = Command::new(&self.binary);
-                capture.args(["capture", "--infer-commands"]);
+                capture.arg("capture");
                 self.sway.select_socket(&mut capture);
                 let inferred = process::run(capture, &self.stage, CAPTURE_TIMEOUT)?;
                 let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
@@ -907,8 +907,8 @@ impl Harness {
             }
             let mut command = Command::new(&self.binary);
             command.arg("capture");
-            if infer {
-                command.arg("--infer-commands");
+            if !infer {
+                command.arg("--no-infer-commands");
             }
             self.sway.select_socket(&mut command);
             let draft = process::run(command, &self.stage, CAPTURE_TIMEOUT)?;

@@ -258,11 +258,11 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
 }
 
 /// Best-effort save confirmation, independent of launch diagnostics.
-pub fn notify_draft_saved(path: &std::path::Path, commands: &crate::capture::CommandCounts) {
+pub fn notify_draft_saved(name: &str) {
     let _ = notify(
         "normal",
         "sway-stage draft saved",
-        &format!("{}\n{}", path.display(), commands.summary()),
+        &format!("Saved draft '{name}'."),
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
 }

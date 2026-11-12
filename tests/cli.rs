@@ -88,6 +88,8 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["load"],
         vec!["menu", "extra"],
         vec!["capture", "extra"],
+        vec!["capture", "--infer-commands"],
+        vec!["menu", "--infer-commands"],
         vec!["--bogus"],
         vec!["list", "extra"],
     ] {
@@ -763,8 +765,8 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
         let server = serve_capture(listener, tree.clone(), None);
         let mut command = fixture.command();
         command.env("SWAYSOCK", &socket).arg("capture");
-        if infer_commands {
-            command.arg("--infer-commands");
+        if !infer_commands {
+            command.arg("--no-infer-commands");
         }
         let output = command.output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -784,7 +786,7 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
         assert!(!summary.contains(".yaml"));
         drafts.push(String::from_utf8(output.stdout).unwrap());
     }
-    // Missing PIDs retain placeholders; only the opt-in review comment is added.
+    // Missing PIDs retain placeholders; only the inference review comment is added.
     let without_comments = |draft: &str| {
         draft
             .lines()
@@ -936,9 +938,7 @@ fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
             None,
         );
         let mut command = fixture.command();
-        command
-            .env("SWAYSOCK", &socket)
-            .args(["capture", "--infer-commands"]);
+        command.env("SWAYSOCK", &socket).args(["capture"]);
         if output_fails {
             command.stdout(
                 fs::OpenOptions::new()

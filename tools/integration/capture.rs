@@ -3,8 +3,7 @@
 //! This is a narrow structural comparison with capture's one known serializer format:
 //! only command argument scalars use YAML decoding. A format change fails visibly, and
 //! `check` on the filled draft supplies authoritative syntax and semantic validation.
-//! Recovered command arguments from
-//! `--infer-commands` never appear in messages. Only a verified private fixture
+//! Recovered command arguments never appear in messages. Only a verified private fixture
 //! command is saved for the desktop-launcher replay.
 
 use crate::layout::LayoutMeasurements;
@@ -27,7 +26,7 @@ pub fn capture_lines(draft: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Compares a default capture draft with the expected one, line by line: indentation and
+/// Compares an inference-disabled draft with the expected one, line by line: indentation and
 /// sequence arrangement, keys, identifiers, focus, `command: null` placeholders, unchanged
 /// selectors, and weights within 0.02 of the measured shares. Returns the draft with each
 /// placeholder filled with a harmless command, ready for `sway-stage check`. Never echo
@@ -187,7 +186,7 @@ fn strip_quotes(scalar: &str) -> &str {
     scalar.strip_suffix('\'').unwrap_or(scalar)
 }
 
-/// Compares an `--infer-commands` draft with the already verified default draft. Only the
+/// Compares an inferred draft with the verified inference-disabled draft. Only the
 /// serializer's flow and block command sequences are recognized; with each replaced by
 /// `command: null`, the drafts must agree exactly, so inference changed no hierarchy, order,
 /// sizing, selector, ID, or focus. Each recovered Foot command must carry its leaf's app ID,
@@ -286,7 +285,7 @@ pub fn verify_desktop_launcher_capture(
     Ok(())
 }
 
-/// The already verified default draft proves every structural field, including a single
+/// The verified inference-disabled draft proves every structural field, including a single
 /// null command. Successful stderr is checked separately and never included in failures.
 pub fn verify_unresolved_capture(
     output: &crate::process::CompletedProcess,

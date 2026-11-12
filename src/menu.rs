@@ -239,8 +239,8 @@ pub fn capture_draft(
         let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir.clone())
             .map_err(|error| Error::new(FailureKind::DraftSave, error))?;
         match save_draft(&layouts_directory.path, &name, &draft.yaml) {
-            Ok(path) => {
-                diagnostics::notify_draft_saved(&path, &draft.commands);
+            Ok(_) => {
+                diagnostics::notify_draft_saved(&name);
                 return Ok(());
             }
             Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {

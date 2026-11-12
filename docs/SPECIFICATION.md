@@ -11,8 +11,8 @@ This is the authoritative contract for implemented behavior. Start with the
 | `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
-| `capture [--infer-commands]` | Print an editable draft of the focused workspace. |
-| `menu [--infer-commands]` | Load a layout or save a named capture through Fuzzel. |
+| `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
+| `menu [--no-infer-commands]` | Load a layout or save a named capture through Fuzzel. |
 
 `check` and `list` never contact Sway, launch applications, write logs, or notify.
 `check` does not probe executables or promise that a command creates a matching window.
@@ -229,8 +229,9 @@ Capture reads one Sway tree through `SWAYSOCK`, with a bounded response wait. It
 launches applications or sends layout/focus commands. Later desktop changes cannot redirect
 or invalidate the saved structure; no freeze or ongoing event observation is attempted.
 Standalone capture writes YAML exclusively to stdout; the shell controls the destination
-(and may create or truncate the file even if capture fails). After the complete draft is
-written and flushed, a concise success summary goes to stderr without a destination filename.
+(and may create or truncate the file even if capture fails). Capture does not control the
+permissions of a redirected file. After the complete draft is written and flushed, a concise
+success summary goes to stderr without a destination filename.
 It reports disabled inference and required manual editing, or the inferred and unresolved
 command counts. Unresolved commands require manual editing; fully inferred commands still
 need review and are best-effort, with no promise of recreating the original windows.
@@ -247,8 +248,9 @@ after validation, including at the workspace root; singleton tabbed/stacked grou
 Multi-child splits remain even if their orientation matches their parent's. A window with
 only split wrappers becomes the root.
 Selectors prefer nonempty Wayland app IDs, then Xwayland classes, otherwise `match: null`.
-Commands default to `command: null`. Workspace names, outputs, titles, container IDs, PIDs,
-cwd, and environment are not serialized.
+Launch commands are inferred automatically on a best-effort basis; unresolved commands remain
+`command: null`. `--no-infer-commands` disables inference and leaves all commands null.
+Workspace names, outputs, titles, container IDs, PIDs, cwd, and environment are not serialized.
 
 Capture records only global focus, not independently selected tabs in inactive groups.
 Reloading uses the first-child defaults described above, then applies global focus along
@@ -266,7 +268,7 @@ on a group rather than a window, and layouts exceeding the format's depth/node l
 Tabbed/stacked children need no split-axis geometry. The workspace's own fullscreen flag
 is not treated as a fullscreen window.
 
-`--infer-commands` uses each saved window's actual PID. Before and after inference, it
+Command inference uses each saved window's actual PID. Before and after inference, it
 compares the process start time from `/proc/PID/stat` (bounded to 4 KiB) and the executable's
 path, device, and inode. Missing/malformed identity observations or observed changes leave
 `command: null`. This is not atomic verification: Sway's saved PID may already be stale,
@@ -403,7 +405,7 @@ workspace in that snapshot, never its name or number:
   `Capture layout as: `, using Fuzzel's prompt-only mode, after validating the saved
   arrangement through capture rendering with command inference disabled.
   Do not discover layouts; capture remains available with no layouts or invalid discovery
-  entries. `--infer-commands` does not change eligibility when commands cannot be inferred.
+  entries. Inference does not change eligibility when commands cannot be inferred.
 - **Populated and noncapturable:** report the capture validation reason without opening
   Fuzzel, for example guidance to tile floating windows, exit fullscreen, or focus a window
   instead of its parent. Load is unavailable on any occupied workspace.
@@ -451,14 +453,13 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   input is never prepopulated. Retries reuse the original rendered draft without further Sway
   queries or command inference. Operational save errors terminate instead of retrying.
   Later workspace, window, output, or focus changes do not alter the draft.
-  Unsupported capture state fails before the name prompt. `--infer-commands` runs after
+  Unsupported capture state fails before the name prompt. Default command inference runs after
   eligibility validation and before the prompt, using the saved PIDs; process arguments
   may have changed since the snapshot.
 
-After a successful save, the bounded, best-effort notification includes the saved YAML path,
-inference status, and unresolved-command count. It calls for manual editing when commands
-remain unresolved, or review of best-effort commands when all were inferred. Notification
-failure does not fail the save. Cancellation and failed captures do not report success.
+After a successful save, the bounded, best-effort notification says only `Saved draft 'NAME'.`.
+Notification failure does not fail the save. Cancellation and failed captures do not report
+success. `menu --no-infer-commands` disables inference for saved captures.
 
 Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at
 most 250 ASCII characters, without an extension; input is not trimmed or normalized.
