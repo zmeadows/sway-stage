@@ -383,10 +383,15 @@ snapshot is saved **before the first prompt**. Choices depend on the actual focu
 workspace in that snapshot, never its name or number:
 
 - **Empty:** both tiled and floating child lists must be empty, exactly as for loading.
-  Even an empty structural container counts as occupancy. Show discovered layout names
-  without prefixes in lexical order, with the prompt `Load layout: `. If no layouts exist,
-  report an error without opening Fuzzel. Discovery does not parse files or imply that
-  individual layouts are valid.
+  Even an empty structural container counts as occupancy. Validate discovered files using
+  the same syntax, semantics, and filesystem checks as `check`. Show names in lexical
+  order by actual name, with the prompt `Load layout: `. Valid names appear normally;
+  invalid or incomplete layouts have an `[invalid]` prefix. Their presence alone does
+  not notify. Selecting one reports a concise error directing the user to
+  `sway-stage check NAME`, without loading or replacing the launch log. Validation does
+  not guarantee application launch success. If no layouts exist, report the missing-layout
+  error without opening Fuzzel. If all layouts are invalid, report “No valid layouts found”
+  with guidance to run `check`, without opening Fuzzel or replacing the launch log.
 - **Populated and capturable:** immediately ask for a draft name with the prompt
   `Capture layout as: `, using Fuzzel's prompt-only mode, after validating the saved
   arrangement through capture rendering with command inference disabled.
@@ -400,7 +405,7 @@ Initial snapshot failures report an error without opening Fuzzel. No unavailable
 case writes the launch log. Layout choices are fixed while the prompt is open; eligibility
 is a convenience and does not replace operation-specific validation after selection.
 
-Only exact offered layout names are accepted; arbitrary typed selection text is an error.
+Only exact offered layout labels are accepted; arbitrary typed selection text is an error.
 All prompts use the original output when known and disable automatic exit on keyboard-focus loss,
 without changing Fuzzel's configured focus mode. Interactive input has no deadline. Escape
 at any offered prompt cancels successfully without saving/loading or replacing the launch
@@ -458,8 +463,8 @@ changes are not atomic. On write/publication failure, retain the reported `.part
 for inspection; it is outside discovery. Do not automatically remove uncertain files.
 A successful save attempts a path notification; notification failure does not fail the save.
 
-Drafts appear immediately in `list` and in the menu on empty workspaces. They are saved
-without executable-layout validation; `check` and `load` reject remaining placeholders
+Drafts appear immediately in `list`; the menu marks incomplete drafts `[invalid]` when
+at least one valid layout is available. They are saved without executable-layout validation; `check` and `load` reject remaining placeholders
 before loader IPC or application launches. Edit them in place and check them. There is no automatic repair, execution, or deletion.
 
 ## Diagnostics and troubleshooting

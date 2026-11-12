@@ -67,6 +67,9 @@ case "$prompt" in
     fi
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
     /bin/cat > "$MENU_DIRECTORY/options"
+    if test -n "$REPLACE_LAYOUT"; then
+        /bin/cp "$MENU_DIRECTORY/replacement" "$REPLACE_LAYOUT" || exit 98
+    fi
     printf '%s' "$$" > "$MENU_DIRECTORY/action-pid"
     printf '%b' "$MENU_OUTPUT"
     exit "$MENU_STATUS"
@@ -103,6 +106,7 @@ fn menu_command(fixture: &CliFixture, layout_output: &str, name_output: &str) ->
         .env("DIRECTORY_OUTPUT", "gon\n")
         .env("DIRECTORY_STATUS", "0")
         .env_remove("REMOVE_DIRECTORY")
+        .env_remove("REPLACE_LAYOUT")
         .env("NOTIFY_STATUS", "0");
     menu_command
 }
@@ -201,12 +205,12 @@ fn run_with_recorded_snapshot(
 }
 
 #[test]
-fn cancellation_lists_lexical_labels_without_parsing_or_side_effects() {
+fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     fixture.file("writing.yaml", "malformed: [");
-    fixture.file("browsing.yml", "not executable YAML");
-    fixture.file("development.yaml", "");
+    fixture.file("browsing.yml", SINGLE_WINDOW_YAML);
+    fixture.file("development.yaml", SINGLE_WINDOW_YAML);
     let output = run_on_empty_workspace(
         &fixture,
         menu_command(&fixture, "", "")
@@ -218,7 +222,7 @@ fn cancellation_lists_lexical_labels_without_parsing_or_side_effects() {
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path.join("options")).unwrap(),
-        "browsing\ndevelopment\nwriting\n"
+        "browsing\ndevelopment\n[invalid] writing\n"
     );
     assert_log_preserved(&fixture);
     assert!(!fixture.path.join(".config").exists());
@@ -226,9 +230,115 @@ fn cancellation_lists_lexical_labels_without_parsing_or_side_effects() {
 }
 
 #[test]
+fn all_valid_layouts_keep_plain_labels_and_cancel_without_notification() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    for name in ["z.yaml", "a.yml"] {
+        fixture.file(name, SINGLE_WINDOW_YAML);
+    }
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "", "")
+            .env("MENU_STATUS", "2")
+            .args(["--layouts-dir", ".", "menu"]),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("options")).unwrap(),
+        "a\nz\n"
+    );
+    assert!(!fixture.path.join("notification").exists());
+    assert_log_preserved(&fixture);
+}
+
+#[test]
+fn invalid_contents_are_marked_and_refused_before_loading() {
+    let invalid_layouts = [
+        "malformed: [".to_owned(),
+        format!("{SINGLE_WINDOW_YAML}focus: missing\n"),
+        SINGLE_WINDOW_YAML.replace("[does-not-need-to-exist]", "null"),
+        format!("{SINGLE_WINDOW_YAML}cwd: /does-not-exist-sway-stage\n"),
+        format!("{SINGLE_WINDOW_YAML}unexpected: true\n"),
+    ];
+    for contents in invalid_layouts {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("a-invalid.yaml", &contents);
+        fixture.file("z-valid.yaml", SINGLE_WINDOW_YAML);
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, "[invalid] a-invalid\n", "").args([
+                "--layouts-dir",
+                ".",
+                "menu",
+            ]),
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "[invalid] a-invalid\nz-valid\n"
+        );
+        let explanation =
+            "Layout 'a-invalid' is invalid. Run sway-stage check a-invalid for details.";
+        assert!(String::from_utf8_lossy(&output.stderr).contains(explanation));
+        assert_preload_notification(&fixture, explanation);
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("a-invalid.yaml")).unwrap(),
+            contents
+        );
+    }
+}
+
+#[test]
+fn all_invalid_layouts_report_check_guidance_without_opening_fuzzel() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    fixture.file("syntax.yaml", "malformed: [");
+    fixture.file(
+        "draft.yaml",
+        &SINGLE_WINDOW_YAML.replace("[does-not-need-to-exist]", "null"),
+    );
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "", "").args(["--layouts-dir", ".", "menu"]),
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(!fixture.path.join("arguments").exists());
+    let explanation = "No valid layouts found. Run sway-stage check NAME to inspect a layout.";
+    assert!(String::from_utf8_lossy(&output.stderr).contains(explanation));
+    assert_preload_notification(&fixture, explanation);
+}
+
+#[test]
+fn changed_layout_is_validated_again_after_selection_before_loader_ipc() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("replacement", "malformed: [");
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "writing\n", "")
+            .env("REPLACE_LAYOUT", fixture.path.join("writing.yaml"))
+            .args(["--layouts-dir", ".", "menu"]),
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("options")).unwrap(),
+        "writing\n"
+    );
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(log.contains("menu load"), "{log}");
+    assert!(log.contains("writing.yaml"), "{log}");
+    assert!(!log.contains("validated layout"), "{log}");
+    assert!(!log.contains("subscribe"), "{log}");
+}
+
+#[test]
 fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics() {
     for (response, status, expected) in [
         ("Load: writing\n", "0", "not offered"),
+        ("[invalid] writing\n", "0", "not offered"),
         ("unknown\n", "0", "not offered"),
         ("Capture current layout\n", "0", "not offered"),
         ("Capture current layout…\n", "0", "not offered"),
@@ -283,7 +393,7 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
         fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
-        // Unselected layouts must not be parsed.
+        // Invalid unselected layouts do not prevent a valid selection from loading.
         fixture.file("broken.yaml", "malformed: [");
         let mut menu_command = menu_command(&fixture, "writing\n", "");
         menu_command.args(["--layouts-dir", ".", "menu"]);
@@ -607,17 +717,22 @@ fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
     assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
 
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
+    let capture_arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
     let output = run_on_empty_workspace(
         &fixture,
         menu_command(&fixture, "development\n", "").arg("menu"),
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("capture placeholder"), "{stderr}");
-    assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
-    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
-    assert!(log.contains("menu load"), "{log}");
-    assert!(!log.contains("validated layout"), "{log}");
+    assert!(stderr.contains("No valid layouts found"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("arguments")).unwrap(),
+        capture_arguments
+    );
+    assert_preload_notification(
+        &fixture,
+        "No valid layouts found. Run sway-stage check NAME to inspect a layout.",
+    );
 
     // Failed validation neither repairs nor removes the captured layout.
     assert_eq!(fs::read_to_string(&path).unwrap(), saved);

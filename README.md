@@ -72,6 +72,10 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage capture > draft.yaml` | Capture the current arrangement as an editable draft. |
 | `sway-stage menu` | Load a layout or save a named capture through Fuzzel. |
 
+On an empty workspace, the menu shows valid layouts normally and marks invalid or
+incomplete layouts `[invalid]`. Invalid layouts cannot launch; run `sway-stage check NAME`
+for detailed validation errors. Validation does not guarantee applications will launch.
+
 Use `--layouts-dir PATH` to read layouts and save menu captures elsewhere.
 Captures preserve arrangement, sizes, selectors, and focus; they need commands filled in
 before loading. `capture --infer-commands` and `menu --infer-commands` can recover process

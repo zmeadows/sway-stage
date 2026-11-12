@@ -1,7 +1,8 @@
 //! Optional synchronous Fuzzel interface and private, non-overwriting saves of captured
 //! drafts into the layouts directory.
 
-use crate::{capture, diagnostics, discovery};
+use crate::{capture, config, diagnostics, discovery};
+use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -24,6 +25,8 @@ pub enum FailureKind {
     Snapshot,
     LayoutDiscovery,
     NoLayouts,
+    NoValidLayouts,
+    InvalidLayout(String),
     Capture,
     FuzzelStart,
     FuzzelResponse,
@@ -60,10 +63,26 @@ pub fn select_layout(
         ));
     }
 
+    // Build prompt text in discovery order, and keep exact labels paired with identities.
     let mut prompt_input = String::new();
-    for name in layouts.keys() {
-        prompt_input.push_str(name);
+    let mut choices = BTreeMap::new();
+    for (name, path) in layouts {
+        let is_valid = config::read(&path).is_ok();
+        let label = if is_valid {
+            name.clone()
+        } else {
+            format!("[invalid] {name}")
+        };
+        prompt_input.push_str(&label);
         prompt_input.push('\n');
+        choices.insert(label, (name, is_valid));
+    }
+
+    if !choices.values().any(|(_, is_valid)| *is_valid) {
+        return Err(Error::new(
+            FailureKind::NoValidLayouts,
+            "No valid layouts found. Run sway-stage check NAME to inspect a layout.",
+        ));
     }
 
     let Some(selection) = fuzzel(
@@ -76,14 +95,21 @@ pub fn select_layout(
         return Ok(None);
     };
 
-    if !layouts.contains_key(&selection) {
-        return Err(Error::new(
+    let (name, is_valid) = choices.remove(&selection).ok_or_else(|| {
+        Error::new(
             FailureKind::FuzzelResponse,
             "selection: Fuzzel returned an option that was not offered; use dmenu text output",
+        )
+    })?;
+
+    if !is_valid {
+        return Err(Error::new(
+            FailureKind::InvalidLayout(name.clone()),
+            format!("Layout '{name}' is invalid. Run sway-stage check {name} for details."),
         ));
     }
 
-    Ok(Some(selection))
+    Ok(Some(name))
 }
 
 /// Names and paths stay paired: typed Fuzzel input never becomes a filesystem path.

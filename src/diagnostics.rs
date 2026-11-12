@@ -155,13 +155,19 @@ pub fn notify_menu_failure(error: &crate::menu::Error) -> Result<(), String> {
 fn menu_failure_body(error: &crate::menu::Error) -> String {
     use crate::menu::FailureKind;
 
-    let summary = match error.kind {
+    let summary = match &error.kind {
         FailureKind::Snapshot => return failure_body("menu", &error.detail, "", false),
         FailureKind::LayoutDiscovery => {
             "Cannot list saved layouts. Check the layouts directory and filenames."
         }
         FailureKind::NoLayouts => {
             "No saved layouts found. Add a YAML file to your layouts directory."
+        }
+        FailureKind::NoValidLayouts => {
+            "No valid layouts found. Run sway-stage check NAME to inspect a layout."
+        }
+        FailureKind::InvalidLayout(name) => {
+            return format!("Layout '{name}' is invalid. Run sway-stage check {name} for details.");
         }
         FailureKind::Capture => {
             "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus."
@@ -447,6 +453,7 @@ mod tests {
             FailureKind::Snapshot,
             FailureKind::LayoutDiscovery,
             FailureKind::NoLayouts,
+            FailureKind::NoValidLayouts,
             FailureKind::Capture,
             FailureKind::FuzzelStart,
             FailureKind::FuzzelResponse,
