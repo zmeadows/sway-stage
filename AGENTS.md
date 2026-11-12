@@ -18,46 +18,67 @@ other compositors, or a graphical editor unless explicitly requested.
 ## Engineering principles
 
 Readability is an engineering requirement here, not a cosmetic preference: safety checks
-that a maintainer cannot follow will eventually be broken. Naming, visual structure, and
-the readability review below apply to every source change.
+that a maintainer cannot follow will eventually be broken. These standards and the human
+readability review below apply to all Rust code: production code, tests, Rust fixtures,
+diagnostic tools, and the independent integration harness. Simplification must preserve
+the safety invariants below.
 
-- Write code a reader can follow in execution order. Prefer concrete types, ordinary
-  functions, `if`, `match`, loops, early returns, and named intermediate values when
-  they express the operation clearly. Concise idiomatic expressions are welcome when
-  they are easier to read.
-- **Descriptive naming.** Choose identifiers that state a value's role, meaning, or units
-  and an operation's effect: `preexisting_ids`, `expected_hierarchy`, `child_index`,
-  `window_timeout_ms`, `apply_sizing`. Use a specific name wherever a generic one (`node`,
-  `expected`, `existing`, `index`, `value`) could be confused with a nearby concept,
-  especially configured layout versus observed Sway state (`LayoutNode` versus
-  `swayipc::Node`). Short names are fine when the scope makes them obvious; do not
-  sacrifice clarity for brevity or expand names that merely restate their type.
+- **Descriptive naming.** Name types, enum variants, struct fields, functions, arguments,
+  and locals for their specific meaning and role. Prefer `target_workspace_id` over `id`
+  when multiple identities are involved, and `child_window_index` over `index` when its
+  role would otherwise be ambiguous. Include units where they matter: `window_timeout_ms`,
+  `input_bytes`, `width_pixels`. Clearly distinguish configured layouts, expected
+  hierarchies, observed Sway trees, accepted windows, and preexisting windows, including
+  `LayoutNode` versus `swayipc::Node`. Function names should communicate the operation and
+  whether it inspects, validates, constructs, mutates, or persists. Keep short names when
+  their meaning is obvious within a small local scope; avoid redundant verbosity and
+  mechanically repeating type information. Aim for maximum useful clarity, not maximum
+  identifier length.
 - **Visual structure.** Separate meaningful phases (validation, preparation, computation,
-  side effects, verification, reporting) with intentional blank lines, and keep tightly
-  related statements together. Never compact a function into a wall of statements because
-  the formatter permits it, and never insert blank lines mechanically. Prefer a named
-  intermediate value to a dense expression or awkward formatter wrapping; do not add
-  helpers only to create visual separation.
-- Keep related operations together and side effects apparent. A coherent longer
-  function is preferable to layers of trivial delegation. Extract helpers to clarify
-  responsibilities, enforce invariants, or remove meaningful duplication.
-- Start with a direct implementation. Traits, generics, builders, macros, callback
-  systems, and frameworks must solve a demonstrated problem. Do not build an IPC
-  abstraction framework solely to mock tests.
-- Make authoritative state obvious. Use ownership, enums, and `Result` to express real
-  constraints; avoid independently mutable copies of the same facts. Keep launch,
-  observation, validation, and mutation ordering explicit.
-- Validate at boundaries: CLI, YAML, filesystem, processes, and IPC. Unknown keys and
-  ambiguous window matches are errors. Include actionable context in errors; reserve
-  panics and `unwrap`/`expect` for established internal invariants, never ordinary input
-  or external failures.
-- Comments explain constraints, surprising choices, and ordering requirements. Avoid
-  narrating obvious statements, unexplained magic values, or commented-out alternatives.
+  IPC operations, state changes, verification, reporting) with intentional blank lines.
+  Group tightly related statements and break up long sequences of unrelated work. Use
+  blank lines around consequential guards or state transitions when they clarify the flow;
+  never insert blank lines mechanically after every statement. Do not compact a function
+  into a wall of statements because the formatter permits it, or extract helpers only to
+  create visual separation.
+- **Visible control flow.** Write straightforward procedural Rust that a reader can
+  follow in execution order. Prefer ordinary functions, `if`, `match`, and loops when
+  they make the operation clearer. Use early returns and `let ... else` for clear
+  preconditions. Name intermediate values when deeply nested expressions, large
+  expressions, or closure chains obscure meaning. Iterators, closures, and combinators
+  are welcome when they are clearer. Make expensive operations, fallible calls, and
+  side effects apparent at their call sites. Keep launch, observation, validation, and
+  mutation ordering explicit.
+- **Justified abstractions.** Start with a direct implementation; every abstraction must
+  justify its cognitive cost. Traits, generics, builders, macros, callback systems,
+  indirection, and frameworks must solve a demonstrated problem, not serve architectural
+  neatness or hypothetical future needs. Do not build an IPC abstraction framework solely
+  to mock tests. Keep a coherent operation together: a longer function can be clearer
+  than layers of trivial delegation. Extract functions to isolate meaningful
+  responsibilities or invariants, remove meaningful duplication, or clarify side effects.
+  Judge maintainability by the total complexity a reader must understand, not function
+  length or line count alone.
+- **Authoritative state and ownership.** Use ordinary Rust ownership, enums, and `Result`
+  to express real constraints. Prefer concrete types and clear lifetime relationships.
+  Avoid unnecessary clones, allocations, conversions, and defensive state. Derive values
+  when practical instead of synchronizing independently mutable copies of the same facts;
+  do not duplicate enum state or other authoritative information with booleans. Any
+  necessary duplicated state must have an explicit invariant and clear update points.
+- **Boundary validation and errors.** Validate CLI, YAML, filesystem, process, and IPC
+  boundaries. Unknown keys and ambiguous window matches are errors. Include actionable
+  context in errors; reserve panics and `unwrap`/`expect` for established internal
+  invariants, never ordinary input or external failures.
+- **Comments and constants.** Explain why constraints, surprising choices, safety checks,
+  and ordering requirements matter. Do not narrate obvious statements or leave
+  commented-out alternatives. Make names and control flow explain ordinary operations
+  without compensating comments. Use named constants for meaningful limits when they
+  clarify intent; avoid unexplained magic values and constants for self-explanatory
+  literals. Keep implementation details in source rather than expanding user-facing
+  documentation to explain them.
 - Follow `.editorconfig` and `rustfmt.toml`: UTF-8, LF, four-space Rust indentation,
-  two-space YAML indentation, and 100-column Rust formatting. `cargo fmt` is necessary
-  but not sufficient; it makes no naming or phase-separation decisions. For genuinely
-  table-like code only, a narrowly scoped `#[rustfmt::skip]` may preserve one entry per
-  line; rustfmt governs everything else.
+  two-space YAML indentation, and 100-column Rust formatting. For genuinely table-like
+  code only, a narrowly scoped `#[rustfmt::skip]` may preserve one entry per line;
+  rustfmt governs everything else.
 - Make the smallest coherent change. Avoid speculative generalization, unrelated
   cleanup, module scaffolding, and churn. Add a module only for a substantial, coherent
   responsibility; keep one binary crate until there is a concrete reason to change.
@@ -67,6 +88,7 @@ runtime or invoke `swaymsg` for core behavior. Prefer the standard library for p
 launches and simple filesystem work. Keep `Cargo.lock` checked in. Add dependencies only
 when used, review maintenance, transitive dependencies, features, licensing, and compiler
 compatibility, and verify the locked graph on the MSRV. Do not silently raise it.
+Do not add dependencies for stylistic reasons.
 
 ## Safety invariants
 
@@ -146,12 +168,23 @@ termination must target only a harness-owned direct child by PID, never a proces
 descendant application, or process discovered through `/proc`.
 
 **Human readability review.** After every source change, reread the modified code in full
-as a maintainer meeting it for the first time, not only as a diff. Check that names are
-informative enough to follow without reconstructing context; that control flow and phases
-are visible at a glance; and that a reader can identify authoritative data, side effects,
-failure paths, and the reason for each helper. Fix what fails this review before reporting
-the work as done. Update only documentation affected by the change. Do not leave `dbg!`,
-`todo!`, or `unimplemented!` in checked-in code.
+as a new maintainer, not merely as a patch. Inspect surrounding code and callers as needed
+to follow the complete operation. Answer these questions:
+
+- Can a new maintainer understand the control flow at a glance, with distinct execution
+  phases visually separated?
+- Are identifiers informative enough to follow without reconstructing context?
+- Can the reader identify authoritative values, side effects, validation boundaries,
+  and failure paths?
+- Are any expressions unnecessarily compressed or abstractions making the operation
+  harder to follow?
+- Would a simpler, more direct representation be clearer while preserving correctness
+  and safety?
+
+Fix what fails this review before reporting the work as done. Passing `cargo fmt` or
+Clippy does not establish readability; review naming and human-readable grouping
+separately. Update only documentation affected by the change. Do not leave `dbg!`, `todo!`,
+or `unimplemented!` in checked-in code.
 
 Run applicable checks (use `cargo fmt --all` to format):
 
