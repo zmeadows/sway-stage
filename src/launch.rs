@@ -12,7 +12,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -795,7 +795,7 @@ impl<'a> Construction<'a> {
         // From here on, a failure may leave this application and a partial layout behind.
         self.diagnostics.spawned(process.id());
 
-        let mut process_exited = false;
+        let mut process_exit_status = None;
         let mut provisional_window_id = None;
         let mut expected_after = self.expected_hierarchy.clone();
         loop {
@@ -807,9 +807,9 @@ impl<'a> Construction<'a> {
             self.diagnostics
                 .stage(format!("{stage} leaf={configured_window_id:?}"));
             if Instant::now() >= window_deadline {
-                return Err(format!(
-                    "window timeout: {}",
-                    new_windows.wait_diagnostics(launch_started_at)
+                return Err(self.diagnostics.window_timeout(
+                    &new_windows.wait_diagnostics(launch_started_at),
+                    process_exit_status,
                 ));
             }
 
@@ -871,7 +871,7 @@ impl<'a> Construction<'a> {
                     self.diagnostics.record(&format!(
                         "accepted leaf={configured_window_id:?} id={provisional_window_id}; hierarchy/identity verified"
                     ));
-                    reap_if_exited(&mut process, &mut process_exited, self.diagnostics)?;
+                    reap_if_exited(&mut process, &mut process_exit_status, self.diagnostics)?;
                     self.accepted_windows.insert(provisional_window_id, matcher);
                     self.expected_hierarchy = expected_after;
                     return Ok(window_path);
@@ -883,7 +883,7 @@ impl<'a> Construction<'a> {
                 }
             }
 
-            reap_if_exited(&mut process, &mut process_exited, self.diagnostics)?;
+            reap_if_exited(&mut process, &mut process_exit_status, self.diagnostics)?;
             let poll_until = window_deadline.min(Instant::now() + POLL_INTERVAL);
             while let Some(event) = self.observer.next_until(poll_until)? {
                 new_windows.observe_event(&event, self.diagnostics)?;
@@ -1194,15 +1194,15 @@ fn spawn(
 
 fn reap_if_exited(
     process: &mut Child,
-    process_exited: &mut bool,
+    process_exit_status: &mut Option<ExitStatus>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
-    if !*process_exited
+    if process_exit_status.is_none()
         && let Some(status) = process
             .try_wait()
             .map_err(|error| format!("inspect child: {error}"))?
     {
-        *process_exited = true;
+        *process_exit_status = Some(status);
         diagnostics.record(&format!(
             "launch process exited: {status}; continuing window observation (delegation is allowed)"
         ));

@@ -502,7 +502,10 @@ Menu cancellation, selection errors, capture, and saves leave the launch log unt
 Capture failures report through stderr and notifications only. After a failed load that
 started applications, inspect remaining windows before retrying; failure messages identify
 the stage and log path when available. Timeouts distinguish no new windows from new windows
-that failed to match, with observed IDs, selectors, locations, and floating state.
+that failed to match, with observed IDs, selectors, locations, and floating state. When
+already observed, the launch process's exit code or terminating signal adds context to the
+timeout; successful launcher exits may reflect delegation. Concise timeout notifications
+include only nonzero exit codes or terminating signals. Process exit never shortens the wait.
 
 | Symptom | What to check |
 | --- | --- |

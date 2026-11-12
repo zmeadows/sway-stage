@@ -8,8 +8,9 @@ use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,8 @@ pub struct Diagnostics {
     current_stage: String,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
     application_spawned: bool,
+    /// Set only when returning a window timeout, for its concise notification.
+    timeout_process_status: Option<ExitStatus>,
 }
 
 impl Diagnostics {
@@ -35,6 +38,7 @@ impl Diagnostics {
             started_at: Instant::now(),
             current_stage: "test".into(),
             application_spawned: false,
+            timeout_process_status: None,
         }
     }
 
@@ -48,6 +52,7 @@ impl Diagnostics {
             started_at: Instant::now(),
             current_stage: "validation".into(),
             application_spawned: false,
+            timeout_process_status: None,
         };
 
         match last_run_log_path().and_then(open_log) {
@@ -100,6 +105,18 @@ impl Diagnostics {
         self.record(&format!("spawned pid={pid}"));
     }
 
+    /// Retains observed process status without another poll or changing the window deadline.
+    pub fn window_timeout(&mut self, detail: &str, process_status: Option<ExitStatus>) -> String {
+        self.timeout_process_status = process_status;
+        let mut error = format!("window timeout: {detail}");
+        if let Some(status) = process_status
+            && let Some(context) = launch_exit_context(status)
+        {
+            error.push_str(&format!(". {context}"));
+        }
+        error
+    }
+
     /// Logs and notifies a fatal error, returning the primary message for stderr.
     pub fn report_failure(&mut self, error: String) -> String {
         let mut message = format!("{}: {error}", self.current_stage);
@@ -114,17 +131,23 @@ impl Diagnostics {
         if let Some(log_path) = &self.log_path {
             message.push_str(&format!("; log: {}", log_path.display()));
         }
-        let notification = failure_body(
-            self.operation,
-            &error,
-            &self.current_stage,
-            self.log_file.is_some(),
-        );
+        let notification = self.failure_notification(&error);
         if let Err(error) = send_failure_notification(self.operation, &notification) {
             self.record(&format!("secondary notification failure: {error}"));
         }
 
         message
+    }
+
+    fn failure_notification(&mut self, error: &str) -> String {
+        let mut notification = failure_body(self.operation, error, &self.current_stage, false);
+        if let Some(status) = self.timeout_process_status.take()
+            && !status.success()
+            && let Some(context) = launch_exit_context(status)
+        {
+            notification.push_str(&format!(" {context}"));
+        }
+        with_log_reference(notification, self.log_file.is_some())
     }
 
     pub fn report_sizing_warnings(&mut self, warnings: &[String]) {
@@ -250,11 +273,27 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
         }
     };
 
+    with_log_reference(summary.to_owned(), log_available)
+}
+
+fn with_log_reference(summary: String, log_available: bool) -> String {
     if log_available {
         format!("{summary}\n\nSee last-run.log for details.")
     } else {
-        summary.to_owned()
+        summary
     }
+}
+
+fn launch_exit_context(status: ExitStatus) -> Option<String> {
+    if let Some(code) = status.code() {
+        if code == 0 {
+            return Some("Launch process exited successfully (delegation is allowed).".into());
+        }
+        return Some(format!("Launch process exited with code {code}."));
+    }
+    status
+        .signal()
+        .map(|signal| format!("Launch process terminated by signal {signal}."))
 }
 
 /// Best-effort save confirmation, independent of launch diagnostics.
@@ -368,6 +407,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timeout_diagnostics_and_notifications_use_only_known_exit_status() {
+        for (status, expected_detail, expected_notification) in [
+            (
+                Some(ExitStatus::from_raw(1 << 8)),
+                Some("Launch process exited with code 1."),
+                true,
+            ),
+            (
+                Some(ExitStatus::from_raw(11)),
+                Some("Launch process terminated by signal 11."),
+                true,
+            ),
+            (
+                Some(ExitStatus::from_raw(0)),
+                Some("Launch process exited successfully (delegation is allowed)."),
+                false,
+            ),
+            (None, None, false), // Still running, or no status has been observed.
+            (Some(ExitStatus::from_raw(0x7f)), None, false), // No exit code or signal available.
+        ] {
+            for log_available in [false, true] {
+                let mut diagnostics = Diagnostics {
+                    operation: "load",
+                    log_file: log_available.then(|| File::open("/dev/null").unwrap()),
+                    log_path: None,
+                    started_at: Instant::now(),
+                    current_stage: "wait".into(),
+                    application_spawned: true,
+                    timeout_process_status: None,
+                };
+                let detail = format!("no new windows observed; leaf={}", "x".repeat(10000));
+                let error = diagnostics.window_timeout(&detail, status);
+                assert!(error.starts_with(&format!("window timeout: {detail}")));
+                if let Some(context) = expected_detail {
+                    assert!(error.ends_with(context), "{error}");
+                } else {
+                    assert_eq!(error, format!("window timeout: {detail}"));
+                }
+
+                // Exercise the same structured context and body path as report_failure,
+                // including the layout wrapper applied by its caller.
+                let body =
+                    diagnostics.failure_notification(&format!("layout \"development\": {error}"));
+                assert!(body.starts_with("The expected window was not ready in time."));
+                assert_eq!(
+                    body.contains("Launch process"),
+                    expected_notification,
+                    "{body}"
+                );
+                if expected_notification {
+                    assert!(body.contains(expected_detail.unwrap()), "{body}");
+                }
+                assert_eq!(
+                    body.contains("See last-run.log for details."),
+                    log_available
+                );
+                assert!(body.len() < 240, "{body}");
+                assert!(!body.contains("leaf="));
+            }
+        }
+    }
+
+    #[test]
     fn failure_notifications_summarize_recognized_causes() {
         for (error, expected) in [
             (
@@ -476,6 +578,7 @@ mod tests {
             started_at: Instant::now(),
             current_stage: "wait".into(),
             application_spawned: true,
+            timeout_process_status: None,
         };
         let error = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
         let terminal = diagnostics.report_failure(error.into());

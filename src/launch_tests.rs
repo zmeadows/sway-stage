@@ -981,6 +981,71 @@ fn timeout_distinguishes_no_new_windows_and_unresolved_identity() {
 }
 
 #[test]
+fn launcher_exit_is_timeout_context_and_never_shortens_the_wait() {
+    for (script_end, expected_context) in [
+        ("exit 1", Some("Launch process exited with code 1.")),
+        (
+            "kill -TERM $$",
+            Some("Launch process terminated by signal 15."),
+        ),
+        (
+            "exit 0",
+            Some("Launch process exited successfully (delegation is allowed)."),
+        ),
+        ("/bin/sleep 0.5", None),
+    ] {
+        let fixture = LaunchFixture::new();
+        let app_path = fixture.path.join("app");
+        let script = fs::read_to_string(&app_path).unwrap();
+        fs::write(&app_path, format!("{script}{script_end}\n")).unwrap();
+        let mut config = fixture.config();
+        config.window_timeout_ms = 260;
+        let started_at = Instant::now();
+        let error = fixture
+            .run(
+                &config,
+                vec![
+                    snapshot_step(empty_workspace_tree()),
+                    snapshot_step(empty_workspace_tree()),
+                    snapshot_step(empty_workspace_tree()),
+                ],
+            )
+            .unwrap_err();
+
+        assert!(started_at.elapsed() >= Duration::from_millis(config.window_timeout_ms));
+        assert!(error.starts_with("window timeout:"), "{error}");
+        assert!(error.contains("no new windows observed"), "{error}");
+        if let Some(context) = expected_context {
+            assert!(error.ends_with(context), "{error}");
+        } else {
+            assert!(!error.contains("Launch process"), "{error}");
+        }
+        assert_eq!(fixture.wait_for_launch_count(), 1);
+    }
+}
+
+#[test]
+fn matching_window_is_accepted_after_nonzero_launcher_exit() {
+    let fixture = LaunchFixture::new();
+    let app_path = fixture.path.join("app");
+    let script = fs::read_to_string(&app_path).unwrap();
+    fs::write(&app_path, format!("{script}exit 1\n")).unwrap();
+    let mut steps = successful_steps();
+    // Empty snapshots force observation to continue before the recorded window appears.
+    steps.insert(2, snapshot_step(empty_workspace_tree()));
+    steps.insert(2, snapshot_step(empty_workspace_tree()));
+    fixture
+        .run_with_finalization(&fixture.config(), steps)
+        .unwrap();
+
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    let exit_record = log.find("launch process exited: exit status: 1").unwrap();
+    let acceptance_record = log.find("accepted leaf=").unwrap();
+    assert!(exit_record < acceptance_record, "{log}");
+    assert_eq!(fixture.wait_for_launch_count(), 1);
+}
+
+#[test]
 fn spawn_failure_does_not_retry_and_child_path_lookup_is_used() {
     let fixture = LaunchFixture::new();
     let mut config = fixture.config();
