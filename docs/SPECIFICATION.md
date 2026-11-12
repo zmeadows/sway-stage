@@ -377,24 +377,38 @@ through the menu. Fill all remaining null placeholders and run `check` before lo
 
 ## Fuzzel menu
 
-`menu` requires Fuzzel 1.11+ on `PATH`, using default dmenu text output. It offers sorted
-`Load: NAME` entries followed by `Capture current layout…`, even with no layouts. Only exact
-offered actions are accepted; arbitrary typed action text is an error. Both prompts disable
-automatic exit on keyboard-focus loss, without changing Fuzzel's configured focus mode. Interactive
-input has no deadline. Escape at either prompt cancels successfully without saving/loading.
-Fuzzel cancellation requires exit status 2 and empty output; other failures, index output,
-control characters, or anything other than one UTF-8 newline-terminated line are errors.
+`menu` requires Fuzzel 1.11+ on `PATH`, using default dmenu text output. One read-only
+snapshot is saved **before the first prompt**. Choices depend on the actual focused
+workspace in that snapshot, never its name or number:
 
-One read-only snapshot is saved **before the first prompt**. Both prompts use its original
-output when known. Snapshot errors are deferred until an action needs the snapshot;
-cancellation remains available, and empty/unsupported capture layouts do not block Load.
+- **Empty:** both tiled and floating child lists must be empty, exactly as for loading.
+  Even an empty structural container counts as occupancy. Offer only discovered
+  `Load: NAME` entries in lexical order. If no layouts exist, report an error without
+  opening Fuzzel. Discovery does not parse files or imply that individual layouts are valid.
+- **Populated and capturable:** offer only `Capture current layout…`, after validating
+  the saved arrangement through capture rendering with command inference disabled.
+  Do not discover layouts; Capture remains available with no layouts or invalid discovery
+  entries. `--infer-commands` does not change eligibility when commands cannot be inferred.
+- **Populated and noncapturable:** report the capture validation reason without opening
+  Fuzzel, for example guidance to tile floating windows, exit fullscreen, or focus a window
+  instead of its parent. Load is unavailable on any occupied workspace.
+
+Initial snapshot failures report an error without opening Fuzzel. No unavailable-action
+case writes the launch log. Choices are fixed while the prompt is open; eligibility is a
+convenience and does not replace operation-specific validation after selection.
+
+Only exact offered actions are accepted; arbitrary typed action text is an error. All prompts
+use the original output when known and disable automatic exit on keyboard-focus loss,
+without changing Fuzzel's configured focus mode. Interactive input has no deadline. Escape
+at any offered prompt cancels successfully without saving/loading or replacing the launch
+log. Fuzzel cancellation requires exit status 2 and empty output; other failures, index
+output, control characters, or anything other than one UTF-8 newline-terminated line are errors.
 
 - **Load:** after Fuzzel exits, rediscover and validate the selected file, then require the
   original workspace identity to be focused and empty. A recreated workspace with the same
   name/number is refused. Focus is never restored automatically. Intermediate away-and-back
   changes while the menu is open need not be detected; construction then uses the normal
-  continuous focus/output safeguards. If the original identity is unavailable, loading
-  refuses after ordinary file validation.
+  continuous focus/output safeguards.
   With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
   `Directory:`, before loading. It enumerates only immediate children of the resolved
   top-level `cwd` using filesystem directory reads, without recursive scanning.
@@ -404,8 +418,8 @@ cancellation remains available, and empty/unsupported capture layouts do not blo
   appear in deterministic lexical order. Only an exact offered name is accepted; typed
   paths, fuzzy matches, root selection, and parent traversal are unavailable.
   An empty selectable list or enumeration failure is an error and launches nothing.
-  Escape cancels successfully and preserves the previous launch log, including when
-  the pre-menu snapshot failed. Selection errors also leave that log untouched.
+  Escape cancels successfully and preserves the previous launch log. Selection errors
+  also leave that log untouched.
   The selected path replaces the layout default; window `cwd` overrides still win.
   The path is validated again before loader IPC or application launches, so a removed
   or invalid directory fails without launching. Filesystem checks do not lock paths
@@ -426,8 +440,9 @@ failure does not fail the save. Cancellation and failed captures do not report s
 Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at
 most 250 ASCII characters, without an extension; input is not trimmed or normalized.
 Reject collisions at either `.yaml` or `.yml`, including symlinks. Create missing default
-directories only on save (0700); preserve existing directory permissions. A missing explicit
-directory fails discovery before prompting. New drafts are 0600.
+directories only on save (0700); preserve existing directory permissions. Capture also creates
+a missing explicit directory on save; Load reports its discovery error before prompting.
+New drafts are 0600.
 
 Saving requires hard-link support in that directory. Publish only complete drafts,
 exclusively, without overwriting an existing `.yaml`. Cross-suffix concurrent external
@@ -435,9 +450,9 @@ changes are not atomic. On write/publication failure, retain the reported `.part
 for inspection; it is outside discovery. Do not automatically remove uncertain files.
 A successful save attempts a path notification; notification failure does not fail the save.
 
-Drafts appear immediately in `list` and the menu. They are saved without executable-layout
-validation; `check` and `load` reject remaining placeholders before loader IPC or application launches. Edit
-them in place and check them. There is no automatic repair, execution, or deletion.
+Drafts appear immediately in `list` and in the menu on empty workspaces. They are saved
+without executable-layout validation; `check` and `load` reject remaining placeholders
+before loader IPC or application launches. Edit them in place and check them. There is no automatic repair, execution, or deletion.
 
 ## Diagnostics and troubleshooting
 

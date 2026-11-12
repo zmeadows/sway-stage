@@ -420,15 +420,20 @@ above instead of repeating manual capture acceptance. General edited-draft repla
 covered by the existing round-trip scenarios and can also be checked manually if desired.
 
 For menu acceptance, use a keybinding or delayed invocation with a temporary layouts
-directory. Check normal Load sizing/focus, occupied-target refusal, both Escape cancellations,
+directory. On an empty disposable workspace, confirm only sorted Load entries appear;
+with no layouts, expect an error and no prompt. On a tiled, capturable workspace, confirm
+only Capture appears, including with no layouts or duplicate discovery names. With floating
+or fullscreen windows, empty structural containers, or parent focus, expect capture guidance
+and no prompt. Check normal Load sizing/focus, occupied-target refusal, Escape at each prompt,
 invalid/colliding names, saved draft discovery, placeholder rejection, and edited-draft
 validation. Repeat captures with `--infer-commands`, reviewing recovered arguments. Captures
 must preserve pre-menu hierarchy, weights, selectors, and focus even when pointer/window
 focus or workspace changes during either prompt. Both prompts should use the original
 output. Capture/cancellation must leave the previous launch log untouched; Load replaces it.
 A valid Load selection after switching to another workspace (or recreating the same name)
-must refuse without launching, mutating, or restoring focus. Cancellation must work even
-when the initial snapshot fails; invalid files still receive ordinary validation errors.
+must refuse without launching, mutating, or restoring focus. An initial snapshot failure
+must report an error without opening Fuzzel or replacing the launch log. On an eligible empty
+workspace, selecting an invalid file must still receive ordinary validation errors.
 
 For project-directory selection, use a trusted test layout with `cwd: ~/Projects` and
 `cwd_select: true`, with at least two non-hidden child directories. On an empty disposable
