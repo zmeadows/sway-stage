@@ -413,6 +413,7 @@ fn launch_wait_still_tolerates_preexisting_close_and_refuses_provisional_or_unkn
 fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation() {
     let fixture = Fixture::new();
     let original_path = env::var_os("PATH");
+    let original_cwd = env::current_dir().unwrap();
     fixture
         .run_finished(&fixture.config(), successful_steps())
         .unwrap();
@@ -435,6 +436,95 @@ fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation(
     );
     assert!(!fixture.path.join("bad").exists());
     assert_eq!(env::var_os("PATH"), original_path);
+    assert_eq!(env::current_dir().unwrap(), original_cwd);
+}
+
+#[test]
+fn effective_directory_uses_window_then_layout_then_parent() {
+    let parent_cwd = env::current_dir().unwrap();
+    let parent_environment = env::vars_os().collect::<BTreeMap<_, _>>();
+    for (default, override_cwd, bare_executable) in [
+        (None, None, false),
+        (Some("absolute"), None, false),
+        (Some("default"), None, false),
+        (Some("default"), None, true),
+        (Some("default"), Some("override"), false),
+    ] {
+        let fixture = Fixture::new();
+        for directory in ["default", "override"] {
+            fs::create_dir(fixture.path.join(directory)).unwrap();
+            fs::copy(
+                fixture.path.join("app"),
+                fixture.path.join(directory).join("app"),
+            )
+            .unwrap();
+        }
+        let expected_cwd = match override_cwd.or(default) {
+            Some("absolute") => fixture.path.clone(),
+            Some(directory) => fixture.path.join(directory),
+            None => parent_cwd.clone(),
+        };
+        let default_field = match default {
+            Some("absolute") => format!("cwd: '{}'\n", fixture.path.display()),
+            Some(directory) => format!("cwd: {directory}\n"),
+            None => String::new(),
+        };
+        let window_field = override_cwd
+            .map(|directory| format!("cwd: {directory}, "))
+            .unwrap_or_default();
+        let executable = if bare_executable {
+            "app".to_owned()
+        } else if default.is_some() {
+            "./app".to_owned()
+        } else {
+            fixture.path.join("app").display().to_string()
+        };
+        // Record outside the child cwd so the omitted-directory case remains isolated.
+        let app = expected_cwd.join("app");
+        let app = if default.is_none() {
+            fixture.path.join("app")
+        } else {
+            app
+        };
+        fs::write(
+            &app,
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$MARKER\" > \"$OUTPUT\"\n",
+        )
+        .unwrap();
+        let output = fixture.path.join("result");
+        let yaml = format!(
+            "version: 1\n{default_field}window_timeout_ms: 500\nlayout: {{id: test, command: ['{executable}'], match: {{app_id: expected}}, {window_field}env: {{OUTPUT: '{}', MARKER: child-value, PATH: '{}'}}}}\n",
+            output.display(),
+            expected_cwd.display()
+        );
+        let config = crate::config::parse(&yaml, &fixture.path.join("layout.yaml")).unwrap();
+        let expected_default = default.map(|directory| {
+            if directory == "absolute" {
+                fixture.path.clone()
+            } else {
+                fixture.path.join(directory)
+            }
+        });
+        assert_eq!(config.cwd, expected_default);
+        fixture.run_finished(&config, successful_steps()).unwrap();
+        let limit = deadline();
+        let expected = format!("{}\nchild-value\n", expected_cwd.display());
+        loop {
+            if fs::read_to_string(&output).unwrap_or_default() == expected {
+                break;
+            }
+            assert!(
+                Instant::now() < limit,
+                "child did not record expected directory"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(env::current_dir().unwrap(), parent_cwd);
+        assert_eq!(
+            env::vars_os().collect::<BTreeMap<_, _>>(),
+            parent_environment
+        );
+    }
 }
 
 #[test]
@@ -1061,10 +1151,22 @@ fn horizontal_vertical_and_three_siblings_use_exact_ids_with_repeated_app_ids() 
             .map(|i| leaf(&fixture, i))
             .collect::<Vec<_>>()
             .join(",");
-        let config = layout_config(
-            &fixture,
-            &format!("{{group: {axis}, children: [{leaves}]}}"),
-        );
+        let yaml_layout = if count == 3 {
+            let app_path = fixture.path.join("app");
+            let script = fs::read_to_string(&app_path).unwrap().replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >> directories\n",
+            );
+            fs::write(app_path, script).unwrap();
+            let explicit_cwd = format!("cwd: '{}', ", fixture.path.display());
+            format!(
+                "{{group: {axis}, children: [{}]}}\ncwd: .",
+                leaves.replace(&explicit_cwd, "")
+            )
+        } else {
+            format!("{{group: {axis}, children: [{leaves}]}}")
+        };
+        let config = layout_config(&fixture, &yaml_layout);
         let mut steps = vec![step(tree())];
         let first = arranged("splith", vec![window(20)], 20);
         launch_steps(&mut steps, &tree(), &first);
@@ -1092,6 +1194,13 @@ fn horizontal_vertical_and_three_siblings_use_exact_ids_with_repeated_app_ids() 
             current = next;
         }
         finish(&fixture, &config, steps, count);
+        if count == 3 {
+            let directories = fs::read_to_string(fixture.path.join("directories")).unwrap();
+            assert_eq!(
+                directories,
+                format!("{}\n", fixture.path.display()).repeat(count)
+            );
+        }
     }
 }
 
@@ -1754,6 +1863,7 @@ fn completed_session(
             baseline_foreign_ids: HashSet::new(),
             accepted,
             expected_hierarchy: expected,
+            default_cwd: None,
             window_timeout_ms: config.window_timeout_ms,
         };
         session.verify(&initial)?;

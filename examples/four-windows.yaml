@@ -4,6 +4,8 @@
 # Mirrors sway_four_windows.py: Firefox, middle Foot, then two right-hand Foot windows.
 # Unlike the script's PID suffixes, these explicit IDs are stable. Only new windows match.
 version: 1
+# Shared project directory; replace with your project path. Relative to this YAML file.
+cwd: ..
 focus: browser # Optional; the first leaf is also the default.
 layout:
   group: splith

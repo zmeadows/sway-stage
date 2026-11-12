@@ -21,6 +21,8 @@ pub struct Config {
     version: u64,
     pub layout: Spanned<LayoutNode>,
     #[serde(default, deserialize_with = "non_null")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, deserialize_with = "non_null")]
     pub focus: Option<String>,
     #[serde(
         default = "default_window_timeout_ms",
@@ -302,6 +304,10 @@ pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
     }
 
     let layout_dir = path.parent().unwrap_or(Path::new("."));
+    if let Some(directory) = &mut config.cwd {
+        resolve_directory(directory, layout_dir).map_err(|error| format!("cwd: {error}"))?;
+    }
+
     let mut window_ids = HashSet::new();
     let mut node_count = 0;
     validate_node(
@@ -432,25 +438,7 @@ fn validate_node(
             }
 
             if let Some(directory) = cwd {
-                if directory.as_os_str().is_empty()
-                    || directory.as_os_str().as_encoded_bytes().contains(&0)
-                {
-                    return Err(fail(
-                        ".cwd",
-                        "provide a nonempty directory path without NUL",
-                    ));
-                }
-                let resolved = layout_dir.join(&directory);
-                let metadata = fs::metadata(&resolved).map_err(|error| {
-                    fail(".cwd", &format!("inspect {}: {error}", resolved.display()))
-                })?;
-                if !metadata.is_dir() {
-                    return Err(fail(
-                        ".cwd",
-                        &format!("{} is not a directory", resolved.display()),
-                    ));
-                }
-                *directory = resolved;
+                resolve_directory(directory, layout_dir).map_err(|error| fail(".cwd", &error))?;
             }
 
             for (key, value) in env {
@@ -466,6 +454,22 @@ fn validate_node(
             }
         }
     }
+    Ok(())
+}
+
+/// Validates an explicit directory and resolves it against the YAML file's directory.
+fn resolve_directory(directory: &mut PathBuf, layout_dir: &Path) -> Result<(), String> {
+    if directory.as_os_str().is_empty() || directory.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err("provide a nonempty directory path without NUL".into());
+    }
+
+    let resolved = layout_dir.join(&directory);
+    let metadata = fs::metadata(&resolved)
+        .map_err(|error| format!("inspect {}: {error}", resolved.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a directory", resolved.display()));
+    }
+    *directory = resolved;
     Ok(())
 }
 
@@ -535,6 +539,7 @@ mod tests {
             "version: 1\nlayout:\n  id: '1'\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words']\n  match: {class: Example}\n  cwd: ..\n  env: {'1': '', PATH: 'literal:$PATH'}\n",
         ).unwrap();
         assert!(config.focus.is_none());
+        assert!(config.cwd.is_none());
         assert_eq!(config.layout.value.weight(), 1.0);
         let NodeKind::Window {
             command,
@@ -620,7 +625,7 @@ mod tests {
         ] {
             assert!(parse_test(&input).is_err(), "accepted {input}");
         }
-        for field in ["focus", "window_timeout_ms"] {
+        for field in ["focus", "window_timeout_ms", "cwd"] {
             rejects(
                 &format!("version: 1\nlayout: {WINDOW}\n{field}: null"),
                 field,
@@ -827,6 +832,23 @@ mod tests {
             );
             rejects(&input, "cwd");
         }
+        for cwd in [
+            "''",
+            "missing-sway-stage-test-directory",
+            "../Cargo.toml",
+            r#""a\0b""#,
+            "[]",
+            "{}",
+            "true",
+            "123",
+        ] {
+            rejects(&format!("version: 1\ncwd: {cwd}\nlayout: {WINDOW}"), "cwd");
+        }
+        // A valid default must never hide an invalid explicit window override.
+        rejects(
+            "version: 1\ncwd: .\nlayout: {id: t, command: [foot], match: {app_id: foot}, cwd: missing-sway-stage-test-directory}",
+            "layout.cwd",
+        );
         for env in ["{'': x}", "{'A=B': x}", r#"{"A\0B": x}"#, r#"{A: "x\0y"}"#] {
             let input = format!(
                 "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, env: {env}}}"

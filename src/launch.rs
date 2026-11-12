@@ -92,6 +92,7 @@ fn load_with(
         accepted: BTreeMap::new(),
         expected_hierarchy: empty_workspace,
         window_timeout_ms: config.window_timeout_ms,
+        default_cwd: config.cwd.as_ref(),
     };
     let root_path = session.build(&config.layout.value, None)?;
 
@@ -216,6 +217,7 @@ struct Construction<'a> {
     accepted: BTreeMap<i64, &'a Matcher>,
     expected_hierarchy: Hierarchy,
     window_timeout_ms: u64,
+    default_cwd: Option<&'a PathBuf>,
 }
 
 impl<'a> Construction<'a> {
@@ -736,7 +738,8 @@ impl<'a> Construction<'a> {
         self.diagnostics.record(&format!(
             "expected {matcher:?}; launching once (argv/env omitted)"
         ));
-        let mut process = spawn(command, cwd.as_ref(), env)?;
+        let effective_cwd = cwd.as_ref().or(self.default_cwd);
+        let mut process = spawn(command, effective_cwd, env)?;
         // From here on, a failure may leave this application and a partial layout behind.
         self.diagnostics.spawned(process.id());
 

@@ -45,6 +45,7 @@ top-level keys:
 | --- | --- |
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a group or a window. |
+| `cwd` | Optional default working directory for all windows; a window’s own `cwd` overrides it. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
@@ -64,7 +65,7 @@ A window node has the following fields:
 | `id` | Required unique, nonempty identifier matching the layout-name grammar. |
 | `command` | Required nonempty string sequence: nonempty executable first, then literal arguments. |
 | `match` | Required mapping with exactly one nonempty string: `app_id` or `class`. |
-| `cwd` | Optional nonempty directory path; relative paths resolve against the YAML file. |
+| `cwd` | Optional working directory overriding the layout default. |
 | `env` | Optional string-to-string map of child environment overrides; default empty. |
 
 Children of `splith` and `splitv` may have `weight`, a finite positive number defaulting
@@ -85,10 +86,18 @@ selectors are allowed for separate sequential launches; IDs must still be unique
 Users should supply distinct application IDs in both arguments and selectors when the
 application supports them. The launcher never invents IDs or modifies commands.
 
+Both layout-level and window-level `cwd` must be nonempty paths to existing directories;
+validation rejects invalid paths before loader IPC or launches, even for an unused default
+or a window setting that overrides it. Absolute paths are used directly. Relative paths at both
+levels resolve independently against the YAML file's directory, never against the layout
+default. No shell, environment-variable, or tilde expansion is performed. Explicit `null`
+is invalid. If neither level specifies `cwd`, the child inherits the launcher's working
+directory. Groups do not accept `cwd`.
+
 Commands are launched with preserved argument boundaries, without implicit shell parsing,
 variable expansion, tilde expansion, or globbing. A bare executable uses the child's
 effective `PATH`. Executable paths containing `/` resolve relative to the effective child
-cwd; the default cwd is the launcher's working directory. `env` overrides the inherited
+cwd selected above. `env` overrides the inherited
 environment only in that child. Keys must be nonempty and contain neither `=` nor NUL;
 arguments, paths, and environment values cannot contain NUL. An empty argument or
 environment value is allowed. Users may explicitly invoke a shell in `command`; layout

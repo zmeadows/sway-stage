@@ -373,6 +373,27 @@ fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
         &WINDOW.replace("match:", "cwd: absent, match:"),
     );
     fixture.run(&["--layouts-dir", "layouts", "check", "missing"], 1);
+    for (name, cwd, status) in [
+        ("default-relative", "work".to_owned(), 0),
+        (
+            "default-absolute",
+            format!("'{}'", fixture.path.display()),
+            0,
+        ),
+        ("default-missing", "absent".to_owned(), 1),
+        ("default-empty", "''".to_owned(), 1),
+        ("default-file", "relative.yaml".to_owned(), 1),
+        ("default-null", "null".to_owned(), 1),
+    ] {
+        fixture.file(
+            &format!("layouts/{name}.yaml"),
+            &format!("{WINDOW}\ncwd: {cwd}\n"),
+        );
+        let output = fixture.run(&["--layouts-dir", "layouts", "check", name], status);
+        if status == 1 {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("cwd"));
+        }
+    }
     fs::write(fixture.path.join("invalid.yaml"), b"\xff").unwrap();
     let output = fixture.run(&["--layouts-dir", ".", "check", "invalid"], 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("UTF-8"));
