@@ -9,15 +9,16 @@ native-group acceptance remains outstanding. Behavior is defined in the
 - **Native groups, manual verification.** Guarded construction, recursive split sizing,
   and postorder first-child tab/stack selection with final global focus are implemented.
   Manually verify inactive selection retention and explicit focus precedence, plus
-  root and nested groups, singleton ancestry, sibling insertion, and empty workspaces with
-  initial tabbed/stacked layouts against the installed Sway version. Offline tree/event
-  fixtures verify reactions, not the compositor's actual construction behavior.
-- **Native groups, harness acceptance.** Run the seventeen-scenario standard suite,
-  including six native-group additions and two capture/reload cases. The independent
+  root and nested groups, singleton ancestry, and sibling insertion against the installed
+  Sway version. Offline tree/event fixtures verify reactions, not the compositor's actual
+  construction behavior.
+- **Native groups, harness acceptance.** Run the nineteen-scenario standard suite,
+  including eight native-group additions and two capture/reload cases. The independent
   harness checks exact mixed hierarchy, singleton preservation, split proportions,
   per-container child-focus history, final global focus, capture weights, and conservative
   success-only cleanup transitions. Verify these source-backed expectations against the
-  installed Sway version, including initially tabbed/stacked empty workspaces. Offline
+  installed Sway version. The `initially-tabbed` and `initially-stacked` cases establish and
+  verify empty native workspace layouts before loading the existing mixed hierarchy. Offline
   fixtures do not establish compositor reconstruction or cleanup behavior; record manual
   results before marking this acceptance complete.
 

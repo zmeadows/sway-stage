@@ -15,7 +15,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::ipc::{IPC_TIMEOUT, Layout};
+use crate::ipc::{IPC_TIMEOUT, InitialWorkspaceLayout, Layout};
 use crate::process;
 
 /// sway-stage's default wait for each window.
@@ -183,6 +183,7 @@ impl ConfiguredNode {
 #[derive(Clone)]
 pub struct Scenario {
     pub name: &'static str,
+    pub initial_workspace_layout: Option<InitialWorkspaceLayout>,
     pub layout: ConfiguredNode,
     /// Independent expected final focus, including when YAML omits focus.
     pub expected_focus: &'static str,
@@ -384,6 +385,7 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
     for (name, layout, focus) in layouts {
         let mut scenario = Scenario {
             name,
+            initial_workspace_layout: None,
             layout,
             expected_focus: focus,
             configured_focus: Some(focus),
@@ -397,6 +399,24 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         }
         scenarios.push(scenario);
     }
+
+    // Keep the original scenarios in order. Both additions build the same split-root
+    // layout, so successful construction/cleanup leaves no special initial state to reset.
+    let mixed = scenarios
+        .iter()
+        .find(|scenario| scenario.name == "mixed-native-nesting")
+        .expect("standard scenarios include mixed native nesting")
+        .clone();
+    for (name, initial_layout) in [
+        ("initially-tabbed", InitialWorkspaceLayout::Tabbed),
+        ("initially-stacked", InitialWorkspaceLayout::Stacked),
+    ] {
+        let mut scenario = mixed.clone();
+        scenario.name = name;
+        scenario.initial_workspace_layout = Some(initial_layout);
+        use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
+        scenarios.push(scenario);
+    }
     scenarios
 }
 
@@ -404,6 +424,7 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
 pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenario {
     let mut scenario = Scenario {
         name: "foreign-fixture",
+        initial_workspace_layout: None,
         layout: window(1, 1),
         expected_focus: "window1",
         configured_focus: Some("window1"),
@@ -486,6 +507,7 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         };
         let mut scenario = Scenario {
             name,
+            initial_workspace_layout: None,
             layout,
             expected_focus: focus,
             configured_focus: Some(focus),

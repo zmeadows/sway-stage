@@ -73,11 +73,11 @@ Run manually, one invocation at a time:
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers seventeen Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
+The standard run covers nineteen Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
 uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
 groups, process execution, default final focus, occupied-workspace refusal, and capture/reload
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
-capture, and guarded cleanup. The six native-group additions are:
+capture, and guarded cleanup. The eight native-group additions are:
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -87,12 +87,24 @@ capture, and guarded cleanup. The six native-group additions are:
 | `mixed-native-nesting` | Split containing tabs, nested vertical split, and a later sibling outside the tabs. |
 | `independent-native-groups` | Differently nested tab/stack groups, explicit focus overriding its ancestors while unrelated inactive groups retain first-child selection. |
 | `mixed-capture-reload` | Vertical split containing tabs, a singleton stack, and a weighted horizontal split; capture and replay with interior focus. |
+| `initially-tabbed` | Load `mixed-native-nesting` after establishing an empty tabbed workspace. |
+| `initially-stacked` | The same mixed hierarchy after establishing an empty stacked workspace. |
+
+The final two standard cases recheck the selected target's identity, focus, output, and
+emptiness, apply `layout tabbed` or `layout stacking`, check the reply, then require a fresh
+fenced tree to report `tabbed` or `stacked` while still empty. Unexpected workspace/window
+activity fails preparation without a load or restoration; observation history is retained.
+Both reuse ordinary hierarchy, sizing, selection, capture, preservation, and success-only
+cleanup checks. Their requested split root leaves an ordinary split workspace after success;
+no layout reset or placeholder windows are used. Sway's
+[`layout` implementation](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c)
+updates the empty workspace directly; installed-version behavior still needs live acceptance.
 
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect seventeen passes for the standard suite. Extended runs add eight cases,
-for twenty-five total, plus the separate foreign fixture. With the original optional prerequisites
-available, an extended run without package flags reports twenty-three passes and two package
-SKIPs; supplying one package enables twenty-four possible passes, and both enable twenty-five.
+commands. Expect nineteen passes for the standard suite. Extended runs add eight cases,
+for twenty-seven total, plus the separate foreign fixture. With the original optional prerequisites
+available, an extended run without package flags reports twenty-five passes and two package
+SKIPs; supplying one package enables twenty-six possible passes, and both enable twenty-seven.
 Other missing optional prerequisites still produce explicit SKIPs.
 The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
@@ -144,7 +156,7 @@ For native-group manual acceptance:
 
 1. Build both release executables with the commands above and record `sway --version`.
 2. From a third workspace, run the standard command above with two absent/empty disposable
-   workspace numbers. Leave input idle until it finishes; expect seventeen passes, including
+   workspace numbers. Leave input idle until it finishes; expect nineteen passes, including
    both capture/reload cycles. Preserve output on failure and inspect reported remaining
    windows manually before another run. Do not rerun into a partially populated target.
 3. On a separate disposable workspace, visually check tab/stack header order and singleton
@@ -153,10 +165,8 @@ For native-group manual acceptance:
    groups. Capture from a delayed command on another workspace and compare the draft; fill
    only its null commands, check it, then load on another empty target. Do not interact with
    windows during the harness itself: it deliberately treats interference as failure.
-4. Repeat the standard suite with empty targets initially using tabbed and stacked workspace
-   layouts, prepared manually. Record layout, Sway version, and results. Run `--extended`
-   separately for existing optional coverage. Repeat the interference/interrupt procedures
-   below as separate runs; a standard pass alone does not establish those guards live.
+4. Run `--extended` separately for existing optional coverage. Repeat the interference/interrupt
+   procedures below as separate runs; a standard pass alone does not establish those guards live.
 
 No native-group live run has been performed as part of Stage 5 implementation.
 

@@ -26,7 +26,7 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 const SUBSCRIBED_EVENTS: &str = r#"["workspace","window","tick"]"#;
 
 /// `swaymsg` bound to one explicit compositor socket. It provides read-only queries, tick
-/// fences, the event subscription, and only the lifecycle's three narrow mutations.
+/// fences, the event subscription, and only the lifecycle's narrow mutations.
 pub struct Swaymsg {
     executable: PathBuf,
     socket: PathBuf,
@@ -76,6 +76,11 @@ impl Swaymsg {
     /// The caller must have just revalidated this window's ownership and hierarchy.
     pub fn close_owned_window(&self, container_id: i64) -> Result<(), String> {
         self.command(&close_command(container_id)?)
+    }
+
+    /// Only after a fresh empty-target, focus, identity, and output check by the caller.
+    pub fn set_empty_workspace_layout(&self, layout: InitialWorkspaceLayout) -> Result<(), String> {
+        self.command(layout.command())
     }
 
     fn command(&self, text: &str) -> Result<(), String> {
@@ -380,6 +385,29 @@ pub enum ScratchpadState {
     None,
     Fresh,
     Changed,
+}
+
+/// The two empty-workspace initial conditions exercised before ordinary construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitialWorkspaceLayout {
+    Tabbed,
+    Stacked,
+}
+
+impl InitialWorkspaceLayout {
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Tabbed => "layout tabbed",
+            Self::Stacked => "layout stacking",
+        }
+    }
+
+    pub fn observed_layout(self) -> Layout {
+        match self {
+            Self::Tabbed => Layout::Tabbed,
+            Self::Stacked => Layout::Stacked,
+        }
+    }
 }
 
 /// A `get_workspaces` entry.

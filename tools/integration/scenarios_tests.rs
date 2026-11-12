@@ -107,6 +107,16 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "v(t(s(window1), h(window2@3, window3@2))@3, window4@2)",
             "window3",
         ),
+        (
+            "initially-tabbed",
+            "h(t(window1, v(window2@3, window3@2))@3, window4@2)",
+            "window3",
+        ),
+        (
+            "initially-stacked",
+            "h(t(window1, v(window2@3, window3@2))@3, window4@2)",
+            "window3",
+        ),
     ];
     let expected: Vec<(&str, String, &str)> = expected
         .into_iter()
@@ -864,5 +874,47 @@ fn native_group_yaml_uses_parent_dependent_weights_and_no_root_weight() {
         let scenario = standard_scenario(name);
         assert_eq!(scenario.configured_focus, None);
         assert!(!configuration_yaml(&scenario).contains("focus:"));
+    }
+}
+
+#[test]
+fn only_final_standard_cases_prepare_initial_layout_and_reuse_mixed_configuration() {
+    let standard = standard_scenarios(RUN_ID, FOOT, SLEEP);
+    let mixed = standard_scenario("mixed-native-nesting");
+    assert_eq!(standard.len(), 19);
+    assert!(
+        standard[..17]
+            .iter()
+            .all(|scenario| scenario.initial_workspace_layout.is_none())
+    );
+    assert!(
+        extended_scenarios(RUN_ID, FOOT, SLEEP)
+            .iter()
+            .all(|scenario| scenario.initial_workspace_layout.is_none())
+    );
+    assert!(
+        foreign_fixture_scenario(RUN_ID, FOOT, SLEEP)
+            .initial_workspace_layout
+            .is_none()
+    );
+    for (scenario, expected) in standard[17..].iter().zip([
+        InitialWorkspaceLayout::Tabbed,
+        InitialWorkspaceLayout::Stacked,
+    ]) {
+        assert_eq!(scenario.initial_workspace_layout, Some(expected));
+        assert_eq!(scenario.configured_focus, mixed.configured_focus);
+        assert_eq!(scenario.expected_focus, mixed.expected_focus);
+        assert_eq!(
+            configured_layout_outline(&scenario.layout),
+            configured_layout_outline(&mixed.layout)
+        );
+        // Split-root construction returns the workspace to an ordinary split layout.
+        assert!(matches!(
+            scenario.layout,
+            ConfiguredNode::Group {
+                layout: GroupLayout::Horizontal,
+                ..
+            }
+        ));
     }
 }

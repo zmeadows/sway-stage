@@ -1636,3 +1636,170 @@ fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close(
 
     assert!(remaining.is_empty());
 }
+
+fn empty_target_snapshot(layout: &str) -> Snapshot {
+    recorded_snapshot(
+        desktop(layout, Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    )
+}
+
+#[test]
+fn initial_layout_preparation_verifies_state_before_beginning_normal_load_cycle() {
+    let before = empty_target_snapshot("splith");
+    let target = target_identity();
+    let baseline = ForeignWindows::record(&before, target.id).unwrap();
+    for (name, layout) in [
+        ("initially-tabbed", "tabbed"),
+        ("initially-stacked", "stacked"),
+    ] {
+        let scenario = standard_scenario(name);
+        let mut progress = ScenarioProgress {
+            scenario: scenario.clone(),
+            preexisting_ids: None,
+            accepted: AcceptedWindows::new(),
+        };
+        let prepared = prepare_initial_workspace_layout(
+            &before,
+            &target,
+            &baseline,
+            scenario.initial_workspace_layout.unwrap(),
+            7,
+            || Ok((empty_target_snapshot(layout), 7)),
+        )
+        .unwrap();
+        assert!(progress.preexisting_ids.is_none());
+        progress.begin_cycle(&prepared, &HashSet::new()).unwrap();
+        assert_eq!(
+            progress.preexisting_ids.unwrap(),
+            container_ids(&prepared.tree)
+        );
+        assert!(progress.accepted.is_empty());
+    }
+}
+
+#[test]
+fn initial_layout_guards_refuse_mutation_on_unsafe_targets() {
+    let before = empty_target_snapshot("splith");
+    let target = target_identity();
+    let baseline = ForeignWindows::record(&before, target.id).unwrap();
+    for problem in [
+        "tiled",
+        "floating",
+        "container",
+        "focus",
+        "identity",
+        "output",
+        "event",
+    ] {
+        let mut unsafe_target = empty_target_snapshot("splith");
+        let workspace = &mut unsafe_target.tree.nodes[1].nodes[1];
+        match problem {
+            "tiled" => workspace.nodes.push(parse_tree(wayland_window(
+                20,
+                "foreign",
+                rect(0, 0, 10, 10),
+            ))),
+            "floating" => workspace.floating_nodes.push(parse_tree(wayland_window(
+                20,
+                "foreign",
+                rect(0, 0, 10, 10),
+            ))),
+            "container" => workspace.nodes.push(parse_tree(group(
+                30,
+                "tabbed",
+                rect(0, 0, 10, 10),
+                Vec::new(),
+            ))),
+            "focus" => unsafe_target = starting_snapshot(),
+            "identity" => workspace.name = Some("renamed".into()),
+            "output" => unsafe_target.tree.nodes[1].id += 100,
+            "event" => {
+                unsafe_target
+                    .window_events
+                    .push(window_event("move", PREEXISTING_WINDOW_ID, None))
+            }
+            _ => unreachable!(),
+        }
+        let result = prepare_initial_workspace_layout(
+            &unsafe_target,
+            &target,
+            &baseline,
+            InitialWorkspaceLayout::Tabbed,
+            0,
+            || panic!("must not mutate {problem}"),
+        );
+        assert!(matches!(result, Err(Failure::Uncertain(_))), "{problem}");
+    }
+}
+
+#[test]
+fn initial_layout_failure_leaves_no_launch_or_cleanup_evidence() {
+    let before = empty_target_snapshot("splith");
+    let target = target_identity();
+    let baseline = ForeignWindows::record(&before, target.id).unwrap();
+    for initial_layout in [
+        InitialWorkspaceLayout::Tabbed,
+        InitialWorkspaceLayout::Stacked,
+    ] {
+        for problem in [
+            "command",
+            "snapshot",
+            "wrong-layout",
+            "occupied",
+            "workspace-event",
+            "window-event",
+            "foreign-change",
+        ] {
+            let mut progress = ScenarioProgress {
+                scenario: standard_scenario("initially-tabbed"),
+                preexisting_ids: None,
+                accepted: AcceptedWindows::new(),
+            };
+            let result =
+                prepare_initial_workspace_layout(
+                    &before,
+                    &target,
+                    &baseline,
+                    initial_layout,
+                    7,
+                    || {
+                        if matches!(problem, "command" | "snapshot") {
+                            return Err(format!("failed {problem}"));
+                        }
+                        let layout = if initial_layout == InitialWorkspaceLayout::Tabbed {
+                            "tabbed"
+                        } else {
+                            "stacked"
+                        };
+                        let mut prepared = empty_target_snapshot(layout);
+                        let mut revision = 7;
+                        match problem {
+                            "wrong-layout" => {
+                                prepared.tree.nodes[1].nodes[1].layout = crate::ipc::Layout::SplitV
+                            }
+                            "occupied" => prepared.tree.nodes[1].nodes[1].nodes.push(parse_tree(
+                                wayland_window(20, "unexpected", rect(0, 0, 10, 10)),
+                            )),
+                            "workspace-event" => revision += 1,
+                            "window-event" => {
+                                prepared.window_events.push(window_event("new", 20, None))
+                            }
+                            "foreign-change" => {
+                                prepared.tree.nodes[1].nodes[0].layout = crate::ipc::Layout::Tabbed
+                            }
+                            _ => unreachable!(),
+                        }
+                        Ok((prepared, revision))
+                    },
+                )
+                .and_then(|prepared| progress.begin_cycle(&prepared, &HashSet::new()));
+            let failure = result.unwrap_err();
+            // All preparation failures invalidate history, forbidding restoration too.
+            assert!(matches!(failure, Failure::Uncertain(_)));
+            assert!(progress.preexisting_ids.is_none());
+            assert!(progress.accepted.is_empty());
+        }
+    }
+}

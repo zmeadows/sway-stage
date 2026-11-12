@@ -154,3 +154,17 @@ fn tree_child_focus_history_is_required_and_distinct_from_global_focus() {
         .remove("focus");
     assert!(serde_json::from_value::<TreeNode>(missing).is_err());
 }
+
+#[test]
+fn empty_workspace_layout_commands_use_native_sway_spelling() {
+    assert_eq!(InitialWorkspaceLayout::Tabbed.command(), "layout tabbed");
+    assert_eq!(
+        InitialWorkspaceLayout::Tabbed.observed_layout(),
+        Layout::Tabbed
+    );
+    assert_eq!(InitialWorkspaceLayout::Stacked.command(), "layout stacking");
+    assert_eq!(
+        InitialWorkspaceLayout::Stacked.observed_layout(),
+        Layout::Stacked
+    );
+}

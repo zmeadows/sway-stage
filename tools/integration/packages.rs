@@ -222,6 +222,7 @@ pub fn selector(window: &TreeNode) -> Result<Selector, String> {
 pub fn captured_scenario(name: &'static str, selector: Selector) -> Scenario {
     Scenario {
         name,
+        initial_workspace_layout: None,
         layout: ConfiguredNode::Window(ConfiguredWindow {
             layout_id: "window1".into(),
             weight: 1,

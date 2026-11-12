@@ -22,7 +22,10 @@ use crate::capture::{
     verify_desktop_replay_capture, verify_inferred_capture, verify_package_capture,
     verify_package_default_capture, verify_unresolved_capture,
 };
-use crate::ipc::{IPC_TIMEOUT, Swaymsg, TreeNode, validate_restoration_name, workspace_number};
+use crate::ipc::{
+    IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, validate_restoration_name,
+    workspace_number,
+};
 use crate::layout::{
     Shape, Signature, class, is_window, observed_identifier, outline, remove_from_shape, shape,
     signature, verify_layout,
@@ -365,6 +368,8 @@ impl Harness {
         });
         require_empty(switched.focused_workspace())?;
 
+        let target_baseline = ForeignWindows::record(&switched, switched.focused_workspace_id)?;
+
         for scenario in scenarios {
             interruption_check()?;
             self.current_scenario = Some(ScenarioProgress {
@@ -372,7 +377,9 @@ impl Harness {
                 preexisting_ids: None,
                 accepted: AcceptedWindows::new(),
             });
-            if let Err(failure) = self.run_scenario(&directory, optional_applications.as_ref()) {
+            if let Err(failure) =
+                self.run_scenario(&directory, optional_applications.as_ref(), &target_baseline)
+            {
                 if self
                     .current_scenario
                     .as_ref()
@@ -421,6 +428,7 @@ impl Harness {
         &mut self,
         directory: &TemporaryConfigurations,
         optional_applications: Option<&OptionalApplications>,
+        target_baseline: &ForeignWindows,
     ) -> Result<(), Failure> {
         let progress = self
             .current_scenario
@@ -472,7 +480,7 @@ impl Harness {
             self.stage = format!("{cycle_name}: fresh baseline");
             // Preparation and check can take time. Refresh history and all preexisting IDs
             // immediately before load, refusing activity during preparation too.
-            let before_load = snapshot(&self.sway, &mut self.events, None)?;
+            let mut before_load = snapshot(&self.sway, &mut self.events, None)?;
             require_quiet(&before_load.window_events, None)?;
             require_empty(before_load.focused_workspace())?;
             let fixture = self
@@ -491,6 +499,33 @@ impl Harness {
                 foreign.verify(&before_load)?;
             }
             let foreign = ForeignWindows::record(&before_load, before_load.focused_workspace_id)?;
+
+            if let Some(initial_layout) = progress.scenario.initial_workspace_layout {
+                self.stage = format!("{cycle_name}: initial workspace layout");
+                let target = self
+                    .disposable
+                    .as_ref()
+                    .expect("target selected before scenarios");
+                let workspace_revision = self.events.workspace_revision();
+                before_load = prepare_initial_workspace_layout(
+                    &before_load,
+                    target,
+                    target_baseline,
+                    initial_layout,
+                    workspace_revision,
+                    || {
+                        process::check_interruption()?;
+                        self.sway.set_empty_workspace_layout(initial_layout)?;
+
+                        // Sway changes workspace->layout directly on an empty workspace:
+                        // no window::move/layout or workspace event is expected. Retain
+                        // history rather than resetting it after our command.
+                        let prepared = snapshot(&self.sway, &mut self.events, None)?;
+                        Ok((prepared, self.events.workspace_revision()))
+                    },
+                )?;
+            }
+
             progress.begin_cycle(&before_load, &retired_ids)?;
             let scenario = &progress.scenario;
             let preexisting_ids = progress
@@ -1413,6 +1448,54 @@ fn preflight_eligibility(observed: &Snapshot, number: &str) -> Result<Preflight,
         },
         designated_id,
     })
+}
+
+/// Shared pre/post guard for the one empty-workspace layout mutation. The baseline
+/// freezes the target output and foreign windows at the explicitly selected target.
+fn verify_empty_target(
+    observed: &Snapshot,
+    target: &WorkspaceIdentity,
+    baseline: &ForeignWindows,
+) -> Result<(), Failure> {
+    observed.validate()?;
+    let workspace = observed.focused_workspace();
+    if workspace.id != target.id || workspace.name.as_deref() != Some(&target.name) {
+        return Err(Failure::Uncertain(
+            "initial layout target identity/focus changed".into(),
+        ));
+    }
+    baseline.verify(observed)?;
+    require_quiet(&observed.window_events, None)?;
+    require_empty(workspace).map_err(Failure::Uncertain)
+}
+
+/// The operation closure keeps command + reply checking + synchronized observation in
+/// order, while offline tests can prove that failed guards never dispatch a mutation.
+fn prepare_initial_workspace_layout(
+    before: &Snapshot,
+    target: &WorkspaceIdentity,
+    baseline: &ForeignWindows,
+    initial_layout: InitialWorkspaceLayout,
+    before_revision: u64,
+    mutate_and_observe: impl FnOnce() -> Result<(Snapshot, u64), String>,
+) -> Result<Snapshot, Failure> {
+    verify_empty_target(before, target, baseline)?;
+
+    let (prepared, after_revision) = mutate_and_observe().map_err(Failure::Uncertain)?;
+    verify_empty_target(&prepared, target, baseline)?;
+    if before_revision != after_revision {
+        return Err(Failure::Uncertain(
+            "workspace activity during initial layout preparation".into(),
+        ));
+    }
+    let actual = prepared.focused_workspace().layout;
+    if actual != initial_layout.observed_layout() {
+        return Err(Failure::Uncertain(format!(
+            "empty workspace initial layout was not established: expected {:?}, observed {actual:?}",
+            initial_layout.observed_layout()
+        )));
+    }
+    Ok(prepared)
 }
 
 fn require_empty(workspace: &TreeNode) -> Result<(), String> {
