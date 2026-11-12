@@ -339,7 +339,9 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    struct Directory(PathBuf);
+    struct Directory {
+        directory_path: PathBuf,
+    }
 
     impl Directory {
         fn new() -> Self {
@@ -350,21 +352,26 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
-            Self(path)
+            Self {
+                directory_path: path,
+            }
         }
     }
 
     impl Drop for Directory {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
+            fs::remove_dir_all(&self.directory_path).unwrap();
         }
     }
 
     #[test]
     fn directory_enumeration_errors_include_the_root() {
         let directory = Directory::new();
-        for root in [directory.0.join("missing"), directory.0.join("file")] {
-            fs::write(directory.0.join("file"), "not a directory").unwrap();
+        for root in [
+            directory.directory_path.join("missing"),
+            directory.directory_path.join("file"),
+        ] {
+            fs::write(directory.directory_path.join("file"), "not a directory").unwrap();
             let error = directory_choices(&root).unwrap_err();
             assert!(error.contains("read project directory"), "{error}");
             assert!(error.contains(root.to_str().unwrap()), "{error}");
@@ -396,32 +403,36 @@ mod tests {
     #[test]
     fn saves_are_complete_and_do_not_change_existing_directory_permissions() {
         let directory = Directory::new();
-        fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::set_permissions(&directory.directory_path, fs::Permissions::from_mode(0o750)).unwrap();
         let draft = "# keep all output\ncommand: null\nmatch: null\n";
-        let path = save_draft(&directory.0, "draft", draft).unwrap();
+        let path = save_draft(&directory.directory_path, "draft", draft).unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), draft);
         assert_eq!(
-            fs::metadata(&directory.0).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&directory.directory_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o750
         );
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&directory.directory_path).unwrap().count(), 1);
     }
 
     #[test]
     fn both_extensions_and_dangling_symlinks_are_collisions() {
         for suffix in ["yaml", "yml"] {
             let directory = Directory::new();
-            let existing = directory.0.join(format!("draft.{suffix}"));
+            let existing = directory.directory_path.join(format!("draft.{suffix}"));
             fs::write(&existing, "original").unwrap();
             assert!(
-                save_draft(&directory.0, "draft", "replacement")
+                save_draft(&directory.directory_path, "draft", "replacement")
                     .unwrap_err()
                     .contains("already exists")
             );
             assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
             fs::remove_file(&existing).unwrap();
             symlink("absent", &existing).unwrap();
-            assert!(save_draft(&directory.0, "draft", "replacement").is_err());
+            assert!(save_draft(&directory.directory_path, "draft", "replacement").is_err());
             assert!(
                 fs::symlink_metadata(&existing)
                     .unwrap()
@@ -434,10 +445,10 @@ mod tests {
     #[test]
     fn exclusive_publication_refuses_a_destination_created_after_the_initial_check() {
         let directory = Directory::new();
-        let path = directory.0.join("draft.yaml");
+        let path = directory.directory_path.join("draft.yaml");
         let alternate = path.with_extension("yml");
         reject_existing_layout(&path).unwrap();
-        let partial = directory.0.join("staging.partial");
+        let partial = directory.directory_path.join("staging.partial");
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -452,8 +463,8 @@ mod tests {
     #[test]
     fn failed_writes_never_publish_a_yaml_file() {
         let directory = Directory::new();
-        let path = directory.0.join("draft.yaml");
-        let partial = directory.0.join("staging.partial");
+        let path = directory.directory_path.join("draft.yaml");
+        let partial = directory.directory_path.join("staging.partial");
         fs::write(&partial, "").unwrap();
         let mut full = OpenOptions::new().write(true).open("/dev/full").unwrap();
         let error = publish_draft(

@@ -9,16 +9,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-const WINDOW: &str =
+const SINGLE_WINDOW_YAML: &str =
     "version: 1\nlayout: {id: t, command: [does-not-need-to-exist], match: {app_id: t}}\n";
 // Failure advice that is appropriate only after this invocation started an application.
-const PARTIAL: &str = "inspect windows before retrying";
+const PARTIAL_RUN_ADVICE: &str = "inspect windows before retrying";
 
-struct Fixture {
+struct CliFixture {
     path: PathBuf,
 }
 
-impl Fixture {
+impl CliFixture {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -27,6 +27,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
+
         Self { path }
     }
 
@@ -47,14 +48,14 @@ impl Fixture {
         fs::write(self.path.join(name), contents).unwrap();
     }
 
-    fn run(&self, arguments: &[&str], status: i32) -> Output {
+    fn run(&self, arguments: &[&str], expected_exit_code: i32) -> Output {
         let output = self.command().args(arguments).output().unwrap();
-        assert_eq!(output.status.code(), Some(status), "{output:?}");
+        assert_eq!(output.status.code(), Some(expected_exit_code), "{output:?}");
         output
     }
 }
 
-impl Drop for Fixture {
+impl Drop for CliFixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.path).unwrap();
     }
@@ -62,8 +63,8 @@ impl Drop for Fixture {
 
 #[test]
 fn help_version_and_usage_do_not_need_configuration() {
-    let fixture = Fixture::new();
-    for args in [
+    let fixture = CliFixture::new();
+    for arguments in [
         vec![],
         vec!["--help"],
         vec!["check", "--help"],
@@ -75,14 +76,14 @@ fn help_version_and_usage_do_not_need_configuration() {
         let output = fixture
             .command()
             .env_remove("HOME")
-            .args(args)
+            .args(arguments)
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(0));
         assert!(output.stderr.is_empty());
         assert!(!output.stdout.is_empty());
     }
-    for args in [
+    for arguments in [
         vec!["check"],
         vec!["load"],
         vec!["menu", "extra"],
@@ -90,7 +91,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["--bogus"],
         vec!["list", "extra"],
     ] {
-        let output = fixture.run(&args, 2);
+        let output = fixture.run(&arguments, 2);
         assert!(output.stdout.is_empty());
         assert!(!output.stderr.is_empty());
     }
@@ -98,7 +99,7 @@ fn help_version_and_usage_do_not_need_configuration() {
 
 #[test]
 fn list_is_lexical_immediate_regular_files_only_and_does_not_parse() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fixture.file("z.yaml", "not a layout");
     fixture.file("a.yml", "malformed: [");
     fixture.file("A-1.yaml", "");
@@ -106,20 +107,22 @@ fn list_is_lexical_immediate_regular_files_only_and_does_not_parse() {
     fixture.file("ignored.txt", "");
     fs::create_dir(fixture.path.join("directory.yaml")).unwrap();
     fs::create_dir(fixture.path.join("nested")).unwrap();
-    fixture.file("nested/hidden.yaml", WINDOW);
+    fixture.file("nested/hidden.yaml", SINGLE_WINDOW_YAML);
     std::os::unix::fs::symlink(fixture.path.join("z.yaml"), fixture.path.join("link.yaml"))
         .unwrap();
     let output = fixture.run(&["--layouts-dir", ".", "list"], 0);
+
     assert_eq!(output.stdout, b"A-1\na\nz\n");
     assert!(output.stderr.is_empty());
 }
 
 #[test]
 fn discovery_rejects_duplicates_invalid_names_and_non_utf8_names() {
-    let fixture = Fixture::new();
-    fixture.file("same.yaml", WINDOW);
-    fixture.file("same.yml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("same.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("same.yml", SINGLE_WINDOW_YAML);
     let output = fixture.run(&["list", "--layouts-dir", "."], 1);
+
     assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate layout name"));
     assert!(output.stdout.is_empty());
     fs::remove_file(fixture.path.join("same.yml")).unwrap();
@@ -148,14 +151,15 @@ fn discovery_rejects_duplicates_invalid_names_and_non_utf8_names() {
 
 #[test]
 fn default_directories_and_overrides_follow_xdg_without_creating_directories() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
+
     assert!(fixture.run(&["list"], 0).stdout.is_empty());
     assert!(!fixture.path.join(".config").exists());
     fixture.run(&["check", "missing"], 1);
     fixture.run(&["--layouts-dir", "missing", "list"], 1);
     fixture.run(&["--layouts-dir", "", "list"], 2);
     fs::create_dir_all(fixture.path.join(".config/sway-stage/layouts")).unwrap();
-    fixture.file(".config/sway-stage/layouts/home.yaml", WINDOW);
+    fixture.file(".config/sway-stage/layouts/home.yaml", SINGLE_WINDOW_YAML);
     assert_eq!(fixture.run(&["list"], 0).stdout, b"home\n");
     let empty_xdg = fixture
         .command()
@@ -166,7 +170,7 @@ fn default_directories_and_overrides_follow_xdg_without_creating_directories() {
     assert_eq!(empty_xdg.status.code(), Some(0));
     assert_eq!(empty_xdg.stdout, b"home\n");
     fs::create_dir_all(fixture.path.join("xdg/sway-stage/layouts")).unwrap();
-    fixture.file("xdg/sway-stage/layouts/xdg.yml", WINDOW);
+    fixture.file("xdg/sway-stage/layouts/xdg.yml", SINGLE_WINDOW_YAML);
     let output = fixture
         .command()
         .env("XDG_CONFIG_HOME", fixture.path.join("xdg"))
@@ -208,7 +212,7 @@ fn default_directories_and_overrides_follow_xdg_without_creating_directories() {
     assert_eq!(output.status.code(), Some(0));
     fixture.file("file", "");
     fixture.run(&["--layouts-dir", "file", "list"], 1);
-    fixture.file(".config/sway-stage/layouts/file.yaml", WINDOW);
+    fixture.file(".config/sway-stage/layouts/file.yaml", SINGLE_WINDOW_YAML);
     fs::remove_dir_all(fixture.path.join(".config/sway-stage/layouts")).unwrap();
     fixture.file(".config/sway-stage/layouts", "not a directory");
     fixture.run(&["list"], 1);
@@ -216,13 +220,14 @@ fn default_directories_and_overrides_follow_xdg_without_creating_directories() {
 
 #[test]
 fn check_validates_without_compositor_tools_or_application_probes() {
-    let fixture = Fixture::new();
-    fixture.file("good.yaml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     fixture.file(
         "draft.yml",
         "version: 1\nlayout: {id: t, command: null, match: null}",
     );
     let output = fixture.run(&["check", "good", "--layouts-dir", "."], 0);
+
     assert_eq!(output.stdout, b"good: valid\n");
     assert!(output.stderr.is_empty());
     let output = fixture.run(&["check", "draft", "--layouts-dir", "."], 1);
@@ -245,12 +250,13 @@ fn check_validates_without_compositor_tools_or_application_probes() {
 
 #[test]
 fn unsupported_window_timeout_fails_validation_before_ipc() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fixture.file(
         "slow.yaml",
-        &format!("{WINDOW}window_timeout_ms: {}\n", u64::MAX),
+        &format!("{SINGLE_WINDOW_YAML}window_timeout_ms: {}\n", u64::MAX),
     );
     let output = fixture.run(&["check", "slow", "--layouts-dir", "."], 1);
+
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("slow.yaml: window_timeout_ms"), "{stderr}");
@@ -262,13 +268,13 @@ fn unsupported_window_timeout_fails_validation_before_ipc() {
     assert!(stderr.contains("validation: "), "{stderr}");
     assert!(stderr.contains("window_timeout_ms"), "{stderr}");
     assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
-    assert!(!stderr.contains(PARTIAL), "{stderr}");
+    assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
 }
 
 #[test]
 fn invalid_and_missing_layout_names_fail_before_ipc_for_check_and_load() {
-    let fixture = Fixture::new();
-    fixture.file("good.yaml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     for command in ["check", "load"] {
         for (name, expected) in [
             (
@@ -288,7 +294,7 @@ fn invalid_and_missing_layout_names_fail_before_ipc_for_check_and_load() {
             );
             assert!(primary.contains(expected), "{stderr}");
             assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
-            assert!(!stderr.contains(PARTIAL), "{stderr}");
+            assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
         }
     }
 }
@@ -296,8 +302,8 @@ fn invalid_and_missing_layout_names_fail_before_ipc_for_check_and_load() {
 #[test]
 fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
     use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
-    fixture.file("good.yaml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     fixture.file("bad.yaml", "version: 2\n");
     fixture.file(
         "notify-send",
@@ -310,18 +316,18 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
     .unwrap();
     // Not a socket: any connection attempt fails, so a successful list/check never tried.
     fixture.file("not-a-socket", "");
-    let run = |args: &[&str]| {
+    let run = |arguments: &[&str]| {
         fixture
             .command()
             .env("SWAYSOCK", fixture.path.join("not-a-socket"))
             .env("XDG_STATE_HOME", fixture.path.join("state"))
             .env("PATH", &fixture.path)
             .env("NOTIFY_RECORD", fixture.path.join("notification"))
-            .args(args)
+            .args(arguments)
             .output()
             .unwrap()
     };
-    for (args, status) in [
+    for (arguments, expected_exit_code) in [
         (&["--layouts-dir", ".", "list"][..], 0),
         (&["--layouts-dir", "absent", "list"], 1),
         (&["--layouts-dir", ".", "check", "good"], 0),
@@ -329,10 +335,15 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
         (&["--layouts-dir", ".", "check", "missing"], 1),
         (&["--layouts-dir", ".", "check", "../good"], 1),
     ] {
-        let output = run(args);
-        assert_eq!(output.status.code(), Some(status), "{args:?}: {output:?}");
+        let output = run(arguments);
+        assert_eq!(
+            output.status.code(),
+            Some(expected_exit_code),
+            "{arguments:?}: {output:?}"
+        );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("SWAYSOCK"));
     }
+
     assert!(!fixture.path.join("state").exists());
     assert!(!fixture.path.join(".local").exists());
     assert!(!fixture.path.join("notification").exists());
@@ -342,7 +353,7 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("connect to SWAYSOCK"), "{stderr}");
-    assert!(!stderr.contains(PARTIAL), "{stderr}");
+    assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
     assert!(fixture.path.join("state/sway-stage/last-run.log").exists());
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
     assert!(
@@ -353,16 +364,16 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
 
 #[test]
 fn check_validates_absolute_cwd_and_rejects_bad_files() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fs::create_dir_all(fixture.path.join("layouts/work")).unwrap();
     fixture.file(
         "layouts/relative.yaml",
-        &WINDOW.replace("match:", "cwd: work, match:"),
+        &SINGLE_WINDOW_YAML.replace("match:", "cwd: work, match:"),
     );
     fixture.run(&["--layouts-dir", "layouts", "check", "relative"], 1);
     fixture.file(
         "layouts/absolute.yaml",
-        &WINDOW.replace(
+        &SINGLE_WINDOW_YAML.replace(
             "match:",
             &format!("cwd: '{}', match:", fixture.path.display()),
         ),
@@ -370,10 +381,10 @@ fn check_validates_absolute_cwd_and_rejects_bad_files() {
     fixture.run(&["--layouts-dir", "layouts", "check", "absolute"], 0);
     fixture.file(
         "layouts/missing.yaml",
-        &WINDOW.replace("match:", "cwd: absent, match:"),
+        &SINGLE_WINDOW_YAML.replace("match:", "cwd: absent, match:"),
     );
     fixture.run(&["--layouts-dir", "layouts", "check", "missing"], 1);
-    for (name, cwd, status) in [
+    for (name, cwd, expected_exit_code) in [
         ("default-relative", "work".to_owned(), 1),
         (
             "default-absolute",
@@ -387,15 +398,19 @@ fn check_validates_absolute_cwd_and_rejects_bad_files() {
     ] {
         fixture.file(
             &format!("layouts/{name}.yaml"),
-            &format!("{WINDOW}\ncwd: {cwd}\n"),
+            &format!("{SINGLE_WINDOW_YAML}\ncwd: {cwd}\n"),
         );
-        let output = fixture.run(&["--layouts-dir", "layouts", "check", name], status);
-        if status == 1 {
+        let output = fixture.run(
+            &["--layouts-dir", "layouts", "check", name],
+            expected_exit_code,
+        );
+        if expected_exit_code == 1 {
             assert!(String::from_utf8_lossy(&output.stderr).contains("cwd"));
         }
     }
     fs::write(fixture.path.join("invalid.yaml"), b"\xff").unwrap();
     let output = fixture.run(&["--layouts-dir", ".", "check", "invalid"], 1);
+
     assert!(String::from_utf8_lossy(&output.stderr).contains("UTF-8"));
     fixture.file("big.yaml", &"x".repeat(1024 * 1024 + 10));
     let output = fixture.run(&["--layouts-dir", ".", "check", "big"], 1);
@@ -405,9 +420,9 @@ fn check_validates_absolute_cwd_and_rejects_bad_files() {
 #[test]
 fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
     use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fixture.file("nested.yaml", "version: 1\nlayout: {group: splith, children: [{id: a, command: [not-installed], match: {app_id: a}}, {id: b, command: [not-installed], match: {app_id: b}}]}\n");
-    fixture.file("good.yaml", WINDOW);
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     let log = fixture.path.join(".local/state/sway-stage/last-run.log");
     for name in ["nested", "good"] {
         let expected = "SWAYSOCK is unset";
@@ -416,7 +431,7 @@ fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
         assert!(stderr.contains(expected), "{stderr}");
         assert!(stderr.contains("log:"), "{stderr}");
         // Nothing was launched, so there is no partial layout to inspect.
-        assert!(!stderr.contains(PARTIAL), "{stderr}");
+        assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
         assert!(output.stdout.is_empty());
         let contents = fs::read_to_string(&log).unwrap();
         assert!(contents.contains(expected), "{contents}");
@@ -427,6 +442,7 @@ fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
         );
         assert!(!fixture.path.join("launches").exists());
     }
+
     assert!(
         !fs::read_to_string(&log)
             .unwrap()
@@ -447,8 +463,8 @@ fn load_requires_ipc_for_all_layouts_and_writes_private_last_run_log() {
 #[test]
 fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary() {
     use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
-    fixture.file("good.yaml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     fixture.file(
         "notify-send",
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_RECORD\"\n",
@@ -466,6 +482,7 @@ fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary
         .args(["--layouts-dir", ".", "load", "good"])
         .output()
         .unwrap();
+
     assert_eq!(output.status.code(), Some(1));
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
     assert!(
@@ -496,8 +513,8 @@ fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary
 #[test]
 fn notification_helper_has_a_bounded_wait() {
     use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
-    fixture.file("good.yaml", WINDOW);
+    let fixture = CliFixture::new();
+    fixture.file("good.yaml", SINGLE_WINDOW_YAML);
     fixture.file("notify-send", "#!/bin/sh\nexec /bin/sleep 10\n");
     fs::set_permissions(
         fixture.path.join("notify-send"),
@@ -511,6 +528,7 @@ fn notification_helper_has_a_bounded_wait() {
         .args(["--layouts-dir", ".", "load", "good"])
         .output()
         .unwrap();
+
     assert_eq!(output.status.code(), Some(1));
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -594,7 +612,7 @@ fn serve_capture(
 
 #[test]
 fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     let socket = fixture.path.join("sway.sock");
     let mut editor = sway_node(20, "con", 1280, vec![]);
     editor["shell"] = json!("xdg_shell");
@@ -647,6 +665,7 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
             .collect::<Vec<_>>()
             .join("\n")
     };
+
     assert_eq!(without_comments(&drafts[0]), without_comments(&drafts[1]));
     assert!(drafts[1].contains("Review recovered commands before executing or sharing"));
     // Capture writes no launch log and needs no layout directory.
@@ -681,7 +700,7 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
 
 #[test]
 fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fs::create_dir_all(fixture.path.join("state/sway-stage")).unwrap();
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
     let mut empty = sway_node(10, "workspace", 1920, vec![]);
@@ -702,6 +721,7 @@ fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
         .output()
         .unwrap();
     server.join().unwrap();
+
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("empty; there is nothing to capture"));
@@ -714,7 +734,7 @@ fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
 #[test]
 fn capture_failures_notify_without_touching_the_launch_log() {
     use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fixture.file(
         "notify-send",
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NOTIFY_RECORD\"\n",
@@ -777,7 +797,7 @@ mod menu;
 #[test]
 fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
     for output_fails in [false, true] {
-        let fixture = Fixture::new();
+        let fixture = CliFixture::new();
         let socket = fixture.path.join("capture.sock");
         let server = serve_capture(
             UnixListener::bind(&socket).unwrap(),
@@ -821,7 +841,7 @@ fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
 
 #[test]
 fn check_accepts_all_groups_and_load_requires_sway() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     for group in ["tabbed", "stacked"] {
         fixture.file("group.yaml", &format!(
             "version: 1\nlayout: {{group: {group}, children: [{{id: a, command: [not-installed], match: {{app_id: a}}}}]}}\n"
@@ -838,7 +858,7 @@ fn check_accepts_all_groups_and_load_requires_sway() {
 #[test]
 fn home_expansion_and_yaml_directories_are_validated_independently() {
     use std::os::unix::fs::symlink;
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fs::create_dir(fixture.path.join("project")).unwrap();
     symlink(fixture.path.join("project"), fixture.path.join("link")).unwrap();
     fixture.file("file", "ordinary file");
@@ -849,15 +869,21 @@ fn home_expansion_and_yaml_directories_are_validated_independently() {
         "~/",
         fixture.path.to_str().unwrap(),
     ] {
-        fixture.file("home.yaml", &format!("{WINDOW}cwd: '{directory}'\n"));
+        fixture.file(
+            "home.yaml",
+            &format!("{SINGLE_WINDOW_YAML}cwd: '{directory}'\n"),
+        );
         fixture.run(&["--layouts-dir", ".", "check", "home"], 0);
         fixture.file(
             "home.yaml",
-            &WINDOW.replace("match:", &format!("cwd: '{directory}', match:")),
+            &SINGLE_WINDOW_YAML.replace("match:", &format!("cwd: '{directory}', match:")),
         );
         fixture.run(&["--layouts-dir", ".", "check", "home"], 0);
     }
-    fixture.file("home.yaml", &format!("{WINDOW}cwd: ~/project\n"));
+    fixture.file(
+        "home.yaml",
+        &format!("{SINGLE_WINDOW_YAML}cwd: ~/project\n"),
+    );
     for home in [
         None,
         Some(""),
@@ -898,12 +924,12 @@ fn home_expansion_and_yaml_directories_are_validated_independently() {
             let yaml = if top_level {
                 format!(
                     "{}cwd: '{directory}'\n",
-                    WINDOW.replace("match:", "cwd: /tmp, match:")
+                    SINGLE_WINDOW_YAML.replace("match:", "cwd: /tmp, match:")
                 )
             } else {
                 format!(
                     "{}cwd: /tmp\n",
-                    WINDOW.replace("match:", &format!("cwd: '{directory}', match:"))
+                    SINGLE_WINDOW_YAML.replace("match:", &format!("cwd: '{directory}', match:"))
                 )
             };
             fixture.file("bad.yaml", &yaml);
@@ -915,12 +941,12 @@ fn home_expansion_and_yaml_directories_are_validated_independently() {
 
 #[test]
 fn load_directory_override_is_validated_before_ipc_and_belongs_only_to_load() {
-    let fixture = Fixture::new();
+    let fixture = CliFixture::new();
     fs::create_dir_all(fixture.path.join("layouts")).unwrap();
     fs::create_dir(fixture.path.join("project")).unwrap();
     fixture.file(
         "layouts/good.yaml",
-        &format!("{WINDOW}cwd: /tmp\ncwd_select: true\n"),
+        &format!("{SINGLE_WINDOW_YAML}cwd: /tmp\ncwd_select: true\n"),
     );
     for directory in [
         ".",
@@ -960,11 +986,15 @@ fn load_directory_override_is_validated_before_ipc_and_belongs_only_to_load() {
         assert!(error.contains("--cwd:"), "{error}");
         assert!(!error.contains("SWAYSOCK"), "{error}");
     }
-    fixture.file("layouts/bad.yaml", &format!("{WINDOW}cwd: absent\n"));
+    fixture.file(
+        "layouts/bad.yaml",
+        &format!("{SINGLE_WINDOW_YAML}cwd: absent\n"),
+    );
     let output = fixture.run(
         &["--layouts-dir", "layouts", "load", "bad", "--cwd", "."],
         1,
     );
+
     assert!(String::from_utf8_lossy(&output.stderr).contains("cwd:"));
     for arguments in [
         vec!["check", "good", "--cwd", "."],

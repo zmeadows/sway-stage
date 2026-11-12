@@ -265,6 +265,7 @@ mod tests {
         let mut diagnostics = Diagnostics::for_test(path.clone());
         diagnostics.stage("launch");
         diagnostics.spawned(42);
+
         let launch_log = fs::read_to_string(&path).unwrap();
         assert!(launch_log.contains("spawned pid=42"), "{launch_log}");
 
@@ -272,6 +273,7 @@ mod tests {
         notify_failure("capture", "capture: get tree: connection closed").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), launch_log);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
         fs::remove_dir_all(&directory).unwrap();
     }
 }

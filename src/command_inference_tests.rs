@@ -10,7 +10,9 @@ fn read_desktop_launcher(reader: impl Read, pid: i32) -> LauncherEvidence {
     desktop_launcher(&environment, pid)
 }
 
-struct DesktopFixture(std::path::PathBuf);
+struct DesktopFixture {
+    directory_path: std::path::PathBuf,
+}
 
 impl DesktopFixture {
     fn new() -> Self {
@@ -22,16 +24,19 @@ impl DesktopFixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
+
         std::fs::write(
             path.join("private launcher.desktop"),
             "[Desktop Entry]\nType=Application\n",
         )
         .unwrap();
-        Self(path)
+        Self {
+            directory_path: path,
+        }
     }
 
     fn path(&self) -> std::path::PathBuf {
-        self.0.join("private launcher.desktop")
+        self.directory_path.join("private launcher.desktop")
     }
 
     fn environment(&self, pid: &str) -> Vec<u8> {
@@ -45,7 +50,7 @@ impl DesktopFixture {
 
 impl Drop for DesktopFixture {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
+        std::fs::remove_dir_all(&self.directory_path).unwrap();
     }
 }
 
@@ -59,8 +64,8 @@ struct AppImageFixture {
 impl AppImageFixture {
     fn new(name: &str) -> Self {
         let directory = DesktopFixture::new();
-        let image = directory.0.join(name);
-        let appdir = directory.0.join(".mount_example123");
+        let image = directory.directory_path.join(name);
+        let appdir = directory.directory_path.join(".mount_example123");
         std::fs::create_dir(&appdir).unwrap();
         let executable = appdir.join("application");
         for path in [&image, &executable] {
@@ -150,7 +155,7 @@ fn appimage_requires_a_usable_host_file_and_mounted_process_evidence() {
         }
     }
     for (name, mode, contents) in [("nonexecutable", 0o644, "contents"), ("empty", 0o755, "")] {
-        let path = fixture.directory.0.join(name);
+        let path = fixture.directory.directory_path.join(name);
         std::fs::write(&path, contents).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
         let environment = environment_with_field(&environment, "ARGV0", None);
@@ -172,8 +177,9 @@ fn appimage_requires_a_usable_host_file_and_mounted_process_evidence() {
             None
         );
     }
-    let symlink = fixture.directory.0.join("symlink");
+    let symlink = fixture.directory.directory_path.join("symlink");
     std::os::unix::fs::symlink(&fixture.image, &symlink).unwrap();
+
     assert_eq!(
         package_inference(
             &environment_with_field(&environment, "APPIMAGE", symlink.to_str()),
@@ -222,8 +228,9 @@ fn appimage_rejects_temporary_host_paths_and_ambiguous_invocation_names() {
         );
     }
     // A real symlink with a different basename still cannot select the same AppRun behavior.
-    let invocation = fixture.directory.0.join("another-binary");
+    let invocation = fixture.directory.directory_path.join("another-binary");
     std::os::unix::fs::symlink(&fixture.image, &invocation).unwrap();
+
     assert_eq!(
         package_inference(
             &environment_with_field(&fixture.environment(), "ARGV0", invocation.to_str()),
@@ -231,7 +238,7 @@ fn appimage_rejects_temporary_host_paths_and_ambiguous_invocation_names() {
         ),
         None
     );
-    let nested_mount = fixture.directory.0.join(".mount_outer");
+    let nested_mount = fixture.directory.directory_path.join(".mount_outer");
     std::fs::create_dir(&nested_mount).unwrap();
     let temporary_image = nested_mount.join("inner-image");
     std::fs::copy(&fixture.image, &temporary_image).unwrap();
@@ -284,6 +291,7 @@ fn appimage_environment_fields_fail_closed_when_malformed_or_incomplete() {
     }
     let mut truncated = environment.clone();
     truncated.pop();
+
     assert_eq!(
         package_inference(&truncated, Some(executable.clone())),
         None
@@ -311,6 +319,7 @@ fn launcher_precedence_preserves_appimage_inference_and_snap_exclusion() {
     let snap = b"SNAP=unsupported\0".to_vec();
     let mut unsupported = appimage.clone();
     unsupported.extend_from_slice(&snap);
+
     assert_eq!(package_inference(&unsupported, None), None);
 
     for package_environment in [&appimage, &snap, &unsupported] {
@@ -426,6 +435,7 @@ fn verified_desktop_launcher_precedes_argv_and_preserves_path_boundaries() {
         "launch".into(),
         fixture.path().to_str().unwrap().into(),
     ];
+
     assert_eq!(
         infer_host_command(
             101,
@@ -468,6 +478,7 @@ fn glib_284_replay_with_only_matching_pid_requires_manual_command_editing() {
     // gio 2.84.4 loses the desktop filename. A PID alone cannot reconstruct its launcher,
     // even though replay successfully started an application with readable argv.
     let environment = b"GIO_LAUNCHED_DESKTOP_FILE_PID=101\0";
+
     assert_eq!(
         infer_host_command(
             101,
@@ -507,7 +518,7 @@ fn recognized_but_unusable_launcher_evidence_suppresses_argv() {
         "wrong.txt",
         "broken.desktop",
     ] {
-        let path = fixture.0.join(name);
+        let path = fixture.directory_path.join(name);
         match name {
             "directory.desktop" => std::fs::create_dir(&path).unwrap(),
             "broken.desktop" => std::os::unix::fs::symlink("missing", &path).unwrap(),
@@ -571,6 +582,7 @@ fn environment_reads_fail_closed_without_exposing_sensitive_errors() {
             ))
         }
     }
+
     assert_eq!(
         read_desktop_launcher(SensitiveFailure, 101),
         LauncherEvidence::Unresolved
@@ -659,6 +671,7 @@ fn flatpak_evidence_precedes_even_valid_or_inherited_desktop_metadata() {
         }
     }
     let missing: io::Result<&[u8]> = Err(io::ErrorKind::NotFound.into());
+
     assert!(
         infer_process_command(missing, || {
             infer_host_command(
@@ -689,6 +702,7 @@ fn command_line_reader_preserves_literal_arguments_and_empty_arguments() {
         "",
     ];
     let bytes = arguments.join("\0") + "\0";
+
     assert_eq!(read_command_line(bytes.as_bytes()).unwrap(), arguments);
     assert_eq!(read_command_line(&b"foot\0"[..]).unwrap(), ["foot"]);
 }
@@ -709,6 +723,7 @@ fn command_line_reader_rejects_unusable_or_incomplete_data_and_bounds_reads() {
 
     let mut maximum = vec![b'x'; MAX_CMDLINE_BYTES];
     maximum[MAX_CMDLINE_BYTES - 1] = 0;
+
     assert!(read_command_line(maximum.as_slice()).is_some());
     maximum.push(0);
     assert!(read_command_line(maximum.as_slice()).is_none());
@@ -745,6 +760,7 @@ fn process_read_failures_are_silent_inference_misses() {
 fn flatpak_metadata_builds_host_commands_from_application_and_instance_fields() {
     let application = "# generated by Flatpak\n[Application]\nname=com.mastermindzh.tidal-hifi\n\
                        runtime=org.freedesktop.Platform/x86_64/24.08\n";
+
     assert_eq!(
         flatpak_command(application).unwrap(),
         ["flatpak", "run", "com.mastermindzh.tidal-hifi"]
@@ -815,6 +831,7 @@ fn flatpak_metadata_rejects_missing_ambiguous_and_malformed_identity() {
     ] {
         assert!(flatpak_command(&format!("[Application]\nname={application_id}")).is_none());
     }
+
     assert!(!valid_flatpak_id(&format!(
         "org.example.{}",
         "x".repeat(244)
@@ -841,6 +858,7 @@ fn flatpak_metadata_rejects_missing_ambiguous_and_malformed_identity() {
 fn flatpak_metadata_reads_are_bounded_and_fail_closed() {
     let mut metadata = b"[Application]\nname=org.example.App\n#".to_vec();
     metadata.resize(MAX_FLATPAK_INFO_BYTES, b'x');
+
     assert!(read_flatpak_command(metadata.as_slice()).is_some());
     metadata.push(b'x');
     assert!(read_flatpak_command(metadata.as_slice()).is_none());
@@ -920,6 +938,7 @@ fn start_time_uses_the_pid_and_field_22_after_arbitrary_comm_bytes() {
     }
     let mut truncated = stat_fixture("101", b"app", "123");
     truncated.pop();
+
     assert!(read_start_time(truncated.as_slice(), 101).is_none());
     let mut endless = io::repeat(b'x').take(MAX_STAT_BYTES as u64 + 10);
     assert!(read_start_time(&mut endless, 101).is_none());
@@ -957,6 +976,7 @@ fn inference_discards_commands_when_process_or_executable_identity_changes() {
         assert!(command.is_none());
     }
     let mut observations = [Some(original.clone()), Some(original)].into_iter();
+
     assert!(
         with_stable_process(|| observations.next().unwrap(), || Some(vec!["app".into()])).is_some()
     );
@@ -972,15 +992,20 @@ fn inference_discards_commands_when_process_or_executable_identity_changes() {
 #[test]
 fn missing_or_malformed_process_observations_remain_silent() {
     let fixture = DesktopFixture::new();
-    assert!(read_process_identity(&fixture.0, 101).is_none());
-    std::fs::write(fixture.0.join("stat"), b"SECRET=private\n").unwrap();
-    assert!(read_process_identity(&fixture.0, 101).is_none());
-    std::fs::write(fixture.0.join("stat"), stat_fixture("101", b"app", "123")).unwrap();
-    assert!(read_process_identity(&fixture.0, 101).is_none());
-    std::os::unix::fs::symlink(fixture.path(), fixture.0.join("exe")).unwrap();
-    assert!(read_process_identity(&fixture.0, 101).is_some());
+
+    assert!(read_process_identity(&fixture.directory_path, 101).is_none());
+    std::fs::write(fixture.directory_path.join("stat"), b"SECRET=private\n").unwrap();
+    assert!(read_process_identity(&fixture.directory_path, 101).is_none());
+    std::fs::write(
+        fixture.directory_path.join("stat"),
+        stat_fixture("101", b"app", "123"),
+    )
+    .unwrap();
+    assert!(read_process_identity(&fixture.directory_path, 101).is_none());
+    std::os::unix::fs::symlink(fixture.path(), fixture.directory_path.join("exe")).unwrap();
+    assert!(read_process_identity(&fixture.directory_path, 101).is_some());
     std::fs::remove_file(fixture.path()).unwrap();
-    assert!(read_process_identity(&fixture.0, 101).is_none());
+    assert!(read_process_identity(&fixture.directory_path, 101).is_none());
 }
 
 #[test]
@@ -989,6 +1014,7 @@ fn deleted_appimage_executables_never_corroborate_an_inherited_launch() {
     // Even a replacement with this literal name cannot stand in for a deleted executable.
     let deleted = fixture.appdir.join("application (deleted)");
     std::fs::write(&deleted, b"replacement").unwrap();
+
     assert!(package_inference(&fixture.environment(), Some(deleted)).is_none());
 }
 
@@ -998,6 +1024,7 @@ fn a_temporarily_unavailable_desktop_launcher_never_falls_back_to_secret_argv() 
     let environment = fixture.environment("101");
     let hidden = fixture.path().with_extension("unavailable");
     std::fs::rename(fixture.path(), &hidden).unwrap();
+
     assert!(
         infer_host_command(
             101,

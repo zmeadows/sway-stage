@@ -3,7 +3,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 const CAPTURE: &str = "Capture current layout…\n";
 
-fn setup(fixture: &Fixture) {
+fn prepare_menu_fixture(fixture: &CliFixture) {
     fixture.file(
         "fuzzel",
         r#"#!/bin/sh
@@ -72,9 +72,9 @@ esac
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
 }
 
-fn command(fixture: &Fixture, action_output: &str, name_output: &str) -> Command {
-    let mut command = fixture.command();
-    command
+fn menu_command(fixture: &CliFixture, action_output: &str, name_output: &str) -> Command {
+    let mut menu_command = fixture.command();
+    menu_command
         .env("PATH", &fixture.path)
         .env("XDG_STATE_HOME", fixture.path.join("state"))
         .env("MENU_DIRECTORY", &fixture.path)
@@ -86,10 +86,10 @@ fn command(fixture: &Fixture, action_output: &str, name_output: &str) -> Command
         .env("DIRECTORY_STATUS", "0")
         .env_remove("REMOVE_DIRECTORY")
         .env("NOTIFY_STATUS", "0");
-    command
+    menu_command
 }
 
-fn assert_log_preserved(fixture: &Fixture) {
+fn assert_log_preserved(fixture: &CliFixture) {
     assert_eq!(
         fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap(),
         "previous launch\n"
@@ -109,8 +109,8 @@ pub(super) fn capture_tree() -> Value {
     sway_node(1, "root", 1920, vec![output])
 }
 
-fn run_capture(fixture: &Fixture, command: &mut Command) -> Output {
-    run_snapshot(fixture, command, capture_tree())
+fn run_capture(fixture: &CliFixture, menu_command: &mut Command) -> Output {
+    run_with_recorded_snapshot(fixture, menu_command, capture_tree())
 }
 
 fn empty_tree() -> Value {
@@ -121,7 +121,7 @@ fn empty_tree() -> Value {
     tree
 }
 
-fn run_empty(fixture: &Fixture, command: &mut Command) -> Output {
+fn run_on_empty_workspace(fixture: &CliFixture, menu_command: &mut Command) -> Output {
     // Close the simulated compositor after eligibility, so a valid Load reaches its
     // ordinary connection failure without any possibility of contacting real Sway.
     let socket = fixture.path.join("empty.sock");
@@ -139,7 +139,7 @@ fn run_empty(fixture: &Fixture, command: &mut Command) -> Output {
         write_ipc_message(&mut query, 4, &empty_tree());
         assert_eq!(query.read(&mut [0]).unwrap(), 0);
     });
-    let output = command
+    let output = menu_command
         .env("SWAYSOCK", socket)
         .env("REQUIRE_SNAPSHOT", "1")
         .output()
@@ -148,11 +148,15 @@ fn run_empty(fixture: &Fixture, command: &mut Command) -> Output {
     output
 }
 
-fn run_snapshot(fixture: &Fixture, command: &mut Command, tree: Value) -> Output {
+fn run_with_recorded_snapshot(
+    fixture: &CliFixture,
+    menu_command: &mut Command,
+    tree: Value,
+) -> Output {
     let socket = fixture.path.join("fixture.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let server = serve_capture(listener, tree, Some(fixture.path.clone()));
-    let output = command
+    let output = menu_command
         .env("SWAYSOCK", &socket)
         .env("REQUIRE_SNAPSHOT", "1")
         .output()
@@ -165,17 +169,18 @@ fn run_snapshot(fixture: &Fixture, command: &mut Command, tree: Value) -> Output
 
 #[test]
 fn cancellation_lists_lexical_labels_without_parsing_or_side_effects() {
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     fixture.file("writing.yaml", "malformed: [");
     fixture.file("browsing.yml", "not executable YAML");
     fixture.file("development.yaml", "");
-    let output = run_empty(
+    let output = run_on_empty_workspace(
         &fixture,
-        command(&fixture, "", "")
+        menu_command(&fixture, "", "")
             .env("MENU_STATUS", "2")
             .args(["--layouts-dir", ".", "menu"]),
     );
+
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert_eq!(
@@ -205,12 +210,12 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         ("", "1", "exit status: 1"),
         ("", "7", "exit status: 7"),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
-        fixture.file("writing.yaml", WINDOW);
-        let output = run_empty(
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
+        let output = run_on_empty_workspace(
             &fixture,
-            command(&fixture, response, "")
+            menu_command(&fixture, response, "")
                 .env("MENU_STATUS", status)
                 .args(["menu", "--layouts-dir", "."]),
         );
@@ -223,10 +228,11 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         assert!(!fixture.path.join(".config").exists());
     }
 
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     fs::remove_file(fixture.path.join("fuzzel")).unwrap();
-    let output = run_capture(&fixture, command(&fixture, "", "").arg("menu"));
+    let output = run_capture(&fixture, menu_command(&fixture, "", "").arg("menu"));
+
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("start Fuzzel"));
     assert_log_preserved(&fixture);
@@ -235,17 +241,17 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
 #[test]
 fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
     for infer_commands in [false, true] {
-        let fixture = Fixture::new();
-        setup(&fixture);
-        fixture.file("writing.yaml", WINDOW);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
         // Unselected layouts must not be parsed.
         fixture.file("broken.yaml", "malformed: [");
-        let mut command = command(&fixture, "Load: writing\n", "");
-        command.args(["--layouts-dir", ".", "menu"]);
+        let mut menu_command = menu_command(&fixture, "Load: writing\n", "");
+        menu_command.args(["--layouts-dir", ".", "menu"]);
         if infer_commands {
-            command.arg("--infer-commands");
+            menu_command.arg("--infer-commands");
         }
-        let output = run_empty(&fixture, &mut command);
+        let output = run_on_empty_workspace(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr).contains("connect"));
         let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
@@ -261,12 +267,13 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
 
 #[test]
 fn initial_snapshot_failure_never_opens_fuzzel() {
-    let fixture = Fixture::new();
-    setup(&fixture);
-    let output = command(&fixture, CAPTURE, "unused\n")
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    let output = menu_command(&fixture, CAPTURE, "unused\n")
         .arg("menu")
         .output()
         .unwrap();
+
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -283,8 +290,8 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
         (Some(""), false, "0"),
         (Some("xdg"), true, "1"),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         // XDG_CONFIG_HOME is unset, set but empty, or an absolute base. The default
         // layouts directory and its parents do not exist before saving.
         let xdg_config_home = base.map(|base| {
@@ -298,17 +305,17 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
             Some(path) if !path.as_os_str().is_empty() => path.clone(),
             _ => fixture.path.join(".config"),
         };
-        let mut command = command(&fixture, CAPTURE, "development\n");
-        command
+        let mut menu_command = menu_command(&fixture, CAPTURE, "development\n");
+        menu_command
             .arg("menu")
             .env("NOTIFY_STATUS", notification_status);
         if let Some(xdg_config_home) = &xdg_config_home {
-            command.env("XDG_CONFIG_HOME", xdg_config_home);
+            menu_command.env("XDG_CONFIG_HOME", xdg_config_home);
         }
         if infer_commands {
-            command.arg("--infer-commands");
+            menu_command.arg("--infer-commands");
         }
-        let output = run_capture(&fixture, &mut command);
+        let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
@@ -380,11 +387,12 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
 
 #[test]
 fn name_prompt_cancellation_discards_capture_without_creating_directories() {
-    let fixture = Fixture::new();
-    setup(&fixture);
-    let mut command = command(&fixture, CAPTURE, "");
-    command.env("NAME_STATUS", "2").arg("menu");
-    let output = run_capture(&fixture, &mut command);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    let mut menu_command = menu_command(&fixture, CAPTURE, "");
+    menu_command.env("NAME_STATUS", "2").arg("menu");
+    let output = run_capture(&fixture, &mut menu_command);
+
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     assert!(fixture.path.join("name-opened").exists());
@@ -405,11 +413,11 @@ fn invalid_draft_names_and_name_prompt_failures_do_not_save() {
         ("name\nextra\n".to_owned(), "0", "single line"),
         ("".to_owned(), "1", "exit status: 1"),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
-        let mut command = command(&fixture, CAPTURE, &name);
-        command.env("NAME_STATUS", status).arg("menu");
-        let output = run_capture(&fixture, &mut command);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        let mut menu_command = menu_command(&fixture, CAPTURE, &name);
+        menu_command.env("NAME_STATUS", status).arg("menu");
+        let output = run_capture(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(expected),
@@ -424,24 +432,24 @@ fn invalid_draft_names_and_name_prompt_failures_do_not_save() {
 #[test]
 fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() {
     for config_bases_are_usable in [true, false] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         let layouts = fixture.path.join("layouts");
         fs::create_dir(&layouts).unwrap();
         fs::set_permissions(&layouts, fs::Permissions::from_mode(0o750)).unwrap();
-        fs::write(layouts.join("writing.yaml"), WINDOW).unwrap();
+        fs::write(layouts.join("writing.yaml"), SINGLE_WINDOW_YAML).unwrap();
 
         // The relative directory resolves against the working directory, the fixture root.
-        let mut command = command(&fixture, CAPTURE, "development\n");
-        command.args(["--layouts-dir", "layouts", "menu"]);
+        let mut menu_command = menu_command(&fixture, CAPTURE, "development\n");
+        menu_command.args(["--layouts-dir", "layouts", "menu"]);
         if config_bases_are_usable {
-            command.env("XDG_CONFIG_HOME", fixture.path.join("xdg"));
+            menu_command.env("XDG_CONFIG_HOME", fixture.path.join("xdg"));
         } else {
-            command
+            menu_command
                 .env("XDG_CONFIG_HOME", "relative")
                 .env_remove("HOME");
         }
-        let output = run_capture(&fixture, &mut command);
+        let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
 
         assert_eq!(
@@ -467,23 +475,25 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
     }
 
     // Capture availability and saving do not require discovering an existing directory.
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     let output = run_capture(
         &fixture,
-        command(&fixture, CAPTURE, "development\n").args(["--layouts-dir", "missing", "menu"]),
+        menu_command(&fixture, CAPTURE, "development\n").args(["--layouts-dir", "missing", "menu"]),
     );
+
     assert!(output.status.success(), "{output:?}");
     assert!(fixture.path.join("missing/development.yaml").exists());
 }
 
 #[test]
 fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
-    let fixture = Fixture::new();
-    setup(&fixture);
-    let mut capture_command = command(&fixture, CAPTURE, "development\n");
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    let mut capture_command = menu_command(&fixture, CAPTURE, "development\n");
     capture_command.arg("menu");
     let output = run_capture(&fixture, &mut capture_command);
+
     assert!(output.status.success(), "{output:?}");
     let layouts = fixture.path.join(".config/sway-stage/layouts");
     let path = layouts.join("development.yaml");
@@ -500,9 +510,9 @@ fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
 
     fs::remove_file(fixture.path.join("action-pid")).unwrap();
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
-    let output = run_empty(
+    let output = run_on_empty_workspace(
         &fixture,
-        command(&fixture, "Load: development\n", "").arg("menu"),
+        menu_command(&fixture, "Load: development\n", "").arg("menu"),
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -524,8 +534,8 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
         "development.yml",
         "dangling layouts link",
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         let layouts = fixture.path.join(".config/sway-stage/layouts");
         if obstacle == "dangling layouts link" {
             // Capture skips discovery, but creating this directory must fail.
@@ -536,9 +546,9 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
             fs::write(layouts.join(obstacle), "preserve me").unwrap();
         }
 
-        let mut command = command(&fixture, CAPTURE, "development\n");
-        command.arg("menu");
-        let output = run_capture(&fixture, &mut command);
+        let mut menu_command = menu_command(&fixture, CAPTURE, "development\n");
+        menu_command.arg("menu");
+        let output = run_capture(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -567,8 +577,8 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
 
 #[test]
 fn saved_layout_and_output_are_fixed_before_either_prompt() {
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     let mut tree = capture_tree();
     let workspace = &mut tree["nodes"][0]["nodes"][0];
     workspace["name"] = json!("original-workspace");
@@ -589,9 +599,10 @@ fn saved_layout_and_output_are_fixed_before_either_prompt() {
         .as_array_mut()
         .unwrap()
         .insert(0, other_output);
-    let mut command = command(&fixture, CAPTURE, "saved\n");
-    command.arg("menu");
-    let output = run_snapshot(&fixture, &mut command, tree);
+    let mut menu_command = menu_command(&fixture, CAPTURE, "saved\n");
+    menu_command.arg("menu");
+    let output = run_with_recorded_snapshot(&fixture, &mut menu_command, tree);
+
     assert!(output.status.success(), "{output:?}");
     let draft =
         fs::read_to_string(fixture.path.join(".config/sway-stage/layouts/saved.yaml")).unwrap();
@@ -609,16 +620,16 @@ fn saved_layout_and_output_are_fixed_before_either_prompt() {
 #[test]
 fn missing_output_does_not_change_capture_or_cancellation() {
     for selection in [CAPTURE, ""] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         let mut tree = capture_tree();
         tree["nodes"][0]["name"] = Value::Null;
-        let mut command = command(&fixture, selection, "saved\n");
-        command.arg("menu");
+        let mut menu_command = menu_command(&fixture, selection, "saved\n");
+        menu_command.arg("menu");
         if selection.is_empty() {
-            command.env("MENU_STATUS", "2");
+            menu_command.env("MENU_STATUS", "2");
         }
-        let output = run_snapshot(&fixture, &mut command, tree);
+        let output = run_with_recorded_snapshot(&fixture, &mut menu_command, tree);
         assert!(output.status.success(), "{output:?}");
         let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
         assert!(!arguments.contains("--output="));
@@ -636,10 +647,10 @@ fn missing_output_does_not_change_capture_or_cancellation() {
 #[test]
 fn failed_snapshot_prevents_all_selections_and_is_never_retried() {
     for selection in [CAPTURE, "", "Load: writing\n", "Load: valid\n"] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         fixture.file("writing.yaml", "invalid layout contents");
-        fixture.file("valid.yaml", WINDOW);
+        fixture.file("valid.yaml", SINGLE_WINDOW_YAML);
         let socket = fixture.path.join("failed.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
@@ -653,14 +664,14 @@ fn failed_snapshot_prevents_all_selections_and_is_never_retried() {
             assert_eq!(query.read(&mut [0]).unwrap(), 0);
             listener
         });
-        let mut command = command(&fixture, selection, "unused\n");
-        command
+        let mut menu_command = menu_command(&fixture, selection, "unused\n");
+        menu_command
             .env("SWAYSOCK", &socket)
             .args(["--layouts-dir", ".", "menu"]);
         if selection.is_empty() {
-            command.env("MENU_STATUS", "2");
+            menu_command.env("MENU_STATUS", "2");
         }
-        let output = command.output().unwrap();
+        let output = menu_command.output().unwrap();
         let listener = server.join().unwrap();
         listener.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -692,9 +703,9 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
         ("empty", 88, "later", true),
         ("empty", 88, "original", true),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
-        fixture.file("writing.yaml", WINDOW);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
         if select_directory {
             project_layout(&fixture, true);
         }
@@ -759,7 +770,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
             write_ipc_message(&mut query, 10, &json!({"success": true}));
             assert_eq!(events.read(&mut [0]).unwrap(), 0);
         });
-        let output = command(&fixture, "Load: writing\n", "")
+        let output = menu_command(&fixture, "Load: writing\n", "")
             .env("SWAYSOCK", &socket)
             .env("REQUIRE_SNAPSHOT", "1")
             .args(["--layouts-dir", ".", "menu", "--infer-commands"])
@@ -798,8 +809,8 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
 
 #[test]
 fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_commands() {
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     let mut tree = capture_tree();
     let workspace = &mut tree["nodes"][0]["nodes"][0];
     let mut unresolved = workspace["nodes"][0].clone();
@@ -809,9 +820,9 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
     // Missing match information must not add to the unresolved command count.
     unresolved["app_id"] = Value::Null;
     workspace["nodes"].as_array_mut().unwrap().push(unresolved);
-    let output = run_snapshot(
+    let output = run_with_recorded_snapshot(
         &fixture,
-        command(&fixture, CAPTURE, "partial\n").args([
+        menu_command(&fixture, CAPTURE, "partial\n").args([
             "--layouts-dir",
             ".",
             "menu",
@@ -819,6 +830,7 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
         ]),
         tree,
     );
+
     assert!(output.status.success(), "{output:?}");
     let path = fixture.path.join("partial.yaml");
     let draft = fs::read_to_string(&path).unwrap();
@@ -836,11 +848,11 @@ fn partial_inference_notification_identifies_the_saved_draft_and_unresolved_comm
 }
 
 // The selected path is deliberately distinct from both the root and the window override.
-fn project_layout(fixture: &Fixture, select: bool) {
+fn project_layout(fixture: &CliFixture, select: bool) {
     fs::create_dir_all(fixture.path.join("projects/gon")).unwrap();
     fixture.file(
         "writing.yaml",
-        &format!("{WINDOW}cwd: ~/projects\ncwd_select: {select}\n"),
+        &format!("{SINGLE_WINDOW_YAML}cwd: ~/projects\ncwd_select: {select}\n"),
     );
 }
 
@@ -848,8 +860,8 @@ fn project_layout(fixture: &Fixture, select: bool) {
 fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
     use std::os::unix::ffi::OsStringExt;
 
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     project_layout(&fixture, true);
     let root = fixture.path.join("projects");
     for name in [
@@ -871,13 +883,14 @@ fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
     fixture.file("projects/file", "ordinary file");
     symlink("file", root.join("file-link")).unwrap();
 
-    let output = run_empty(
+    let output = run_on_empty_workspace(
         &fixture,
-        command(&fixture, "Load: writing\n", "")
+        menu_command(&fixture, "Load: writing\n", "")
             .env("DIRECTORY_OUTPUT", "")
             .env("DIRECTORY_STATUS", "2")
             .args(["--layouts-dir", ".", "menu"]),
     );
+
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         fs::read_to_string(fixture.path.join("directories")).unwrap(),
@@ -903,12 +916,12 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
         ("gon\n", "2", "unexpected output while canceling"),
         ("", "1", "exit status: 1"),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         project_layout(&fixture, true);
-        let output = run_empty(
+        let output = run_on_empty_workspace(
             &fixture,
-            command(&fixture, "Load: writing\n", "")
+            menu_command(&fixture, "Load: writing\n", "")
                 .env("DIRECTORY_OUTPUT", response)
                 .env("DIRECTORY_STATUS", status)
                 .args(["--layouts-dir", ".", "menu"]),
@@ -925,13 +938,14 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
 
 #[test]
 fn disabled_directory_selection_uses_the_single_prompt_loading_path() {
-    let fixture = Fixture::new();
-    setup(&fixture);
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
     project_layout(&fixture, false);
-    let output = run_empty(
+    let output = run_on_empty_workspace(
         &fixture,
-        command(&fixture, "Load: writing\n", "").args(["--layouts-dir", ".", "menu"]),
+        menu_command(&fixture, "Load: writing\n", "").args(["--layouts-dir", ".", "menu"]),
     );
+
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("connect"));
     assert!(!fixture.path.join("directories").exists());
@@ -942,18 +956,18 @@ fn disabled_directory_selection_uses_the_single_prompt_loading_path() {
 #[test]
 fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
     for remove_before_prompt in [true, false] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         project_layout(&fixture, true);
         let selected = fixture.path.join("projects/gon");
-        let mut command = command(&fixture, "Load: writing\n", "");
-        command.args(["--layouts-dir", ".", "menu"]);
+        let mut menu_command = menu_command(&fixture, "Load: writing\n", "");
+        menu_command.args(["--layouts-dir", ".", "menu"]);
         if remove_before_prompt {
             fs::remove_dir(&selected).unwrap();
         } else {
-            command.env("REMOVE_DIRECTORY", &selected);
+            menu_command.env("REMOVE_DIRECTORY", &selected);
         }
-        let output = run_empty(&fixture, &mut command);
+        let output = run_on_empty_workspace(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
@@ -976,8 +990,8 @@ fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
 #[test]
 fn directory_selection_reaches_child_launch_with_window_override_precedence() {
     for window_override in [false, true] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         project_layout(&fixture, true);
         fs::create_dir(fixture.path.join("override")).unwrap();
         fixture.file("app", "#!/bin/sh\nprintf '%s\n' \"$PWD\" > \"$RESULT\"\n");
@@ -1051,7 +1065,7 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
             let mut query = accept();
             assert_eq!(read_ipc_message(&mut query).0, 1);
         });
-        let output = command(&fixture, "Load: writing\n", "")
+        let output = menu_command(&fixture, "Load: writing\n", "")
             .env("SWAYSOCK", &socket)
             .args(["--layouts-dir", ".", "menu"])
             .output()
@@ -1083,9 +1097,10 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
 
 #[test]
 fn empty_workspace_without_layouts_reports_an_error_without_fuzzel() {
-    let fixture = Fixture::new();
-    setup(&fixture);
-    let output = run_empty(&fixture, command(&fixture, "", "").arg("menu"));
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    let output = run_on_empty_workspace(&fixture, menu_command(&fixture, "", "").arg("menu"));
+
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("no layouts available"));
     assert!(!fixture.path.join("arguments").exists());
@@ -1096,14 +1111,14 @@ fn empty_workspace_without_layouts_reports_an_error_without_fuzzel() {
 #[test]
 fn capture_choices_skip_discovery_and_reject_unoffered_loads() {
     for (response, status) in [("", "2"), ("Load: writing\n", "0")] {
-        let fixture = Fixture::new();
-        setup(&fixture);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
         // Duplicate stems would fail discovery even though neither layout is needed.
         fixture.file("writing.yaml", "malformed: [");
         fixture.file("writing.yml", "");
         let output = run_capture(
             &fixture,
-            command(&fixture, response, "")
+            menu_command(&fixture, response, "")
                 .env("MENU_STATUS", status)
                 .args(["--layouts-dir", ".", "menu"]),
         );
@@ -1129,9 +1144,9 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
         ("unsupported layout", "unsupported layout"),
         ("geometry", "unusable geometry"),
     ] {
-        let fixture = Fixture::new();
-        setup(&fixture);
-        fixture.file("writing.yaml", WINDOW);
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
         let mut tree = capture_tree();
         let workspace = &mut tree["nodes"][0]["nodes"][0];
         match arrangement {
@@ -1158,9 +1173,9 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
             }
             _ => unreachable!(),
         }
-        let output = run_snapshot(
+        let output = run_with_recorded_snapshot(
             &fixture,
-            command(&fixture, CAPTURE, "unused\n").args([
+            menu_command(&fixture, CAPTURE, "unused\n").args([
                 "--layouts-dir",
                 ".",
                 "menu",

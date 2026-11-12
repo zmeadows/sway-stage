@@ -514,12 +514,8 @@ mod tests {
 
     const WINDOW: &str = "{id: terminal, command: [foot], match: {app_id: foot}}";
 
-    fn parse_test(input: &str) -> Result<Config, String> {
-        parse(input)
-    }
-
     fn rejects(input: &str, expected: &str) {
-        let error = parse_test(input).expect_err(input);
+        let error = parse(input).expect_err(input);
         assert!(
             error.contains(expected),
             "expected {expected:?}, got {error:?}"
@@ -528,7 +524,7 @@ mod tests {
 
     #[test]
     fn four_window_example_preserves_hierarchy_and_order() {
-        let config = parse_test(include_str!("../examples/four-windows.yaml")).unwrap();
+        let config = parse(include_str!("../examples/four-windows.yaml")).unwrap();
         assert_eq!(config.focus.as_deref(), Some("browser"));
         assert_eq!(config.window_timeout_ms, 20_000);
         let NodeKind::Group {
@@ -567,7 +563,7 @@ mod tests {
 
     #[test]
     fn defaults_and_literal_child_settings() {
-        let config = parse_test(
+        let config = parse(
             "version: 1\nlayout:\n  id: '1'\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words']\n  match: {class: Example}\n  cwd: /tmp\n  env: {'1': '', PATH: 'literal:$PATH'}\n",
         ).unwrap();
         assert!(config.focus.is_none());
@@ -627,10 +623,10 @@ mod tests {
             "version: 1\nlayout: [unterminated".into(),
             "".into(),
         ] {
-            assert!(parse_test(&input).is_err(), "accepted {input}");
+            assert!(parse(&input).is_err(), "accepted {input}");
         }
         // YAML punctuation inside literal strings is not a construct to reject.
-        assert!(parse_test("version: 1\nlayout: {id: t, command: [foot, '*alias', '!tag', '<<:'], match: {app_id: foot}}").is_ok());
+        assert!(parse("version: 1\nlayout: {id: t, command: [foot, '*alias', '!tag', '<<:'], match: {app_id: foot}}").is_ok());
     }
 
     #[test]
@@ -652,7 +648,7 @@ mod tests {
             "version: 1\nlayout: {id: t, command: [foot], match: {app_id: foot}, env: {1: x}}"
                 .into(),
         ] {
-            assert!(parse_test(&input).is_err(), "accepted {input}");
+            assert!(parse(&input).is_err(), "accepted {input}");
         }
         for field in ["focus", "window_timeout_ms", "cwd"] {
             rejects(
@@ -664,7 +660,7 @@ mod tests {
             let input = format!(
                 "version: 1\nlayout: {{command: [foot], match: {{app_id: foot}}, {field}: null}}"
             );
-            assert!(parse_test(&input).is_err(), "accepted {input}");
+            assert!(parse(&input).is_err(), "accepted {input}");
         }
         rejects(
             "version: 1\nlayout: {id: t, command: null, match: {app_id: foot}}",
@@ -686,7 +682,7 @@ mod tests {
         for layout in ["splith", "splitv", "tabbed", "stacked"] {
             let input =
                 format!("version: 1\nlayout: {{group: {layout}, children: [{WINDOW}, {second}]}}");
-            assert!(parse_test(&input).is_ok(), "{input}");
+            assert!(parse(&input).is_ok(), "{input}");
             rejects(
                 &format!("version: 1\nlayout: {{group: {layout}, children: []}}"),
                 "at least",
@@ -694,7 +690,7 @@ mod tests {
             let singleton =
                 format!("version: 1\nlayout: {{group: {layout}, children: [{WINDOW}]}}");
             assert_eq!(
-                parse_test(&singleton).is_ok(),
+                parse(&singleton).is_ok(),
                 matches!(layout, "tabbed" | "stacked")
             );
         }
@@ -702,7 +698,7 @@ mod tests {
         let input = format!(
             "version: 1\nfocus: second\nlayout: {{group: splith, weight: 7, children: [{{group: tabbed, weight: 3, children: [{{group: stacked, children: [{{group: splitv, children: [{WINDOW}, {second}]}}]}}]}}, {{id: third, command: [foot], match: {{app_id: foot}}}}]}}"
         );
-        let config = parse_test(&input).unwrap();
+        let config = parse(&input).unwrap();
         assert_eq!(config.layout.value.weight(), 7.0);
         assert_eq!(config.focus.as_deref(), Some("second"));
         let NodeKind::Group { children, .. } = &config.layout.value.kind else {
@@ -726,7 +722,7 @@ mod tests {
                 let input = format!(
                     "version: 1\nlayout: {{group: tabbed, children: [{{group: {layout}, children: [{child}]}}]}}"
                 );
-                let error = parse_test(&input).unwrap_err();
+                let error = parse(&input).unwrap_err();
                 for context in [
                     "layout.children[0].children[0].weight",
                     "must omit weight",
@@ -753,7 +749,7 @@ mod tests {
             "{group: stacked, children: [], command: [foot]}",
         ] {
             let input = format!("version: 1\nlayout: {{group: tabbed, children: [{child}]}}");
-            let error = parse_test(&input).unwrap_err();
+            let error = parse(&input).unwrap_err();
             for context in ["layout.children[0]", "line", "column"] {
                 assert!(error.contains(context), "{error}");
             }
@@ -783,7 +779,7 @@ mod tests {
             "{group: splith, children: [], env: {}}",
         ] {
             assert!(
-                parse_test(&format!("version: 1\nlayout: {input}")).is_err(),
+                parse(&format!("version: 1\nlayout: {input}")).is_err(),
                 "accepted {input}"
             );
         }
@@ -816,7 +812,7 @@ mod tests {
             let input = format!(
                 "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, weight: {weight}}}"
             );
-            assert!(parse_test(&input).is_ok(), "rejected {input}");
+            assert!(parse(&input).is_ok(), "rejected {input}");
         }
         rejects(
             "version: 1\nlayout: {group: splith, children: [{id: a, command: [foot], match: {app_id: foot}, weight: 1e308}, {id: b, command: [foot], match: {app_id: foot}, weight: 1e308}]}",
@@ -844,7 +840,7 @@ mod tests {
         }
         for timeout in [1, MAX_WINDOW_TIMEOUT_MS] {
             let input = format!("version: 1\nlayout: {WINDOW}\nwindow_timeout_ms: {timeout}");
-            assert_eq!(parse_test(&input).unwrap().window_timeout_ms, timeout);
+            assert_eq!(parse(&input).unwrap().window_timeout_ms, timeout);
         }
     }
 
@@ -889,12 +885,12 @@ mod tests {
     #[test]
     fn cwd_selection_contract() {
         assert!(
-            !parse_test(&format!("version: 1\nlayout: {WINDOW}"))
+            !parse(&format!("version: 1\nlayout: {WINDOW}"))
                 .unwrap()
                 .cwd_select
         );
         for enabled in [false, true] {
-            let config = parse_test(&format!(
+            let config = parse(&format!(
                 "version: 1\ncwd: /tmp\ncwd_select: {enabled}\nlayout: {WINDOW}"
             ))
             .unwrap();
@@ -930,14 +926,14 @@ mod tests {
 
     #[test]
     fn bounds_layout_depth_and_parser_nesting() {
-        assert!(parse_test(&nested_layout(MAX_LAYOUT_DEPTH)).is_ok());
+        assert!(parse(&nested_layout(MAX_LAYOUT_DEPTH)).is_ok());
         rejects(&nested_layout(MAX_LAYOUT_DEPTH + 1), "depth exceeds 32");
         let input = format!(
             "version: 1\nlayout: &anchor {}0{}",
             "[".repeat(10_000),
             "]".repeat(10_000)
         );
-        assert!(parse_test(&input).is_err());
+        assert!(parse(&input).is_err());
     }
 
     #[test]
@@ -950,7 +946,7 @@ mod tests {
                 "version: 1\nlayout: {{group: splith, children: [{}]}}",
                 children.join(",")
             );
-            assert_eq!(parse_test(&input).is_ok(), valid);
+            assert_eq!(parse(&input).is_ok(), valid);
         }
     }
 
@@ -958,7 +954,7 @@ mod tests {
     fn bounds_input_bytes_including_comments() {
         let mut input = format!("version: 1\nlayout: {WINDOW}\n#");
         input.push_str(&"x".repeat(MAX_INPUT_BYTES - input.len()));
-        assert!(parse_test(&input).is_ok());
+        assert!(parse(&input).is_ok());
         input.push('x');
         rejects(&input, "1 MiB");
     }
@@ -968,10 +964,10 @@ mod tests {
         let input = format!(
             "version: 1\nlayout:\n  group: splith\n  children:\n    - {WINDOW}\n    - id: second\n      command: [foot]\n      match: {{app_id: foot}}\n      weight: 0\n"
         );
-        let error = parse_test(&input).unwrap_err();
+        let error = parse(&input).unwrap_err();
         assert!(error.contains("layout.children[1].weight"), "{error}");
         assert!(error.contains("line 6, column"), "{error}");
-        let error = parse_test(&input.replace("weight: 0", "command: []")).unwrap_err();
+        let error = parse(&input.replace("weight: 0", "command: []")).unwrap_err();
         assert!(error.contains("layout.children[1]"), "{error}");
         assert!(error.contains("line"), "{error}");
     }
