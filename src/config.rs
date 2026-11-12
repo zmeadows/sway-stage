@@ -145,6 +145,7 @@ impl TryFrom<NodeFields> for LayoutNode {
                 env: fields.env.unwrap_or_default(),
             }
         };
+
         Ok(Self {
             weight: fields.weight,
             kind,
@@ -186,6 +187,7 @@ fn non_null_command<'de, D: Deserializer<'de>>(
             "command: null is a capture placeholder; fill in an executable and literal arguments",
         ));
     }
+
     Ok(command)
 }
 
@@ -197,6 +199,7 @@ fn non_null_match<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<M
             "match: null is a capture placeholder; fill in exactly one app_id or class",
         ));
     }
+
     Ok(matcher)
 }
 
@@ -245,15 +248,15 @@ pub fn read(path: &Path) -> Result<Config, String> {
     }
 
     // Cap the read itself, including if the file grows after discovery/metadata.
-    let mut bytes = Vec::new();
+    let mut input_bytes = Vec::new();
     file.take((MAX_INPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut input_bytes)
         .map_err(|error| format!("{}: read: {error}", path.display()))?;
-    if bytes.len() > MAX_INPUT_BYTES {
+    if input_bytes.len() > MAX_INPUT_BYTES {
         return Err(format!("{}: input exceeds the 1 MiB limit", path.display()));
     }
 
-    let input = std::str::from_utf8(&bytes)
+    let input = std::str::from_utf8(&input_bytes)
         .map_err(|error| format!("{}: expected UTF-8 YAML: {error}", path.display()))?;
     parse(input).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -339,19 +342,20 @@ pub(crate) fn parse(input: &str) -> Result<Config, String> {
             "focus: {focus:?} does not identify a window id in this layout"
         ));
     }
+
     Ok(config)
 }
 
 /// Validates a subtree, including each window's explicit working directory.
 /// `field_path` names the node in errors, such as `layout.children[1]`.
 fn validate_node(
-    node: &mut Spanned<LayoutNode>,
+    layout_node: &mut Spanned<LayoutNode>,
     field_path: &str,
-    depth: usize,
-    node_count: &mut usize,
-    window_ids: &mut HashSet<String>,
+    layout_depth: usize,
+    layout_node_count: &mut usize,
+    configured_window_ids: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let location = node.referenced;
+    let location = layout_node.referenced;
     let fail = |field: &str, message: &str| {
         format!(
             "{field_path}{field} (line {}, column {}): {message}",
@@ -360,18 +364,18 @@ fn validate_node(
         )
     };
 
-    *node_count += 1;
-    if depth > MAX_LAYOUT_DEPTH {
+    *layout_node_count += 1;
+    if layout_depth > MAX_LAYOUT_DEPTH {
         return Err(fail("", "layout depth exceeds 32 nodes along a path"));
     }
-    if *node_count > MAX_LAYOUT_NODES {
+    if *layout_node_count > MAX_LAYOUT_NODES {
         return Err(fail("", "layout exceeds 256 nodes"));
     }
-    if !node.value.weight().is_finite() || node.value.weight() <= 0.0 {
+    if !layout_node.value.weight().is_finite() || layout_node.value.weight() <= 0.0 {
         return Err(fail(".weight", "expected a finite positive number"));
     }
 
-    match &mut node.value.kind {
+    match &mut layout_node.value.kind {
         NodeKind::Group { layout, children } => {
             let is_split = matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV);
             if is_split && children.len() < 2 {
@@ -398,25 +402,36 @@ fn validate_node(
                         location.column()
                     ));
                 }
-                validate_node(child, &child_path, depth + 1, node_count, window_ids)?;
+
+                validate_node(
+                    child,
+                    &child_path,
+                    layout_depth + 1,
+                    layout_node_count,
+                    configured_window_ids,
+                )?;
                 weight_sum += child.value.weight();
             }
+
             if !weight_sum.is_finite() {
                 return Err(fail(".children", "sibling weight sum must be finite"));
             }
         }
         NodeKind::Window {
-            id,
+            id: configured_window_id,
             command,
             matcher,
             cwd,
             env,
         } => {
-            if !valid_name(id) {
+            if !valid_name(configured_window_id) {
                 return Err(fail(".id", "expected [A-Za-z0-9][A-Za-z0-9_-]*"));
             }
-            if !window_ids.insert(id.clone()) {
-                return Err(fail(".id", &format!("duplicate window id {id:?}")));
+            if !configured_window_ids.insert(configured_window_id.clone()) {
+                return Err(fail(
+                    ".id",
+                    &format!("duplicate window id {configured_window_id:?}"),
+                ));
             }
 
             if command.is_empty() || command[0].is_empty() {
@@ -446,19 +461,20 @@ fn validate_node(
                 resolve_directory(directory).map_err(|error| fail(".cwd", &error))?;
             }
 
-            for (key, value) in env {
-                if key.is_empty() || key.contains(['=', '\0']) {
+            for (environment_key, environment_value) in env {
+                if environment_key.is_empty() || environment_key.contains(['=', '\0']) {
                     return Err(fail(
                         ".env",
                         "environment keys must be nonempty and contain neither '=' nor NUL",
                     ));
                 }
-                if value.contains('\0') {
+                if environment_value.contains('\0') {
                     return Err(fail(".env", "environment values cannot contain NUL"));
                 }
             }
         }
     }
+
     Ok(())
 }
 
@@ -488,6 +504,7 @@ pub(crate) fn resolve_directory(directory: &mut PathBuf) -> Result<(), String> {
     if !metadata.is_dir() {
         return Err(format!("{} is not a directory", directory.display()));
     }
+
     Ok(())
 }
 

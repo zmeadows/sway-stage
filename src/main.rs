@@ -88,7 +88,7 @@ fn help() -> io::Result<()> {
 }
 
 fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
-    let layouts = discovery::Directory::resolve(layouts_dir)?.discover()?;
+    let layouts = discovery::LayoutDirectory::resolve(layouts_dir)?.discover()?;
     let mut stdout = io::stdout().lock();
     for name in layouts.keys() {
         writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
@@ -162,7 +162,7 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
             "invalid layout name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
         ));
     }
-    let directory = discovery::Directory::resolve(layouts_dir)?;
+    let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
     let mut layouts = directory.discover()?;
     layouts.remove(name).ok_or_else(|| {
         format!(

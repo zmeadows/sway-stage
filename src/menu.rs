@@ -30,7 +30,7 @@ pub fn select(
 ) -> Result<Option<Action>, String> {
     let options: Vec<(String, Action)> = match available {
         AvailableAction::Load => {
-            let directory = discovery::Directory::resolve(layouts_dir)?;
+            let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
             let layouts = directory.discover()?;
             if layouts.is_empty() {
                 return Err(format!(
@@ -132,7 +132,7 @@ pub fn capture_draft(
         return Ok(());
     };
 
-    let layouts_directory = discovery::Directory::resolve(layouts_dir)?;
+    let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
     let path = save_draft(&layouts_directory.path, &name, &draft.yaml)?;
     diagnostics::notify_draft_saved(&path, &draft.commands);
     Ok(())
