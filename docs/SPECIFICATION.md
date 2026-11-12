@@ -44,13 +44,20 @@ top-level keys:
 | Key | Contract |
 | --- | --- |
 | `version` | Required integer `1`; reject other versions. |
-| `layout` | Required root node: a split or a window. |
+| `layout` | Required root node: a group or a window. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
-A split node has `split: horizontal` (left to right, Sway `splith`) or `split: vertical`
-(top to bottom, `splitv`), and an ordered `children` sequence with at least two nodes.
-Children may be splits or windows, allowing arbitrary nesting within validation limits.
+A group node has `group` and an ordered `children` sequence. The four values use Sway's
+IPC layout names: `splith` (left to right) and `splitv` (top to bottom) require at least
+two children; `tabbed` and `stacked` require at least one. Groups and windows can nest
+arbitrarily within validation limits. The old `split` field and `horizontal`/`vertical`
+values are rejected; the configuration version remains `1`.
+
+`check` accepts all four group types. Loading currently supports only `splith` and `splitv`;
+a tabbed or stacked group anywhere in the tree is refused before loader IPC, application
+launches, or layout mutations. Capture still refuses tabbed/stacked structures.
+
 A window node has the following fields:
 
 | Key | Contract |
@@ -61,11 +68,15 @@ A window node has the following fields:
 | `cwd` | Optional nonempty directory path; relative paths resolve against the YAML file. |
 | `env` | Optional string-to-string map of child environment overrides; default empty. |
 
-Any node may have `weight`, a finite positive number defaulting to `1`. Its share is
-`weight / sum(sibling weights)` along the parent's split axis. Weights need not sum to
-100. The root has no siblings and its weight has no effect. Every sibling sum must be
-finite. Tree order is visual order and depth-first launch order. Do not flatten nested
-splits merely because their orientation matches their parent.
+Children of `splith` and `splitv` may have `weight`, a finite positive number defaulting
+to `1`. This includes groups of any type. Its share is `weight / sum(sibling weights)`
+along the parent's split axis; weights need not sum to 100 and every sibling sum must be
+finite. Children of `tabbed` and `stacked` must omit `weight`, even when it would be `1`.
+The root may still have a valid weight, which has no effect. Tree order is depth-first
+launch order and, for splits, visual order. Do not flatten nested splits merely because
+their orientation matches their parent. The existing global `focus` semantics are unchanged.
+Selection of the first child in each tabbed/stacked group, with explicit global focus taking
+precedence, is planned for the loader stage and is not implemented yet.
 
 Window matching uses exact, case-sensitive Wayland `app_id` or Xwayland
 `window_properties.class` equality, never a title, substring, regex, or PID alone. Repeated
@@ -82,7 +93,7 @@ arguments, paths, and environment values cannot contain NUL. An empty argument o
 environment value is allowed. Users may explicitly invoke a shell in `command`; layout
 files are executable instructions and should be trusted accordingly.
 
-Validation rejects unknown or duplicate keys, mixed split/window fields, wrong types,
+Validation rejects unknown or duplicate keys, mixed group/window fields, wrong types,
 missing required values, empty children/commands/selectors, invalid weights, duplicate
 IDs, and a `focus` that does not identify a leaf. Do not silently coerce or repair input.
 Reject multiple documents, custom tags, merge keys, and aliases. Bound input size (1 MiB),
@@ -96,8 +107,9 @@ numbers. Explicit nulls never trigger optional defaults.
 
 Layouts describe new applications in ordered horizontal and vertical tiles. There is no
 session restoration, existing-window reuse, daemon, ongoing enforcement, workspace/output
-assignment, or management of application lifetimes after launch. Tabbed, stacked, floating,
-and fullscreen arrangements are outside the layout format.
+assignment, or management of application lifetimes after launch. Tabbed and stacked groups
+are accepted by validation but cannot yet be loaded or captured. Floating and fullscreen
+arrangements are outside the layout format.
 
 The following safeguards apply to standalone and menu loading:
 
@@ -180,8 +192,9 @@ command counts. Unresolved commands require manual editing; fully inferred comma
 need review and are best-effort, with no promise of recreating the original windows.
 These counts cover launch commands only, independently of `match: null` placeholders.
 
-The draft preserves split hierarchy, orientations, visual order, and focused window. IDs
-are `window1`, `window2`, … in depth-first order. Child weights are percentages of summed
+The draft emits `group: splith` or `group: splitv` and preserves split hierarchy,
+orientations, visual order, and focused window. IDs are `window1`, `window2`, … in
+depth-first order. Child weights are percentages of summed
 sibling extents on the split axis, rounded to hundredths with a minimum of `0.01`; the root
 has no weight. A single window becomes the root. Single-child wrappers collapse after
 validation; multi-child groups remain even if their orientation matches their parent's.

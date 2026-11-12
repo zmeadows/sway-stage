@@ -1,8 +1,12 @@
 # Release roadmap
 
-The v0.1.0 implementation is feature-complete. Behavior is defined in the
+Split-layout functionality is implemented. Behavior is defined in the
 [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
+
+- **Native groups.** The version 1 schema accepts `splith`, `splitv`, `tabbed`, and `stacked`.
+  Implement guarded tabbed/stacked loading and default child selection, then capture support;
+  loading and capture currently refuse these structures.
 
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release
@@ -22,4 +26,4 @@ The v0.1.0 implementation is feature-complete. Behavior is defined in the
 - **Publish v0.1.0.** After acceptance, tag and publish the validated archives, checksums,
   installation instructions, and release notes.
 
-No additional features or architecture changes are committed for this release.
+No additional architecture changes are committed for this release.

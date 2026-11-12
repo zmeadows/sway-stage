@@ -33,7 +33,7 @@ under `$XDG_CONFIG_HOME/sway-stage/layouts` if you set `XDG_CONFIG_HOME`:
 version: 1
 focus: shell
 layout:
-  split: horizontal
+  group: splith
   children:
     - id: notes
       weight: 2
