@@ -116,7 +116,7 @@ pub struct ConfiguredWindow {
     pub selector: Selector,
     /// Environment overrides for this window's process only, in configuration order.
     pub env: Vec<(String, String)>,
-    /// Optional YAML cwd, kept relative to exercise resolution against the layout file.
+    /// Optional absolute YAML working directory.
     pub cwd: Option<String>,
     /// The selector alone cannot attribute the window to this launch, so ownership also
     /// requires Sway's PID to show the expected application's literal arguments.
@@ -1131,6 +1131,7 @@ fn json_string(text: &str) -> String {
 pub fn configure_process_execution(
     scenario: &mut Scenario,
     helper: &Path,
+    process_directory: &Path,
     run_id: &str,
 ) -> Result<(), String> {
     if scenario.name != "process-execution" {
@@ -1145,7 +1146,7 @@ pub fn configure_process_execution(
         format!("{run_id} $HOME ; $(literal) * ' \""),
         String::new(),
     ]);
-    leaf.cwd = Some("process cwd".into());
+    leaf.cwd = Some(utf8(process_directory)?.to_owned());
     leaf.env = vec![(
         format!("SWAY_STAGE_IT_{run_id}"),
         format!("{run_id} override"),

@@ -24,6 +24,8 @@ pub struct Config {
     pub cwd: Option<PathBuf>,
     #[serde(default, deserialize_with = "non_null")]
     pub focus: Option<String>,
+    #[serde(default, deserialize_with = "unquoted_boolean")]
+    pub cwd_select: bool,
     #[serde(
         default = "default_window_timeout_ms",
         deserialize_with = "unquoted_integer"
@@ -210,6 +212,16 @@ fn unquoted_integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D
     Ok(value)
 }
 
+fn unquoted_boolean<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged, expecting = "a YAML boolean (not a string)")]
+    enum Boolean {
+        Value(bool),
+    }
+    let Boolean::Value(value) = Boolean::deserialize(deserializer)?;
+    Ok(value)
+}
+
 fn unquoted_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged, expecting = "a finite positive YAML number")]
@@ -243,12 +255,11 @@ pub fn read(path: &Path) -> Result<Config, String> {
 
     let input = std::str::from_utf8(&bytes)
         .map_err(|error| format!("{}: expected UTF-8 YAML: {error}", path.display()))?;
-    parse(input, path).map_err(|error| format!("{}: {error}", path.display()))
+    parse(input).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-/// Parses and validates one layout document. `path` locates the file only for resolving
-/// relative `cwd` values; it is not read here.
-pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
+/// Parses and validates one layout document.
+pub(crate) fn parse(input: &str) -> Result<Config, String> {
     if input.len() > MAX_INPUT_BYTES {
         return Err("input exceeds the 1 MiB limit".into());
     }
@@ -303,9 +314,12 @@ pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
         ));
     }
 
-    let layout_dir = path.parent().unwrap_or(Path::new("."));
     if let Some(directory) = &mut config.cwd {
-        resolve_directory(directory, layout_dir).map_err(|error| format!("cwd: {error}"))?;
+        resolve_directory(directory).map_err(|error| format!("cwd: {error}"))?;
+    }
+
+    if config.cwd_select && config.cwd.is_none() {
+        return Err("cwd_select: true requires top-level cwd".into());
     }
 
     let mut window_ids = HashSet::new();
@@ -316,7 +330,6 @@ pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
         1,
         &mut node_count,
         &mut window_ids,
-        layout_dir,
     )?;
 
     if let Some(focus) = &config.focus
@@ -329,7 +342,7 @@ pub(crate) fn parse(input: &str, path: &Path) -> Result<Config, String> {
     Ok(config)
 }
 
-/// Validates a subtree and resolves each window's relative `cwd` against `layout_dir`.
+/// Validates a subtree, including each window's explicit working directory.
 /// `field_path` names the node in errors, such as `layout.children[1]`.
 fn validate_node(
     node: &mut Spanned<LayoutNode>,
@@ -337,7 +350,6 @@ fn validate_node(
     depth: usize,
     node_count: &mut usize,
     window_ids: &mut HashSet<String>,
-    layout_dir: &Path,
 ) -> Result<(), String> {
     let location = node.referenced;
     let fail = |field: &str, message: &str| {
@@ -386,14 +398,7 @@ fn validate_node(
                         location.column()
                     ));
                 }
-                validate_node(
-                    child,
-                    &child_path,
-                    depth + 1,
-                    node_count,
-                    window_ids,
-                    layout_dir,
-                )?;
+                validate_node(child, &child_path, depth + 1, node_count, window_ids)?;
                 weight_sum += child.value.weight();
             }
             if !weight_sum.is_finite() {
@@ -438,7 +443,7 @@ fn validate_node(
             }
 
             if let Some(directory) = cwd {
-                resolve_directory(directory, layout_dir).map_err(|error| fail(".cwd", &error))?;
+                resolve_directory(directory).map_err(|error| fail(".cwd", &error))?;
             }
 
             for (key, value) in env {
@@ -457,19 +462,32 @@ fn validate_node(
     Ok(())
 }
 
-/// Validates an explicit directory and resolves it against the YAML file's directory.
-fn resolve_directory(directory: &mut PathBuf, layout_dir: &Path) -> Result<(), String> {
-    if directory.as_os_str().is_empty() || directory.as_os_str().as_encoded_bytes().contains(&0) {
+/// Expands only a literal leading `~/` and validates an absolute directory.
+pub(crate) fn resolve_directory(directory: &mut PathBuf) -> Result<(), String> {
+    let path_bytes = directory.as_os_str().as_encoded_bytes();
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
         return Err("provide a nonempty directory path without NUL".into());
     }
 
-    let resolved = layout_dir.join(&directory);
-    let metadata = fs::metadata(&resolved)
-        .map_err(|error| format!("inspect {}: {error}", resolved.display()))?;
-    if !metadata.is_dir() {
-        return Err(format!("{} is not a directory", resolved.display()));
+    if path_bytes.starts_with(b"~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute() && !home.as_os_str().is_empty())
+            .ok_or("expanding ~/ requires HOME to be set to a nonempty absolute path")?;
+        let suffix = directory
+            .strip_prefix("~")
+            .expect("leading ~/ checked above");
+        *directory = home.join(suffix);
     }
-    *directory = resolved;
+    if !directory.is_absolute() {
+        return Err("expected an absolute directory path or a path beginning with ~/".into());
+    }
+
+    let metadata = fs::metadata(&directory)
+        .map_err(|error| format!("inspect {}: {error}", directory.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} is not a directory", directory.display()));
+    }
     Ok(())
 }
 
@@ -480,10 +498,7 @@ mod tests {
     const WINDOW: &str = "{id: terminal, command: [foot], match: {app_id: foot}}";
 
     fn parse_test(input: &str) -> Result<Config, String> {
-        parse(
-            input,
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/test.yaml"),
-        )
+        parse(input)
     }
 
     fn rejects(input: &str, expected: &str) {
@@ -536,7 +551,7 @@ mod tests {
     #[test]
     fn defaults_and_literal_child_settings() {
         let config = parse_test(
-            "version: 1\nlayout:\n  id: '1'\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words']\n  match: {class: Example}\n  cwd: ..\n  env: {'1': '', PATH: 'literal:$PATH'}\n",
+            "version: 1\nlayout:\n  id: '1'\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words']\n  match: {class: Example}\n  cwd: /tmp\n  env: {'1': '', PATH: 'literal:$PATH'}\n",
         ).unwrap();
         assert!(config.focus.is_none());
         assert!(config.cwd.is_none());
@@ -553,10 +568,7 @@ mod tests {
         };
         assert_eq!(command, ["./app", "", "$HOME", "~", "*.txt", "two words"]);
         assert!(matches!(matcher, Matcher::Class(value) if value == "Example"));
-        assert_eq!(
-            cwd.unwrap(),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/..")
-        );
+        assert_eq!(cwd.unwrap(), Path::new("/tmp"));
         assert_eq!(env["1"], "");
         assert_eq!(env["PATH"], "literal:$PATH");
     }
@@ -846,7 +858,7 @@ mod tests {
         }
         // A valid default must never hide an invalid explicit window override.
         rejects(
-            "version: 1\ncwd: .\nlayout: {id: t, command: [foot], match: {app_id: foot}, cwd: missing-sway-stage-test-directory}",
+            "version: 1\ncwd: /tmp\nlayout: {id: t, command: [foot], match: {app_id: foot}, cwd: missing-sway-stage-test-directory}",
             "layout.cwd",
         );
         for env in ["{'': x}", "{'A=B': x}", r#"{"A\0B": x}"#, r#"{A: "x\0y"}"#] {
@@ -854,6 +866,38 @@ mod tests {
                 "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, env: {env}}}"
             );
             rejects(&input, "env");
+        }
+    }
+
+    #[test]
+    fn cwd_selection_contract() {
+        assert!(
+            !parse_test(&format!("version: 1\nlayout: {WINDOW}"))
+                .unwrap()
+                .cwd_select
+        );
+        for enabled in [false, true] {
+            let config = parse_test(&format!(
+                "version: 1\ncwd: /tmp\ncwd_select: {enabled}\nlayout: {WINDOW}"
+            ))
+            .unwrap();
+            assert_eq!(config.cwd_select, enabled);
+        }
+        rejects(
+            &format!("version: 1\ncwd_select: true\nlayout: {WINDOW}"),
+            "requires top-level cwd",
+        );
+        for invalid in ["null", "1", "[]", "{}", "'true'", "yes", "'false'"] {
+            rejects(
+                &format!("version: 1\ncwd: /tmp\ncwd_select: {invalid}\nlayout: {WINDOW}"),
+                "cwd_select",
+            );
+        }
+        for layout in [
+            "{id: t, command: [foot], match: {app_id: foot}, cwd_select: false}",
+            "{group: tabbed, children: [], cwd_select: true}",
+        ] {
+            rejects(&format!("version: 1\nlayout: {layout}"), "unknown field");
         }
     }
 

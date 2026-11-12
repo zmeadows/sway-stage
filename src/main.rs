@@ -33,6 +33,9 @@ enum Command {
     Load {
         /// Layout name (the YAML filename without its extension)
         name: String,
+        /// Default child directory; relative paths resolve from the invoking directory
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
     },
     /// Print available layout names in lexical order without parsing their contents
     List,
@@ -65,7 +68,7 @@ fn main() -> ExitCode {
         Some(Command::Check { name }) => {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
-        Some(Command::Load { name }) => load(&name, cli.layouts_dir),
+        Some(Command::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
         Some(Command::Capture { infer_commands }) => capture(infer_commands),
         Some(Command::Menu { infer_commands }) => menu(cli.layouts_dir, infer_commands),
     };
@@ -99,10 +102,10 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
     writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
 }
 
-fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
+fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
-    load_named(name, layouts_dir, Ok(None), &mut diagnostics)
+    load_named(name, layouts_dir, cwd, Ok(None), &mut diagnostics)
         .map_err(|error| diagnostics.report_failure(error))
 }
 
@@ -111,11 +114,24 @@ fn load(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load_named(
     name: &str,
     layouts_dir: Option<PathBuf>,
+    cwd: Option<PathBuf>,
     expected_workspace: Result<Option<i64>, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
     let path = find_layout(name, layouts_dir)?;
-    let config = config::read(&path)?;
+    let mut config = config::read(&path)?;
+    if let Some(mut directory) = cwd {
+        if directory.is_relative()
+            && !directory.as_os_str().as_encoded_bytes().starts_with(b"~/")
+            && !directory.as_os_str().is_empty()
+        {
+            directory = std::env::current_dir()
+                .map_err(|error| format!("--cwd: read current directory: {error}"))?
+                .join(directory);
+        }
+        config::resolve_directory(&mut directory).map_err(|error| format!("--cwd: {error}"))?;
+        config.cwd = Some(directory);
+    }
     diagnostics.record(&format!(
         "validated layout {name:?} from {}",
         path.display()
@@ -183,8 +199,14 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
                 .as_ref()
                 .map(|saved| Some(saved.workspace_id()))
                 .map_err(|error| format!("pre-menu workspace snapshot: {error}"));
-            load_named(&name, layouts_dir, expected_workspace, &mut diagnostics)
-                .map_err(|error| diagnostics.report_failure(error))
+            load_named(
+                &name,
+                layouts_dir,
+                None,
+                expected_workspace,
+                &mut diagnostics,
+            )
+            .map_err(|error| diagnostics.report_failure(error))
         }
         Some(menu::Action::Capture) => {
             let snapshot =

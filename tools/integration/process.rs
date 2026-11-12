@@ -372,7 +372,6 @@ pub fn verify_probe(
     proc_root: &Path,
     terminal_pid: i32,
     leaf: &crate::scenarios::ConfiguredWindow,
-    layouts_directory: &Path,
 ) -> Result<i32, String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -383,7 +382,7 @@ pub fn verify_probe(
                 return Err("process probe requires exactly one direct terminal child".into());
             }
             let pid = children[0];
-            verify_probe_state(proc_root, pid, leaf, layouts_directory)?;
+            verify_probe_state(proc_root, pid, leaf)?;
             return Ok(pid);
         }
         if Instant::now() >= deadline {
@@ -420,7 +419,6 @@ fn verify_probe_state(
     proc_root: &Path,
     pid: i32,
     leaf: &crate::scenarios::ConfiguredWindow,
-    layouts_directory: &Path,
 ) -> Result<(), String> {
     let process_directory = proc_root.join(pid.to_string());
     let argv = fs::read(process_directory.join("cmdline"))
@@ -435,11 +433,11 @@ fn verify_probe_state(
 
     let cwd = fs::read_link(process_directory.join("cwd"))
         .map_err(|error| format!("inspect probe cwd: {error}"))?;
-    let expected_cwd = layouts_directory.join(leaf.cwd.as_ref().ok_or("probe cwd missing")?);
+    let expected_cwd = leaf.cwd.as_ref().ok_or("probe cwd missing")?;
     let expected_cwd =
         fs::canonicalize(expected_cwd).map_err(|error| format!("resolve probe cwd: {error}"))?;
     if cwd != expected_cwd {
-        return Err("probe working directory differs from layout-relative cwd".into());
+        return Err("probe working directory differs from configured absolute cwd".into());
     }
 
     let environment = fs::read(process_directory.join("environ"))
@@ -495,6 +493,7 @@ mod probe_tests {
         crate::scenarios::configure_process_execution(
             &mut scenario,
             Path::new("/test/helper"),
+            &root.join("process cwd"),
             "unique",
         )
         .unwrap();
@@ -510,15 +509,15 @@ mod probe_tests {
         )
         .unwrap();
         symlink(root.join("process cwd"), child.join("cwd")).unwrap();
-        assert_eq!(verify_probe(&proc_root, 41, leaf, &root).unwrap(), 42);
+        assert_eq!(verify_probe(&proc_root, 41, leaf).unwrap(), 42);
         assert!(
-            verify_probe(&proc_root, 99, leaf, &root)
+            verify_probe(&proc_root, 99, leaf)
                 .unwrap_err()
                 .contains("terminal threads")
         );
         fs::write(task.join("children"), "42 43").unwrap();
         assert!(
-            verify_probe(&proc_root, 41, leaf, &root)
+            verify_probe(&proc_root, 41, leaf)
                 .unwrap_err()
                 .contains("exactly one")
         );
@@ -531,30 +530,30 @@ mod probe_tests {
 
         fs::write(child.join("cmdline"), argv.strip_suffix(&[0]).unwrap()).unwrap();
         assert!(
-            verify_probe_state(&proc_root, 42, leaf, &root)
+            verify_probe_state(&proc_root, 42, leaf)
                 .unwrap_err()
                 .contains("argument boundaries")
         );
         fs::write(child.join("cmdline"), argv).unwrap();
         fs::write(child.join("environ"), b"UNRELATED=private\0").unwrap();
-        let error = verify_probe_state(&proc_root, 42, leaf, &root).unwrap_err();
+        let error = verify_probe_state(&proc_root, 42, leaf).unwrap_err();
         assert!(error.contains("environment override"));
         assert!(!error.contains("private"));
         fs::remove_file(child.join("environ")).unwrap();
         assert!(
-            verify_probe_state(&proc_root, 42, leaf, &root)
+            verify_probe_state(&proc_root, 42, leaf)
                 .unwrap_err()
                 .contains("inspect probe environment")
         );
         fs::remove_file(child.join("cwd")).unwrap();
         assert!(
-            verify_probe_state(&proc_root, 42, leaf, &root)
+            verify_probe_state(&proc_root, 42, leaf)
                 .unwrap_err()
                 .contains("inspect probe cwd")
         );
         fs::remove_file(child.join("cmdline")).unwrap();
         assert!(
-            verify_probe_state(&proc_root, 42, leaf, &root)
+            verify_probe_state(&proc_root, 42, leaf)
                 .unwrap_err()
                 .contains("inspect probe argv")
         );

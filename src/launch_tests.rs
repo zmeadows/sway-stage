@@ -31,7 +31,7 @@ impl Fixture {
 
     fn config(&self) -> Config {
         let path = self.path.join("layout.yaml");
-        fs::write(&path, "version: 1\nwindow_timeout_ms: 500\nlayout:\n  id: test\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words', '; touch bad']\n  match: {app_id: expected}\n  cwd: .\n  env: {MARKER: child-value, PATH: /fixture-child-path}\n").unwrap();
+        fs::write(&path, format!("version: 1\nwindow_timeout_ms: 500\nlayout:\n  id: test\n  command: [./app, '', '$HOME', '~', '*.txt', 'two words', '; touch bad']\n  match: {{app_id: expected}}\n  cwd: '{}'\n  env: {{MARKER: child-value, PATH: /fixture-child-path}}\n", self.path.display())).unwrap();
         crate::config::read(&path).unwrap()
     }
 
@@ -440,18 +440,22 @@ fn launch_once_preserves_literal_arguments_child_cwd_environment_and_delegation(
 }
 
 #[test]
-fn effective_directory_uses_window_then_layout_then_parent() {
+fn effective_directory_uses_window_then_cli_then_layout_then_parent() {
     let parent_cwd = env::current_dir().unwrap();
     let parent_environment = env::vars_os().collect::<BTreeMap<_, _>>();
-    for (default, override_cwd, bare_executable) in [
-        (None, None, false),
-        (Some("absolute"), None, false),
-        (Some("default"), None, false),
-        (Some("default"), None, true),
-        (Some("default"), Some("override"), false),
+    for (default, cli_cwd, override_cwd, bare_executable) in [
+        (None, None, None, false),
+        (Some("absolute"), None, None, false),
+        (Some("default"), None, None, false),
+        (Some("default"), None, None, true),
+        (Some("default"), None, Some("override"), false),
+        (Some("default"), Some("cli"), None, false),
+        (Some("default"), Some("cli"), None, true),
+        (Some("default"), Some("cli"), Some("override"), false),
+        (None, Some("cli"), None, false),
     ] {
         let fixture = Fixture::new();
-        for directory in ["default", "override"] {
+        for directory in ["default", "override", "cli"] {
             fs::create_dir(fixture.path.join(directory)).unwrap();
             fs::copy(
                 fixture.path.join("app"),
@@ -459,29 +463,29 @@ fn effective_directory_uses_window_then_layout_then_parent() {
             )
             .unwrap();
         }
-        let expected_cwd = match override_cwd.or(default) {
+        let expected_cwd = match override_cwd.or(cli_cwd).or(default) {
             Some("absolute") => fixture.path.clone(),
             Some(directory) => fixture.path.join(directory),
             None => parent_cwd.clone(),
         };
         let default_field = match default {
             Some("absolute") => format!("cwd: '{}'\n", fixture.path.display()),
-            Some(directory) => format!("cwd: {directory}\n"),
+            Some(directory) => format!("cwd: '{}'\n", fixture.path.join(directory).display()),
             None => String::new(),
         };
         let window_field = override_cwd
-            .map(|directory| format!("cwd: {directory}, "))
+            .map(|directory| format!("cwd: '{}', ", fixture.path.join(directory).display()))
             .unwrap_or_default();
         let executable = if bare_executable {
             "app".to_owned()
-        } else if default.is_some() {
+        } else if default.is_some() || cli_cwd.is_some() {
             "./app".to_owned()
         } else {
             fixture.path.join("app").display().to_string()
         };
         // Record outside the child cwd so the omitted-directory case remains isolated.
         let app = expected_cwd.join("app");
-        let app = if default.is_none() {
+        let app = if default.is_none() && cli_cwd.is_none() {
             fixture.path.join("app")
         } else {
             app
@@ -497,7 +501,7 @@ fn effective_directory_uses_window_then_layout_then_parent() {
             output.display(),
             expected_cwd.display()
         );
-        let config = crate::config::parse(&yaml, &fixture.path.join("layout.yaml")).unwrap();
+        let mut config = crate::config::parse(&yaml).unwrap();
         let expected_default = default.map(|directory| {
             if directory == "absolute" {
                 fixture.path.clone()
@@ -506,6 +510,11 @@ fn effective_directory_uses_window_then_layout_then_parent() {
             }
         });
         assert_eq!(config.cwd, expected_default);
+        if let Some(directory) = cli_cwd {
+            let mut directory = fixture.path.join(directory);
+            crate::config::resolve_directory(&mut directory).unwrap();
+            config.cwd = Some(directory);
+        }
         fixture.run_finished(&config, successful_steps()).unwrap();
         let limit = deadline();
         let expected = format!("{}\nchild-value\n", expected_cwd.display());
@@ -1160,8 +1169,9 @@ fn horizontal_vertical_and_three_siblings_use_exact_ids_with_repeated_app_ids() 
             fs::write(app_path, script).unwrap();
             let explicit_cwd = format!("cwd: '{}', ", fixture.path.display());
             format!(
-                "{{group: {axis}, children: [{}]}}\ncwd: .",
-                leaves.replace(&explicit_cwd, "")
+                "{{group: {axis}, children: [{}]}}\ncwd: '{}'",
+                leaves.replace(&explicit_cwd, ""),
+                fixture.path.display()
             )
         } else {
             format!("{{group: {axis}, children: [{leaves}]}}")

@@ -94,7 +94,7 @@ for twenty-five total, plus the separate foreign fixture. With the original opti
 available, an extended run without package flags reports twenty-three passes and two package
 SKIPs; supplying one package enables twenty-four possible passes, and both enable twenty-five.
 Other missing optional prerequisites still produce explicit SKIPs.
-The process-execution case uses a private relative cwd and a bounded harness helper as
+The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
 run-specific environment override; verified window cleanup must also observe its exit.
 No shell evaluates the test arguments.

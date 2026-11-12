@@ -759,11 +759,17 @@ fn firefox_app_id_failures_still_retain_the_created_profile() {
 }
 
 #[test]
-fn process_settings_preserve_literals_and_relative_cwd() {
+fn process_settings_preserve_literals_and_absolute_cwd() {
     let mut scenario = standard_scenario("process-execution");
-    configure_process_execution(&mut scenario, Path::new("/private/harness"), RUN_ID).unwrap();
+    configure_process_execution(
+        &mut scenario,
+        Path::new("/private/harness"),
+        Path::new("/private/process cwd"),
+        RUN_ID,
+    )
+    .unwrap();
     let leaf = scenario.layout.leaves()[0];
-    assert_eq!(leaf.cwd.as_deref(), Some("process cwd"));
+    assert_eq!(leaf.cwd.as_deref(), Some("/private/process cwd"));
     assert_eq!(leaf.command[2], "/private/harness");
     assert_eq!(leaf.command[3], crate::process::PROBE_FLAG);
     assert_eq!(leaf.command[4], format!("{RUN_ID} two words"));
@@ -780,7 +786,7 @@ fn process_settings_preserve_literals_and_relative_cwd() {
         )]
     );
     let yaml = configuration_yaml(&scenario);
-    assert!(yaml.contains("cwd: \"process cwd\""));
+    assert!(yaml.contains("cwd: \"/private/process cwd\""));
     assert!(yaml.contains(&format!(
         "env: {{\"SWAY_STAGE_IT_{RUN_ID}\": \"{RUN_ID} override\"}}"
     )));

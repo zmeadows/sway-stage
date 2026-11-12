@@ -8,7 +8,7 @@ This is the authoritative contract for implemented behavior. Start with the
 
 | Command | Behavior |
 | --- | --- |
-| `load NAME` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
+| `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--infer-commands]` | Print an editable draft of the focused workspace. |
@@ -46,6 +46,7 @@ top-level keys:
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a group or a window. |
 | `cwd` | Optional default working directory for all windows; a window’s own `cwd` overrides it. |
+| `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. Reserved for future directory selection; currently uses the root normally. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
@@ -86,13 +87,31 @@ selectors are allowed for separate sequential launches; IDs must still be unique
 Users should supply distinct application IDs in both arguments and selectors when the
 application supports them. The launcher never invents IDs or modifies commands.
 
-Both layout-level and window-level `cwd` must be nonempty paths to existing directories;
-validation rejects invalid paths before loader IPC or launches, even for an unused default
-or a window setting that overrides it. Absolute paths are used directly. Relative paths at both
-levels resolve independently against the YAML file's directory, never against the layout
-default. No shell, environment-variable, or tilde expansion is performed. Explicit `null`
-is invalid. If neither level specifies `cwd`, the child inherits the launcher's working
-directory. Groups do not accept `cwd`.
+Both layout-level and window-level `cwd` must be nonempty absolute paths (such as
+`/home/user/Projects/gon`) or home-relative paths beginning with `~/` (such as
+`~/Projects/gon`). Only a leading `~/` expands, using the current user's `$HOME`, which
+must be set, nonempty, and absolute when expansion is needed. Other YAML-relative paths,
+including `.` and `../project`, are rejected. Paths never resolve against the YAML file.
+There is no `$HOME` substitution, `~otheruser` lookup, globbing, or command substitution.
+Resolved paths must exist and identify directories; symlinks to directories are accepted.
+Explicit `null`, empty paths, and paths containing NUL are invalid. Both levels are
+validated independently before loader IPC or launches, even when an override would hide
+one of them. Groups do not accept `cwd`; groups and windows do not accept `cwd_select`.
+
+`load NAME --cwd PATH` overrides the layout default with any valid directory, including
+one outside the configured root. CLI-relative paths resolve from the invoking process's
+working directory: `--cwd .` uses that directory and `--cwd ../another-project` uses its
+sibling. Absolute paths and literal leading `~/` paths are also supported. The override is
+validated before connecting to Sway or launching applications. This option belongs only
+to `load`, and does not bypass validation of configured paths.
+
+For each child, precedence is window `cwd`, then CLI `--cwd`, then layout `cwd`, then the
+launcher's existing working directory. The parent process's directory never changes.
+`cwd_select` accepts only booleans (explicit `null` is invalid). A valid layout `cwd` may
+be used with `cwd_select` omitted or `false`. With `cwd_select: true`, direct loading
+still uses the configured root normally unless `--cwd` overrides it. Interactive project
+directory selection is not implemented yet. Capture and command inference do not attempt
+to reconstruct working-directory settings.
 
 Commands are launched with preserved argument boundaries, without implicit shell parsing,
 variable expansion, tilde expansion, or globbing. A bare executable uses the child's

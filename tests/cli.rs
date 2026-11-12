@@ -352,14 +352,14 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
 }
 
 #[test]
-fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
+fn check_validates_absolute_cwd_and_rejects_bad_files() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.path.join("layouts/work")).unwrap();
     fixture.file(
         "layouts/relative.yaml",
         &WINDOW.replace("match:", "cwd: work, match:"),
     );
-    fixture.run(&["--layouts-dir", "layouts", "check", "relative"], 0);
+    fixture.run(&["--layouts-dir", "layouts", "check", "relative"], 1);
     fixture.file(
         "layouts/absolute.yaml",
         &WINDOW.replace(
@@ -374,7 +374,7 @@ fn check_resolves_cwd_against_yaml_file_and_rejects_bad_files() {
     );
     fixture.run(&["--layouts-dir", "layouts", "check", "missing"], 1);
     for (name, cwd, status) in [
-        ("default-relative", "work".to_owned(), 0),
+        ("default-relative", "work".to_owned(), 1),
         (
             "default-absolute",
             format!("'{}'", fixture.path.display()),
@@ -833,4 +833,152 @@ fn check_accepts_all_groups_and_load_requires_sway() {
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(error.contains("SWAYSOCK"), "{error}");
     }
+}
+
+#[test]
+fn home_expansion_and_yaml_directories_are_validated_independently() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.path.join("project")).unwrap();
+    symlink(fixture.path.join("project"), fixture.path.join("link")).unwrap();
+    fixture.file("file", "ordinary file");
+    for directory in [
+        "~/project",
+        "~//project",
+        "~/link",
+        "~/",
+        fixture.path.to_str().unwrap(),
+    ] {
+        fixture.file("home.yaml", &format!("{WINDOW}cwd: '{directory}'\n"));
+        fixture.run(&["--layouts-dir", ".", "check", "home"], 0);
+        fixture.file(
+            "home.yaml",
+            &WINDOW.replace("match:", &format!("cwd: '{directory}', match:")),
+        );
+        fixture.run(&["--layouts-dir", ".", "check", "home"], 0);
+    }
+    fixture.file("home.yaml", &format!("{WINDOW}cwd: ~/project\n"));
+    for home in [
+        None,
+        Some(""),
+        Some("relative"),
+        Some("/does-not-exist/sway-stage-home"),
+        Some("/dev/null"),
+    ] {
+        let mut command = fixture.command();
+        command.env_remove("HOME");
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        let output = command
+            .args(["--layouts-dir", ".", "check", "home"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("cwd"), "{error}");
+        if home.is_none() || home == Some("") || home == Some("relative") {
+            assert!(error.contains("HOME"), "{error}");
+        }
+    }
+    for directory in [
+        ".",
+        "../project",
+        "project",
+        "$HOME/project",
+        "~other/project",
+        "~",
+        "*.txt",
+        "$(pwd)",
+        "",
+        "~/absent",
+        "~/file",
+    ] {
+        for top_level in [false, true] {
+            let yaml = if top_level {
+                format!(
+                    "{}cwd: '{directory}'\n",
+                    WINDOW.replace("match:", "cwd: /tmp, match:")
+                )
+            } else {
+                format!(
+                    "{}cwd: /tmp\n",
+                    WINDOW.replace("match:", &format!("cwd: '{directory}', match:"))
+                )
+            };
+            fixture.file("bad.yaml", &yaml);
+            let output = fixture.run(&["--layouts-dir", ".", "check", "bad"], 1);
+            assert!(String::from_utf8_lossy(&output.stderr).contains("cwd"));
+        }
+    }
+}
+
+#[test]
+fn load_directory_override_is_validated_before_ipc_and_belongs_only_to_load() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path.join("layouts")).unwrap();
+    fs::create_dir(fixture.path.join("project")).unwrap();
+    fixture.file(
+        "layouts/good.yaml",
+        &format!("{WINDOW}cwd: /tmp\ncwd_select: true\n"),
+    );
+    for directory in [
+        ".",
+        "project",
+        "../",
+        "~/project",
+        fixture.path.to_str().unwrap(),
+    ] {
+        let output = fixture.run(
+            &[
+                "--layouts-dir",
+                "layouts",
+                "load",
+                "good",
+                "--cwd",
+                directory,
+            ],
+            1,
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("SWAYSOCK is unset"), "{error}");
+    }
+    // The invoking directory contains project; the YAML directory does not.
+    for directory in ["absent", "layouts/good.yaml", "~/absent"] {
+        let output = fixture.run(
+            &[
+                "--layouts-dir",
+                "layouts",
+                "load",
+                "good",
+                "--cwd",
+                directory,
+            ],
+            1,
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("--cwd:"), "{error}");
+        assert!(!error.contains("SWAYSOCK"), "{error}");
+    }
+    fixture.file("layouts/bad.yaml", &format!("{WINDOW}cwd: absent\n"));
+    let output = fixture.run(
+        &["--layouts-dir", "layouts", "load", "bad", "--cwd", "."],
+        1,
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cwd:"));
+    for arguments in [
+        vec!["check", "good", "--cwd", "."],
+        vec!["capture", "--cwd", "."],
+        vec!["menu", "--cwd", "."],
+        vec!["load", "good", "--cwd"],
+        vec!["load", "good", "--cwd", ""],
+    ] {
+        fixture.run(&arguments, 2);
+    }
+    let help = fixture.run(&["load", "--help"], 0);
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--cwd <PATH>"));
+    assert!(help.contains("invoking directory"));
+    let output = fixture.run(&["--layouts-dir", "layouts", "load", "good"], 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("SWAYSOCK is unset"));
 }

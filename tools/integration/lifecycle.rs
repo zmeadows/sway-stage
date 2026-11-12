@@ -317,7 +317,12 @@ impl Harness {
             env::current_exe().map_err(|error| format!("locate process probe: {error}"))?;
         directory.create_process_cwd()?;
         for scenario in &mut scenarios {
-            configure_process_execution(scenario, &helper, &self.run_id)?;
+            configure_process_execution(
+                scenario,
+                &helper,
+                &directory.path.join("process cwd"),
+                &self.run_id,
+            )?;
             self.stage = format!("{}: initial check", scenario.name);
             directory.write(scenario.name, &configuration_yaml(scenario))?;
             check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
@@ -543,7 +548,7 @@ impl Harness {
                     Failure::Uncertain("process scenario has no terminal PID".into())
                 })?;
                 Some(
-                    process::verify_probe(Path::new("/proc"), terminal_pid, leaf, &directory.path)
+                    process::verify_probe(Path::new("/proc"), terminal_pid, leaf)
                         .map_err(Failure::Uncertain)?,
                 )
             } else {

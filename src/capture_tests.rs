@@ -4,7 +4,6 @@ use crate::config::{self, Config, GroupLayout, LayoutNode, Matcher, NodeKind};
 use crate::observation::fixtures::{frame, node, pair, request, send, tree};
 use serde_json::{Value, json};
 use std::io::Read;
-use std::path::Path;
 use std::thread;
 
 /// A tiled Wayland view whose container rect is `width` by `height` pixels.
@@ -89,7 +88,7 @@ fn filled(draft: &str) -> Config {
     let edited = draft
         .replace("command: null", "command: [app]")
         .replace("match: null", "match: {app_id: filled}");
-    config::parse(&edited, Path::new("draft.yaml")).unwrap()
+    config::parse(&edited).unwrap()
 }
 
 /// Groups as `h(...)`, `v(...)`, `t(...)`, or `s(...)`, with explicit child weights
@@ -488,13 +487,13 @@ fn missing_identifiers_become_explicit_match_placeholders() {
     );
 
     // check and load reject unfilled drafts with placeholder instructions.
-    let error = config::parse(&draft, Path::new("draft.yaml")).unwrap_err();
+    let error = config::parse(&draft).unwrap_err();
     assert!(
         error.contains("command: null is a capture placeholder"),
         "{error}"
     );
     let commands_only = draft.replace("command: null", "command: [app]");
-    let error = config::parse(&commands_only, Path::new("draft.yaml")).unwrap_err();
+    let error = config::parse(&commands_only).unwrap_err();
     assert!(
         error.contains("match: null is a capture placeholder"),
         "{error}"
@@ -1174,7 +1173,7 @@ fn command_styles_preserve_special_arguments_through_strict_parsing() {
                 assert!(draft.yaml.contains("  command: [app, "), "{}", draft.yaml);
             }
 
-            let parsed = config::parse(&draft.yaml, Path::new("draft.yaml")).unwrap();
+            let parsed = config::parse(&draft.yaml).unwrap();
             let NodeKind::Window { command, .. } = &parsed.layout.value.kind else {
                 panic!("expected window");
             };
@@ -1217,7 +1216,7 @@ fn command_line_limit_counts_yaml_escaping_and_indentation() {
         .render_with(true, &mut |_| Some(expected.clone()))
         .unwrap();
     assert!(draft.yaml.contains("  command:\n    - app\n"));
-    let parsed = config::parse(&draft.yaml, Path::new("draft.yaml")).unwrap();
+    let parsed = config::parse(&draft.yaml).unwrap();
     let NodeKind::Window { command, .. } = &parsed.layout.value.kind else {
         panic!("expected window");
     };
