@@ -24,11 +24,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     layouts_dir: Option<PathBuf>,
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CliCommand>,
 }
 
 #[derive(Subcommand)]
-enum Command {
+enum CliCommand {
     /// Construct a weighted tiled layout and select final focus on the focused empty workspace
     Load {
         /// Layout name (the YAML filename without its extension)
@@ -60,19 +60,21 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
     // Only layout-loading attempts write the launch log. Menu and capture also notify
     // on failure; the other commands report solely to stdout/stderr.
-    let result = match cli.command {
+    let command_result = match cli.command {
         None => help().map_err(|error| format!("help: stdout: {error}")),
-        Some(Command::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
-        Some(Command::Check { name }) => {
+        Some(CliCommand::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
+        Some(CliCommand::Check { name }) => {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
-        Some(Command::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
-        Some(Command::Capture { infer_commands }) => capture(infer_commands),
-        Some(Command::Menu { infer_commands }) => menu(cli.layouts_dir, infer_commands),
+        Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
+        Some(CliCommand::Capture { infer_commands }) => capture(infer_commands),
+        Some(CliCommand::Menu { infer_commands }) => menu(cli.layouts_dir, infer_commands),
     };
-    match result {
+
+    match command_result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "sway-stage: {error}");
@@ -89,10 +91,12 @@ fn help() -> io::Result<()> {
 
 fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
     let layouts = discovery::LayoutDirectory::resolve(layouts_dir)?.discover()?;
+
     let mut stdout = io::stdout().lock();
     for name in layouts.keys() {
         writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
     }
+
     Ok(())
 }
 
@@ -105,9 +109,9 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
-    load_named(
+    load_named_layout(
         name,
-        read_named(name, layouts_dir),
+        read_named_layout(name, layouts_dir),
         cwd,
         None,
         &mut diagnostics,
@@ -117,15 +121,15 @@ fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Resul
 
 /// Validates and constructs a named layout under launch diagnostics. This is the single
 /// loading path: menu calls it only after Fuzzel has exited with a valid selection.
-fn load_named(
+fn load_named_layout(
     name: &str,
-    layout: Result<(PathBuf, config::Config), String>,
-    cwd: Option<PathBuf>,
-    expected_workspace: Option<i64>,
+    layout_result: Result<(PathBuf, config::Config), String>,
+    default_cwd_override: Option<PathBuf>,
+    expected_workspace_id: Option<i64>,
     diagnostics: &mut Diagnostics,
 ) -> Result<(), String> {
-    let (path, mut config) = layout?;
-    if let Some(mut directory) = cwd {
+    let (path, mut config) = layout_result?;
+    if let Some(mut directory) = default_cwd_override {
         if directory.is_relative()
             && !directory.as_os_str().as_encoded_bytes().starts_with(b"~/")
             && !directory.as_os_str().is_empty()
@@ -135,18 +139,20 @@ fn load_named(
                 .join(directory);
         }
         config::resolve_directory(&mut directory).map_err(|error| format!("--cwd: {error}"))?;
+
         config.cwd = Some(directory);
     }
+
     diagnostics.record(&format!(
         "validated layout {name:?} from {}",
         path.display()
     ));
-    launch::load(&config, expected_workspace, diagnostics)
+    launch::load(&config, expected_workspace_id, diagnostics)
         .map_err(|error| format!("layout {name:?}: {error}"))
 }
 
 /// Read once so menu selection and loading use the same validated configuration.
-fn read_named(
+fn read_named_layout(
     name: &str,
     layouts_dir: Option<PathBuf>,
 ) -> Result<(PathBuf, config::Config), String> {
@@ -162,6 +168,7 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
             "invalid layout name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
         ));
     }
+
     let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
     let mut layouts = directory.discover()?;
     layouts.remove(name).ok_or_else(|| {
@@ -185,6 +192,7 @@ fn capture(infer_commands: bool) -> Result<(), String> {
 /// Writes the draft only once it is complete. Flushing surfaces a write error before exit.
 fn print_draft(infer_commands: bool) -> Result<(), String> {
     let draft = capture::capture(infer_commands)?;
+
     let mut stdout = io::stdout().lock();
     stdout
         .write_all(draft.yaml.as_bytes())
@@ -196,13 +204,15 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
         "sway-stage: capture completed. {}",
         draft.commands.summary()
     );
+
     Ok(())
 }
 
 fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {
     let snapshot = capture::snapshot()
         .map_err(|error| report_menu_failure(format!("pre-menu workspace snapshot: {error}")))?;
-    let available = if snapshot.workspace_is_empty() {
+
+    let available_action = if snapshot.workspace_is_empty() {
         menu::AvailableAction::Load
     } else {
         // Validate the saved arrangement without reading process arguments.
@@ -211,16 +221,18 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
             .map_err(|error| report_menu_failure(format!("capture unavailable: {error}")))?;
         menu::AvailableAction::Capture
     };
+
     let output_name = snapshot.output_name();
-    let action =
-        menu::select(available, layouts_dir.clone(), output_name).map_err(report_menu_failure)?;
+    let action = menu::select(available_action, layouts_dir.clone(), output_name)
+        .map_err(report_menu_failure)?;
+
     match action {
         None => Ok(()),
         Some(menu::Action::Load(name)) => {
             // Keep validation failures under launch diagnostics, but leave the old log
             // intact while a directory prompt can still be canceled.
-            let layout = read_named(&name, layouts_dir);
-            let cwd = if let Ok((_, config)) = &layout
+            let layout_result = read_named_layout(&name, layouts_dir);
+            let selected_directory = if let Ok((_, config)) = &layout_result
                 && config.cwd_select
             {
                 let root = config
@@ -239,10 +251,10 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
 
             let mut diagnostics = Diagnostics::start("menu");
             diagnostics.stage(format!("menu load {name:?}: validation"));
-            load_named(
+            load_named_layout(
                 &name,
-                layout,
-                cwd,
+                layout_result,
+                selected_directory,
                 Some(snapshot.workspace_id()),
                 &mut diagnostics,
             )

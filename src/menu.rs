@@ -24,11 +24,11 @@ pub enum AvailableAction {
 }
 
 pub fn select(
-    available: AvailableAction,
+    available_action: AvailableAction,
     layouts_dir: Option<PathBuf>,
     output_name: Option<&str>,
 ) -> Result<Option<Action>, String> {
-    let options: Vec<(String, Action)> = match available {
+    let action_options: Vec<(String, Action)> = match available_action {
         AvailableAction::Load => {
             let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
             let layouts = directory.discover()?;
@@ -38,6 +38,7 @@ pub fn select(
                     directory.path.display()
                 ));
             }
+
             layouts
                 .into_keys()
                 .map(|name| (format!("Load: {name}"), Action::Load(name)))
@@ -46,15 +47,17 @@ pub fn select(
         AvailableAction::Capture => vec![(CAPTURE_OPTION.into(), Action::Capture)],
     };
 
-    let mut input = String::new();
-    for (label, _) in &options {
-        input.push_str(label);
-        input.push('\n');
+    let mut prompt_input = String::new();
+    for (label, _) in &action_options {
+        prompt_input.push_str(label);
+        prompt_input.push('\n');
     }
-    let Some(selection) = fuzzel("--prompt=Layout: ", Some(&input), output_name)? else {
+
+    let Some(selection) = fuzzel("--prompt=Layout: ", Some(&prompt_input), output_name)? else {
         return Ok(None);
     };
-    options
+
+    action_options
         .into_iter()
         .find(|(label, _)| label == &selection)
         .map(|(_, action)| Some(action))
@@ -71,9 +74,11 @@ pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option
         .iter()
         .map(|(name, _)| format!("{name}\n"))
         .collect::<String>();
+
     let Some(selection) = fuzzel("--prompt=Directory: ", Some(&input), output_name)? else {
         return Ok(None);
     };
+
     let (_, directory) = choices
         .into_iter()
         .find(|(name, _)| name == &selection)
@@ -92,6 +97,7 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
                 root.display()
             )
         })?;
+
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -110,10 +116,12 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
             choices.push((name.to_owned(), path));
         }
     }
+
     choices.sort_by(|left, right| left.0.cmp(&right.0));
     if choices.is_empty() {
         return Err(format!("no selectable directories in {}", root.display()));
     }
+
     Ok(choices)
 }
 
@@ -135,6 +143,7 @@ pub fn capture_draft(
     let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
     let path = save_draft(&layouts_directory.path, &name, &draft.yaml)?;
     diagnostics::notify_draft_saved(&path, &draft.commands);
+
     Ok(())
 }
 
@@ -153,7 +162,8 @@ fn fuzzel(
     if let Some(output_name) = output_name {
         command.arg(format!("--output={output_name}"));
     }
-    let mut child = command
+
+    let mut fuzzel_process = command
         .arg(prompt)
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -166,42 +176,47 @@ fn fuzzel(
 
     // Read stdout while feeding stdin: a large layout list must not deadlock if Fuzzel
     // returns a selection before consuming all the options. Always close stdin and reap.
-    let (output, input_result) = std::thread::scope(|scope| {
-        let writer = child.stdin.take().map(|mut stdin| {
+    let (output_result, write_options_result) = std::thread::scope(|scope| {
+        let input_writer = fuzzel_process.stdin.take().map(|mut stdin| {
             scope.spawn(move || stdin.write_all(input.expect("options for piped stdin").as_bytes()))
         });
-        let output = child.wait_with_output();
-        let input_result = match writer {
-            Some(writer) => writer
+
+        let fuzzel_output = fuzzel_process.wait_with_output();
+        let write_options_result = match input_writer {
+            Some(input_writer) => input_writer
                 .join()
                 .unwrap_or_else(|_| Err(io::Error::other("Fuzzel input writer panicked"))),
             None => Ok(()),
         };
-        (output, input_result)
+        (fuzzel_output, write_options_result)
     });
-    let output = output.map_err(|error| format!("wait for Fuzzel: {error}"))?;
-    if output.status.code() == Some(2) {
-        if !output.stdout.is_empty() {
+
+    let fuzzel_output = output_result.map_err(|error| format!("wait for Fuzzel: {error}"))?;
+    if fuzzel_output.status.code() == Some(2) {
+        if !fuzzel_output.stdout.is_empty() {
             return Err("Fuzzel returned unexpected output while canceling".into());
         }
         return Ok(None);
     }
-    if !output.status.success() {
+    if !fuzzel_output.status.success() {
         return Err(format!(
             "Fuzzel failed: {}; check its stderr and configuration",
-            output.status
+            fuzzel_output.status
         ));
     }
-    input_result.map_err(|error| format!("write Fuzzel options: {error}"))?;
 
-    let text = String::from_utf8(output.stdout).map_err(|_| "Fuzzel output is not UTF-8")?;
-    let line = text
+    write_options_result.map_err(|error| format!("write Fuzzel options: {error}"))?;
+
+    let output_text =
+        String::from_utf8(fuzzel_output.stdout).map_err(|_| "Fuzzel output is not UTF-8")?;
+    let selected_line = output_text
         .strip_suffix('\n')
         .ok_or("Fuzzel output must be one newline-terminated line")?;
-    if line.chars().any(char::is_control) {
+    if selected_line.chars().any(char::is_control) {
         return Err("Fuzzel output must be a single line without control characters".into());
     }
-    Ok(Some(line.to_owned()))
+
+    Ok(Some(selected_line.to_owned()))
 }
 
 fn validate_draft_name(name: &str) -> Result<(), String> {
@@ -215,31 +230,38 @@ fn validate_draft_name(name: &str) -> Result<(), String> {
             "draft name: maximum length is {MAX_DRAFT_NAME_BYTES} ASCII characters"
         ));
     }
+
     Ok(())
 }
 
-fn save_draft(directory: &Path, name: &str, draft: &str) -> Result<PathBuf, String> {
+fn save_draft(layouts_directory: &Path, name: &str, draft_yaml: &str) -> Result<PathBuf, String> {
     validate_draft_name(name)?;
-    let path = directory.join(format!("{name}.yaml"));
-    let alternate = directory.join(format!("{name}.yml"));
-    reject_existing_layout(&path)?;
-    reject_existing_layout(&alternate)?;
+
+    let destination_path = layouts_directory.join(format!("{name}.yaml"));
+    let alternate_layout_path = layouts_directory.join(format!("{name}.yml"));
+    reject_existing_layout(&destination_path)?;
+    reject_existing_layout(&alternate_layout_path)?;
 
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(directory)
-        .map_err(|error| format!("create layouts directory {}: {error}", directory.display()))?;
+        .create(layouts_directory)
+        .map_err(|error| {
+            format!(
+                "create layouts directory {}: {error}",
+                layouts_directory.display()
+            )
+        })?;
 
     // Stage outside discovery's extensions so list, check, and the menu never see it. A
     // write/sync/publication failure leaves a clearly named partial file for manual
     // inspection, never a partial .yaml layout.
     // Do not roll back by unlinking a path whose ownership may have changed on failure.
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let partial_path = directory.join(format!(
+    static NEXT_STAGING_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    let partial_path = layouts_directory.join(format!(
         ".sway-stage-{}-{}.partial",
         std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        NEXT_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let mut partial_file = OpenOptions::new()
         .write(true)
@@ -252,7 +274,14 @@ fn save_draft(directory: &Path, name: &str, draft: &str) -> Result<PathBuf, Stri
                 partial_path.display()
             )
         })?;
-    if let Err(error) = publish_draft(&mut partial_file, &partial_path, &path, &alternate, draft) {
+
+    if let Err(error) = publish_draft(
+        &mut partial_file,
+        &partial_path,
+        &destination_path,
+        &alternate_layout_path,
+        draft_yaml,
+    ) {
         return Err(format!(
             "{error}; unsaved staging file retained at {}",
             partial_path.display()
@@ -267,7 +296,8 @@ fn save_draft(directory: &Path, name: &str, draft: &str) -> Result<PathBuf, Stri
             partial_path.display()
         );
     }
-    Ok(path)
+
+    Ok(destination_path)
 }
 
 /// Sync all bytes before exposing a .yaml name. The hard link is exclusive even when
@@ -275,19 +305,20 @@ fn save_draft(directory: &Path, name: &str, draft: &str) -> Result<PathBuf, Stri
 fn publish_draft(
     partial_file: &mut File,
     partial_path: &Path,
-    path: &Path,
-    alternate: &Path,
-    draft: &str,
+    destination_path: &Path,
+    alternate_layout_path: &Path,
+    draft_yaml: &str,
 ) -> Result<(), String> {
     partial_file
-        .write_all(draft.as_bytes())
+        .write_all(draft_yaml.as_bytes())
         .and_then(|()| partial_file.sync_all())
         .map_err(|error| format!("write draft: {error}"))?;
-    reject_existing_layout(alternate)?;
-    fs::hard_link(partial_path, path).map_err(|error| {
+
+    reject_existing_layout(alternate_layout_path)?;
+    fs::hard_link(partial_path, destination_path).map_err(|error| {
         format!(
             "publish draft {} without overwriting: {error}",
-            path.display()
+            destination_path.display()
         )
     })
 }

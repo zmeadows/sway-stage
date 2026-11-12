@@ -18,10 +18,10 @@ pub struct Diagnostics {
     operation: &'static str,
     log_file: Option<File>,
     log_path: Option<PathBuf>,
-    started: Instant,
-    stage: String,
+    started_at: Instant,
+    current_stage: String,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
-    launched: bool,
+    application_spawned: bool,
 }
 
 impl Diagnostics {
@@ -32,9 +32,9 @@ impl Diagnostics {
             operation: "load",
             log_file: Some(log_file),
             log_path: Some(log_path),
-            started: Instant::now(),
-            stage: "test".into(),
-            launched: false,
+            started_at: Instant::now(),
+            current_stage: "test".into(),
+            application_spawned: false,
         }
     }
 
@@ -45,10 +45,11 @@ impl Diagnostics {
             operation,
             log_file: None,
             log_path: None,
-            started: Instant::now(),
-            stage: "validation".into(),
-            launched: false,
+            started_at: Instant::now(),
+            current_stage: "validation".into(),
+            application_spawned: false,
         };
+
         match last_run_log_path().and_then(open_log) {
             Ok((log_file, log_path)) => {
                 diagnostics.log_file = Some(log_file);
@@ -56,11 +57,12 @@ impl Diagnostics {
             }
             Err(error) => stderr(&format!("sway-stage: logging unavailable: {error}")),
         }
+
         diagnostics
     }
 
     pub fn stage(&mut self, stage: impl Into<String>) {
-        self.stage = stage.into();
+        self.current_stage = stage.into();
         self.record("begin");
     }
 
@@ -73,8 +75,8 @@ impl Diagnostics {
             "{}.{:03} +{}ms [{}] {}\n",
             timestamp.as_secs(),
             timestamp.subsec_millis(),
-            self.started.elapsed().as_millis(),
-            self.stage.escape_debug(),
+            self.started_at.elapsed().as_millis(),
+            self.current_stage.escape_debug(),
             message.escape_debug(),
         );
 
@@ -88,23 +90,25 @@ impl Diagnostics {
                 return;
             }
         }
+
         let _ = io::stderr().lock().write_all(line.as_bytes());
     }
 
     /// Records a successful `Command::spawn`. A spawn that failed started nothing.
     pub fn spawned(&mut self, pid: u32) {
-        self.launched = true;
+        self.application_spawned = true;
         self.record(&format!("spawned pid={pid}"));
     }
 
     /// Logs and notifies a fatal error, returning the primary message for stderr.
     pub fn report_failure(&mut self, error: String) -> String {
-        let mut message = format!("{}: {error}", self.stage);
+        let mut message = format!("{}: {error}", self.current_stage);
         // Validation, connection, prelaunch and failed-spawn errors leave nothing behind.
-        if self.launched {
+        if self.application_spawned {
             message
                 .push_str("; stopped without cleanup or relaunch; inspect windows before retrying");
         }
+
         self.record(&message);
 
         if let Some(log_path) = &self.log_path {
@@ -113,6 +117,7 @@ impl Diagnostics {
         if let Err(error) = notify_failure(self.operation, &message) {
             self.record(&format!("secondary notification failure: {error}"));
         }
+
         message
     }
 
@@ -156,8 +161,10 @@ fn stderr(message: &str) {
 }
 
 fn last_run_log_path() -> Result<PathBuf, String> {
-    let base = if let Some(xdg) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        PathBuf::from(xdg)
+    let state_home = if let Some(xdg_state_home) =
+        env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty())
+    {
+        PathBuf::from(xdg_state_home)
     } else {
         let home = env::var_os("HOME")
             .filter(|value| !value.is_empty())
@@ -169,10 +176,11 @@ fn last_run_log_path() -> Result<PathBuf, String> {
         home.join(".local/state")
     };
 
-    if !base.is_absolute() {
+    if !state_home.is_absolute() {
         return Err("XDG_STATE_HOME must be absolute".into());
     }
-    Ok(base.join("sway-stage/last-run.log"))
+
+    Ok(state_home.join("sway-stage/last-run.log"))
 }
 
 fn open_log(path: PathBuf) -> Result<(File, PathBuf), String> {
@@ -181,6 +189,7 @@ fn open_log(path: PathBuf) -> Result<(File, PathBuf), String> {
             .recursive(true)
             .mode(0o700)
             .create(path.parent().expect("log path has a parent"))?;
+
         // Unlink rather than truncate: do not follow a last-run.log symlink, and do not
         // expose this run through an older log's permissions or hard links. create_new
         // refuses a replacement inserted between unlink and open.
@@ -189,12 +198,14 @@ fn open_log(path: PathBuf) -> Result<(File, PathBuf), String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)
     };
+
     open()
         .map(|file| (file, path.clone()))
         .map_err(|error| format!("{}: {error}", path.display()))
@@ -206,6 +217,7 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
     if cfg!(test) {
         return Ok(());
     }
+
     let mut child = Command::new("notify-send")
         .args([
             "--app-name=sway-stage",
@@ -227,11 +239,11 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(format!("notify-send: {status}")),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            result => {
+            wait_result => {
                 // Only the optional notification helper is terminated, never an application.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(match result {
+                return Err(match wait_result {
                     Err(error) => format!("wait for notify-send: {error}"),
                     _ => "notify-send exceeded two-second deadline".into(),
                 });
