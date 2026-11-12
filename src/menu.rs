@@ -50,10 +50,10 @@ pub fn select_layout(
 ) -> Result<Option<String>, Error> {
     let directory = discovery::LayoutDirectory::resolve(layouts_dir)
         .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
-    let layouts = directory
+    let discovery = directory
         .discover()
         .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
-    if layouts.is_empty() {
+    if discovery.layouts.is_empty() {
         return Err(Error::new(
             FailureKind::NoLayouts,
             format!(
@@ -66,7 +66,7 @@ pub fn select_layout(
     // Build prompt text in discovery order, and keep exact labels paired with identities.
     let mut prompt_input = String::new();
     let mut choices = BTreeMap::new();
-    for (name, path) in layouts {
+    for (name, path) in discovery.layouts {
         let is_valid = config::read(&path).is_ok();
         let label = if is_valid {
             name.clone()

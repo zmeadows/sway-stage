@@ -26,9 +26,16 @@ bases must be absolute. Explicit relative paths resolve from the CLI's working d
 
 Discovery reads immediate regular `.yaml` and `.yml` files only, ignoring symlinks and
 subdirectories. The case-sensitive filename stem is the name and must match
-`[A-Za-z0-9][A-Za-z0-9_-]*`. Invalid names or duplicate stems are errors. Reads never create
-directories. A missing default directory lists as empty; a missing explicit directory or
-requested layout is an error.
+`[A-Za-z0-9][A-Za-z0-9_-]*`. Invalid filenames are skipped. Duplicate stems such as
+`foo.yaml` and `foo.yml` are ambiguous: neither file is listed or selectable in the menu.
+Other valid layouts remain usable. `list` reports these discovery warnings on stderr,
+keeping stdout to sorted, unambiguous names. The menu omits these entries without filename
+warnings or notifications; unambiguous files with invalid YAML retain their `[invalid]` labels.
+`check NAME` and `load NAME` report an ambiguity error identifying the conflicting filenames
+when that name is requested, before loader IPC or application launches. Unrelated filename
+problems do not affect their resolution. Directory read, enumeration, and inspection failures
+remain fatal. Reads never create directories. A missing default directory lists as empty;
+a missing explicit directory or requested layout is an error.
 
 Success and menu cancellation exit 0, operational or validation errors exit 1, and invalid
 CLI usage exits 2. Data goes to stdout; errors, warnings, and diagnostics go to stderr.

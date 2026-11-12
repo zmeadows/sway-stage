@@ -8,6 +8,23 @@ pub struct LayoutDirectory {
     is_explicit: bool,
 }
 
+/// Recoverable filename problems stay separate from fatal directory I/O errors.
+#[derive(Default)]
+pub struct Discovery {
+    pub layouts: BTreeMap<String, PathBuf>,
+    pub ambiguities: BTreeMap<String, String>,
+    invalid_filenames: Vec<String>,
+}
+
+impl Discovery {
+    pub fn warnings(&self) -> impl Iterator<Item = &str> {
+        self.invalid_filenames
+            .iter()
+            .chain(self.ambiguities.values())
+            .map(String::as_str)
+    }
+}
+
 impl LayoutDirectory {
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self, String> {
         if let Some(path) = explicit {
@@ -27,16 +44,16 @@ impl LayoutDirectory {
         })
     }
 
-    pub fn discover(&self) -> Result<BTreeMap<String, PathBuf>, String> {
+    pub fn discover(&self) -> Result<Discovery, String> {
         let entries = match fs::read_dir(&self.path) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !self.is_explicit => {
-                return Ok(BTreeMap::new());
+                return Ok(Discovery::default());
             }
             Err(error) => return Err(format!("read directory {}: {error}", self.path.display())),
         };
 
-        // Sort before checking entries so even failure diagnostics are deterministic.
+        // Sort eligible paths so filename diagnostics do not depend on enumeration order.
         let mut layout_paths = Vec::new();
         for entry in entries {
             let entry = entry
@@ -57,35 +74,38 @@ impl LayoutDirectory {
         }
         layout_paths.sort();
 
-        let mut layouts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut discovery = Discovery::default();
+        let mut paths_by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for path in layout_paths {
-            let name = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .ok_or_else(|| {
-                    format!(
-                        "invalid layout filename {}; names must be ASCII",
-                        path.display()
-                    )
-                })?;
-            if !valid_name(name) {
-                return Err(format!(
-                    "invalid layout name in {}; use [A-Za-z0-9][A-Za-z0-9_-]*",
-                    path.display()
+            let name = path.file_stem().and_then(|stem| stem.to_str());
+            let Some(name) = name.filter(|name| valid_name(name)) else {
+                discovery.invalid_filenames.push(format!(
+                    "skipping invalid layout filename {:?}; use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml",
+                    path.file_name().expect("directory entry has a filename")
                 ));
-            }
-            if let Some(previous_path) = layouts.get(name) {
-                return Err(format!(
-                    "duplicate layout name {name:?}: {} and {}; rename one file",
-                    previous_path.display(),
-                    path.display()
-                ));
-            }
+                continue;
+            };
 
-            layouts.insert(name.to_owned(), path);
+            paths_by_name.entry(name.to_owned()).or_default().push(path);
         }
 
-        Ok(layouts)
+        for (name, mut paths) in paths_by_name {
+            if paths.len() == 1 {
+                discovery.layouts.insert(name, paths.remove(0));
+            } else {
+                let filenames = paths
+                    .iter()
+                    .map(|path| format!("{:?}", path.file_name().expect("entry has a filename")))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                discovery.ambiguities.insert(
+                    name.clone(),
+                    format!("ambiguous layout name {name:?}: {filenames}; rename one file"),
+                );
+            }
+        }
+
+        Ok(discovery)
     }
 }
 

@@ -90,10 +90,14 @@ fn help() -> io::Result<()> {
 }
 
 fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
-    let layouts = discovery::LayoutDirectory::resolve(layouts_dir)?.discover()?;
+    let discovery = discovery::LayoutDirectory::resolve(layouts_dir)?.discover()?;
+
+    for warning in discovery.warnings() {
+        let _ = writeln!(io::stderr().lock(), "sway-stage: warning: {warning}");
+    }
 
     let mut stdout = io::stdout().lock();
-    for name in layouts.keys() {
+    for name in discovery.layouts.keys() {
         writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
     }
 
@@ -170,8 +174,12 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
     }
 
     let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
-    let mut layouts = directory.discover()?;
-    layouts.remove(name).ok_or_else(|| {
+    let mut discovery = directory.discover()?;
+    if let Some(error) = discovery.ambiguities.get(name) {
+        return Err(error.clone());
+    }
+
+    discovery.layouts.remove(name).ok_or_else(|| {
         format!(
             "layout {name:?} not found in {}; use list to see available layouts",
             directory.path.display()

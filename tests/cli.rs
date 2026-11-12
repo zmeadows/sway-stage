@@ -117,28 +117,21 @@ fn list_is_lexical_immediate_regular_files_only_and_does_not_parse() {
 }
 
 #[test]
-fn discovery_rejects_duplicates_invalid_names_and_non_utf8_names() {
+fn discovery_skips_invalid_filenames_and_reports_only_eligible_files() {
+    use std::os::unix::ffi::OsStringExt;
     let fixture = CliFixture::new();
-    fixture.file("same.yaml", SINGLE_WINDOW_YAML);
-    fixture.file("same.yml", SINGLE_WINDOW_YAML);
-    let output = fixture.run(&["list", "--layouts-dir", "."], 1);
-
-    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate layout name"));
-    assert!(output.stdout.is_empty());
-    fs::remove_file(fixture.path.join("same.yml")).unwrap();
-    for name in [
+    fixture.file("z.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("a.yml", SINGLE_WINDOW_YAML);
+    let invalid_names = [
         "bad name.yaml",
         "_bad.yml",
         "bad.name.yaml",
         "é.yaml",
         ".yaml",
-    ] {
+    ];
+    for name in invalid_names {
         fixture.file(name, "");
-        let output = fixture.run(&["list", "--layouts-dir", "."], 1);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid layout name"));
-        fs::remove_file(fixture.path.join(name)).unwrap();
     }
-    use std::os::unix::ffi::OsStringExt;
     fs::write(
         fixture
             .path
@@ -146,7 +139,118 @@ fn discovery_rejects_duplicates_invalid_names_and_non_utf8_names() {
         "",
     )
     .unwrap();
-    fixture.run(&["list", "--layouts-dir", "."], 1);
+    fixture.file("ignored name.txt", "");
+    fs::create_dir(fixture.path.join("ignored directory.yaml")).unwrap();
+    std::os::unix::fs::symlink("missing", fixture.path.join("ignored link.yml")).unwrap();
+
+    let output = fixture.run(&["list", "--layouts-dir", "."], 0);
+    assert_eq!(output.stdout, b"a\nz\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), invalid_names.len() + 1, "{stderr}");
+    for name in invalid_names {
+        assert!(stderr.contains(name), "{stderr}");
+    }
+    assert!(stderr.contains("bad\\xFF.yaml"), "{stderr}");
+    assert!(!stderr.contains("ignored"), "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .all(|line| line.starts_with("sway-stage: warning: skipping invalid layout filename"))
+    );
+
+    let repeated = fixture.run(&["list", "--layouts-dir", "."], 0);
+    assert_eq!(output.stdout, repeated.stdout);
+    assert_eq!(output.stderr, repeated.stderr);
+}
+
+#[test]
+fn duplicate_stems_are_excluded_and_explicit_resolution_reports_ambiguity() {
+    // Reverse creation order must produce exactly the same output and diagnostics.
+    let mut first_listing = None;
+    for filenames in [["same.yml", "same.yaml"], ["same.yaml", "same.yml"]] {
+        let fixture = CliFixture::new();
+        for name in filenames {
+            fixture.file(name, SINGLE_WINDOW_YAML);
+        }
+        fixture.file("z.yaml", SINGLE_WINDOW_YAML);
+        fixture.file("a.yml", SINGLE_WINDOW_YAML);
+        fixture.file("bad name.yaml", "");
+        let output = fixture.run(&["list", "--layouts-dir", "."], 0);
+        assert_eq!(output.stdout, b"a\nz\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("ambiguous layout name \"same\": \"same.yaml\" and \"same.yml\""),
+            "{stderr}"
+        );
+        assert_eq!(stderr.lines().count(), 2);
+        if let Some((stdout, stderr)) = &first_listing {
+            assert_eq!(&output.stdout, stdout);
+            assert_eq!(&output.stderr, stderr);
+        } else {
+            first_listing = Some((output.stdout, output.stderr));
+        }
+
+        for command in ["check", "load"] {
+            let output = fixture.run(&["--layouts-dir", ".", command, "same"], 1);
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for expected in ["ambiguous layout name", "same.yaml", "same.yml"] {
+                assert!(stderr.contains(expected), "{stderr}");
+            }
+            assert!(!stderr.contains("not found"), "{stderr}");
+            assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+            assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
+        }
+        let log =
+            fs::read_to_string(fixture.path.join(".local/state/sway-stage/last-run.log")).unwrap();
+        assert!(!log.contains("spawned pid="), "{log}");
+
+        let checked = fixture.run(&["--layouts-dir", ".", "check", "a"], 0);
+        assert_eq!(checked.stdout, b"a: valid\n");
+        assert!(checked.stderr.is_empty());
+        // Reaching socket validation establishes successful resolution without live IPC.
+        let loaded = fixture.run(&["--layouts-dir", ".", "load", "z"], 1);
+        let stderr = String::from_utf8_lossy(&loaded.stderr);
+        assert!(stderr.contains("SWAYSOCK is unset"), "{stderr}");
+        assert!(!stderr.contains("ambiguous"), "{stderr}");
+    }
+}
+
+#[test]
+fn only_invalid_or_ambiguous_filenames_list_as_empty() {
+    for filenames in [
+        vec!["bad name.yaml"],
+        vec!["same.yml", "same.yaml"],
+        vec!["bad name.yaml", "same.yml", "same.yaml"],
+    ] {
+        let fixture = CliFixture::new();
+        for name in filenames {
+            fixture.file(name, SINGLE_WINDOW_YAML);
+        }
+        let output = fixture.run(&["--layouts-dir", ".", "list"], 0);
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        let output = fixture.run(&["--layouts-dir", ".", "check", "missing"], 1);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not found"));
+    }
+}
+
+#[test]
+fn filesystem_failures_remain_fatal_for_discovery_and_resolution() {
+    let fixture = CliFixture::new();
+    fixture.file("not-directory", "");
+    std::os::unix::fs::symlink("loop", fixture.path.join("loop")).unwrap();
+    for directory in ["not-directory", "loop", "missing"] {
+        for arguments in [vec!["list"], vec!["check", "good"], vec!["load", "good"]] {
+            let mut command_arguments = vec!["--layouts-dir", directory];
+            command_arguments.extend(arguments);
+            let output = fixture.run(&command_arguments, 1);
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("read directory"), "{stderr}");
+            assert!(!stderr.contains("not found in"), "{stderr}");
+        }
+    }
 }
 
 #[test]

@@ -209,6 +209,9 @@ fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     fixture.file("writing.yaml", "malformed: [");
+    fixture.file("bad name.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("duplicate.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("duplicate.yml", SINGLE_WINDOW_YAML);
     fixture.file("browsing.yml", SINGLE_WINDOW_YAML);
     fixture.file("development.yaml", SINGLE_WINDOW_YAML);
     let output = run_on_empty_workspace(
@@ -227,6 +230,29 @@ fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     assert_log_preserved(&fixture);
     assert!(!fixture.path.join(".config").exists());
     assert!(!fixture.path.join("notification").exists());
+}
+
+#[test]
+fn only_filename_problems_report_no_layouts_without_opening_fuzzel() {
+    for filenames in [vec!["bad name.yaml"], vec!["same.yaml", "same.yml"]] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        for name in filenames {
+            fixture.file(name, SINGLE_WINDOW_YAML);
+        }
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, "", "").args(["--layouts-dir", ".", "menu"]),
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!fixture.path.join("options").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("warning:"));
+        assert_preload_notification(
+            &fixture,
+            "No saved layouts found. Add a YAML file to your layouts directory.",
+        );
+        assert_log_preserved(&fixture);
+    }
 }
 
 #[test]
@@ -1228,6 +1254,9 @@ fn successful_menu_load_is_silent_and_preserves_window_directory_precedence() {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
         project_layout(&fixture, true);
+        fixture.file("bad name.yaml", SINGLE_WINDOW_YAML);
+        fixture.file("duplicate.yaml", SINGLE_WINDOW_YAML);
+        fixture.file("duplicate.yml", SINGLE_WINDOW_YAML);
         fs::create_dir(fixture.path.join("override")).unwrap();
         fixture.file("app", "#!/bin/sh\nprintf '%s\n' \"$PWD\" > \"$RESULT\"\n");
         fs::set_permissions(fixture.path.join("app"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -1369,7 +1398,7 @@ fn capture_name_prompt_skips_discovery() {
     for (name, status) in [("", "2"), ("saved\n", "0")] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
-        // Duplicate stems would fail discovery even though neither layout is needed.
+        // Ambiguous layouts are irrelevant to capturing a new draft.
         fixture.file("writing.yaml", "malformed: [");
         fixture.file("writing.yml", "");
         let output = run_capture(
