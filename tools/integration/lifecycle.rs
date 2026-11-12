@@ -684,7 +684,9 @@ impl Harness {
                 // into the independent model. Save the actual, fully verified YAML.
                 directory.write("replay", &inferred)?;
                 Some(desktop_launcher_replay(&progress.scenario))
-            } else if name == "capture-reload-roundtrip" && !replay_cycle {
+            } else if matches!(name, "capture-reload-roundtrip" | "mixed-capture-reload")
+                && !replay_cycle
+            {
                 self.stage = format!("{cycle_name}: executable capture check");
                 let (yaml, replay) = executable_capture(&draft, &progress.scenario, &measurements)?;
                 directory.write("replay", &yaml)?;
@@ -746,7 +748,7 @@ impl Harness {
             "GLib provenance, unresolved capture/reporting, restored fixture, unchanged desktop"
         } else if name == "desktop-launcher-roundtrip" {
             "hierarchy, focus, ownership, GLib provenance, inferred capture/reload"
-        } else if name == "capture-reload-roundtrip" {
+        } else if matches!(name, "capture-reload-roundtrip" | "mixed-capture-reload") {
             "hierarchy, sizing, focus, identity, capture/reload round-trip"
         } else if matches!(
             name,

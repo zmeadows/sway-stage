@@ -1,5 +1,5 @@
 //! Independent verification of an observed workspace against a configured scenario:
-//! window identities, visual order, split hierarchy, focus, and rectangle-based shares.
+//! window identities, visual order, group hierarchy, focus, and rectangle-based shares.
 //!
 //! The checks read raw `get_tree` data and never use sway-stage's own hierarchy, sizing,
 //! or capture code, so a defect there cannot confirm itself.
@@ -9,9 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, Shell, TreeNode};
 use crate::observation::{Failure, walk};
 use crate::ownership::AcceptedWindows;
-use crate::scenarios::{
-    ConfiguredNode, Scenario, Selector, SplitAxis, describe_path, diagnostic_yaml,
-};
+use crate::scenarios::{ConfiguredNode, Scenario, Selector, describe_path, diagnostic_yaml};
 
 /// Deviations above this many percentage points are reported: sway-stage's sizing target.
 const SIZING_TARGET_POINTS: f64 = 1.0;
@@ -74,7 +72,7 @@ fn layout_name(layout: Layout) -> &'static str {
 }
 
 /// The identity-bearing hierarchy of a workspace. Windows keep their identities; groups
-/// keep their container IDs and axes. Only validated single-child wrappers disappear.
+/// keep their container IDs and layouts. Only validated single-child split wrappers disappear.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Shape {
     Window {
@@ -91,7 +89,7 @@ pub enum Shape {
 }
 
 /// Validates every container under a workspace and returns its shape. Every failure is
-/// uncertain: a floating, fullscreen, scratchpad, tabbed, stacked, or malformed container
+/// uncertain: a floating, fullscreen, scratchpad, unsupported, or malformed container
 /// means something other than this run has changed the workspace.
 pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
     let is_workspace = node.node_type == NodeType::Workspace;
@@ -128,7 +126,10 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
         });
     }
 
-    if !matches!(node.layout, Layout::SplitH | Layout::SplitV) {
+    if !matches!(
+        node.layout,
+        Layout::SplitH | Layout::SplitV | Layout::Tabbed | Layout::Stacked
+    ) {
         return Err(Failure::Uncertain(format!(
             "unsupported group: {}",
             outline(node)
@@ -139,8 +140,8 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
         children.push(shape(child)?);
     }
 
-    // A single child fills its container, which therefore has no visible boundary.
-    if children.len() == 1 {
+    // Only splits are redundant with one child; tab/stack headers remain meaningful.
+    if children.len() == 1 && matches!(node.layout, Layout::SplitH | Layout::SplitV) {
         return Ok(children.remove(0));
     }
     Ok(Shape::Group {
@@ -150,8 +151,9 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
     })
 }
 
-/// The shape Sway should leave after closing window `closing_id`: a group left with one
-/// child is replaced by that child, and a group left empty disappears.
+/// Predict view-unmap reaping: empty ancestors disappear; surviving tabbed/stacked
+/// groups retain their identity even with one child. Only redundant splits normalize away.
+/// See Sway view_unmap/container_reap_empty; this is not container_flatten.
 pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
     match shape {
         Shape::Window { container_id, .. } if container_id == closing_id => None,
@@ -167,7 +169,9 @@ pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
                 .collect();
             match remaining_children.len() {
                 0 => None,
-                1 => Some(remaining_children.remove(0)),
+                1 if matches!(layout, Layout::SplitH | Layout::SplitV) => {
+                    Some(remaining_children.remove(0))
+                }
                 _ => Some(Shape::Group {
                     container_id,
                     layout,
@@ -179,8 +183,8 @@ pub fn remove_from_shape(shape: Shape, closing_id: i64) -> Option<Shape> {
 }
 
 /// Everything about a workspace that capture must leave unchanged: identities, geometry,
-/// actual wrappers, state flags, and current focus. Titles, urgency, marks, and focus
-/// history are not modeled, so they may change.
+/// actual wrappers, state flags, global focus, and child-focus history. Titles, urgency,
+/// and marks are not modeled, so they may change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     container_id: i64,
@@ -193,6 +197,7 @@ pub struct Signature {
     shell: Option<Shell>,
     rect: Rect,
     focused: bool,
+    child_focus: Vec<i64>,
     floating: Option<Floating>,
     fullscreen_mode: Option<u8>,
     scratchpad_state: Option<ScratchpadState>,
@@ -204,6 +209,7 @@ impl Signature {
     /// Foreign preservation excludes focus, which guarded workspace switches may change.
     pub fn ignore_focus(&mut self) {
         self.focused = false;
+        self.child_focus.clear();
         for child in self.nodes.iter_mut().chain(&mut self.floating_nodes) {
             child.ignore_focus();
         }
@@ -222,6 +228,7 @@ pub fn signature(node: &TreeNode) -> Signature {
         shell: node.shell,
         rect: node.rect,
         focused: node.focused,
+        child_focus: node.focus.clone(),
         floating: node.floating,
         fullscreen_mode: node.fullscreen_mode,
         scratchpad_state: node.scratchpad_state,
@@ -233,7 +240,7 @@ pub fn signature(node: &TreeNode) -> Signature {
 /// Measurements of a verified arrangement.
 #[derive(Debug)]
 pub struct LayoutMeasurements {
-    /// Each non-root node's measured percentage of its sibling group's extent, keyed by
+    /// Each split child's measured percentage of its sibling extent sum, keyed by
     /// child-index path from the root: `[2, 0]` is the first child of the third child.
     pub shares: BTreeMap<Vec<usize>, f64>,
     /// Splits more than 1 percentage point from their weights, but within 5.
@@ -241,7 +248,7 @@ pub struct LayoutMeasurements {
 }
 
 /// Verifies that `workspace` holds exactly the accepted windows in the scenario's visual
-/// order, split hierarchy, and axes, focused on the configured window, with every sibling
+/// order and group hierarchy, focused on the configured window, with every sibling
 /// share within 5 percentage points of its weight. Unusable geometry and sizing are
 /// `Check` failures; every other failure is `Uncertain`.
 pub fn verify_layout(
@@ -335,8 +342,8 @@ pub fn verify_layout(
 }
 
 /// Compares a configured node with the observed container in its place, first stepping
-/// through single-child wrappers, which `shape` has already validated. `path` holds the
-/// configured node's child indexes from the root.
+/// through redundant single-child split wrappers, already validated by `shape`.
+/// `path` holds the configured node's child indexes from the root.
 fn compare_node(
     configured: &ConfiguredNode,
     observed: &TreeNode,
@@ -345,12 +352,15 @@ fn compare_node(
     measurements: &mut LayoutMeasurements,
 ) -> Result<(), Failure> {
     let mut observed = observed;
-    while !is_window(observed) && observed.nodes.len() == 1 {
+    while !is_window(observed)
+        && observed.nodes.len() == 1
+        && matches!(observed.layout, Layout::SplitH | Layout::SplitV)
+    {
         observed = &observed.nodes[0];
     }
     let location = describe_path(path);
 
-    let (axis, configured_children) = match configured {
+    let (layout, configured_children) = match configured {
         ConfiguredNode::Window(window) => {
             let expected_id = container_ids.get(window.layout_id.as_str());
             if !is_window(observed) || expected_id != Some(&observed.id) {
@@ -362,10 +372,12 @@ fn compare_node(
             }
             return Ok(());
         }
-        ConfiguredNode::Split { axis, children, .. } => (*axis, children),
+        ConfiguredNode::Group {
+            layout, children, ..
+        } => (*layout, children),
     };
 
-    let expected_layout = axis.sway_layout();
+    let expected_layout = layout.sway_layout();
     if is_window(observed)
         || observed.layout != expected_layout
         || observed.nodes.len() != configured_children.len()
@@ -378,8 +390,53 @@ fn compare_node(
         )));
     }
 
+    if layout.is_split() {
+        measure_split(configured_children, observed, path, measurements)?;
+    } else {
+        // IPC focus lists direct children in seat focus-stack order, including inactive
+        // groups. Global focus wins on its ancestry; all other groups select child zero.
+        let selected_child = observed
+            .nodes
+            .iter()
+            .find(|child| walk(child).iter().any(|placed| placed.node.focused))
+            .unwrap_or(&observed.nodes[0]);
+        if observed.focus.first() != Some(&selected_child.id) {
+            return Err(Failure::Uncertain(format!(
+                "{location}: selected child differs: expected id={}, child-focus history={:?}",
+                selected_child.id, observed.focus
+            )));
+        }
+    }
+
+    let child_pairs = configured_children.iter().zip(&observed.nodes);
+    for (child_index, (configured_child, observed_child)) in child_pairs.enumerate() {
+        path.push(child_index);
+        compare_node(
+            configured_child,
+            observed_child,
+            path,
+            container_ids,
+            measurements,
+        )?;
+        path.pop();
+    }
+    Ok(())
+}
+
+/// Measures only split siblings; tab/stack rectangles may overlap or be unusable.
+fn measure_split(
+    configured_children: &[ConfiguredNode],
+    observed: &TreeNode,
+    path: &[usize],
+    measurements: &mut LayoutMeasurements,
+) -> Result<(), Failure> {
+    let location = describe_path(path);
+    let expected_layout = observed.layout;
     let rects: Vec<Rect> = observed.nodes.iter().map(|child| child.rect).collect();
-    let spans: Vec<(i32, i32)> = rects.iter().map(|rect| span(rect, axis)).collect();
+    let spans: Vec<(i32, i32)> = rects
+        .iter()
+        .map(|rect| span(rect, expected_layout))
+        .collect();
     if spans.iter().any(|&(_, extent)| extent <= 0) {
         return Err(Failure::Check(format!(
             "{location}: unusable rectangles {rects:?}"
@@ -431,29 +488,20 @@ fn compare_node(
         measurements.sizing_notes.push(detail);
     }
 
-    let child_pairs = configured_children.iter().zip(&observed.nodes);
-    for (child_index, (configured_child, observed_child)) in child_pairs.enumerate() {
-        path.push(child_index);
-        measurements
-            .shares
-            .insert(path.clone(), measured_shares[child_index]);
-        compare_node(
-            configured_child,
-            observed_child,
-            path,
-            container_ids,
-            measurements,
-        )?;
-        path.pop();
+    for (child_index, measured_share) in measured_shares.into_iter().enumerate() {
+        let mut child_path = path.to_vec();
+        child_path.push(child_index);
+        measurements.shares.insert(child_path, measured_share);
     }
     Ok(())
 }
 
 /// A rectangle's position and extent along a split axis.
-fn span(rect: &Rect, axis: SplitAxis) -> (i32, i32) {
-    match axis {
-        SplitAxis::Horizontal => (rect.x, rect.width),
-        SplitAxis::Vertical => (rect.y, rect.height),
+fn span(rect: &Rect, layout: Layout) -> (i32, i32) {
+    match layout {
+        Layout::SplitH => (rect.x, rect.width),
+        Layout::SplitV => (rect.y, rect.height),
+        _ => unreachable!("measure_split is only called for splits"),
     }
 }
 

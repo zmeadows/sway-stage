@@ -1294,3 +1294,119 @@ fn dynamic_window_identity_without_package_provenance_cannot_authorize_cleanup()
         "requires independent package provenance",
     );
 }
+
+#[test]
+fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close() {
+    use crate::fixtures::mixed_native_desktop;
+    let scenario = standard_scenario("mixed-capture-reload");
+    let mut tree = mixed_native_desktop(&scenario);
+    let initial = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
+    let target = target_identity();
+    let foreign = ForeignWindows::record(&initial, target.id).unwrap();
+    let preexisting = container_ids(&starting_snapshot().tree);
+    let context = CleanupContext {
+        package: None,
+        target: &target,
+        layout: &scenario.layout,
+        preexisting_ids: &preexisting,
+        foreign: &foreign,
+    };
+    let mut remaining = accepted(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+    ]);
+    verify_layout(initial.focused_workspace(), &scenario, &remaining).unwrap();
+    let mut baseline = signature(initial.focused_workspace());
+    for closing_id in 20..=23 {
+        let before = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
+        let plan =
+            prepare_close(&before, &context, &remaining, &baseline, closing_id, true).unwrap();
+        // A foreign/preexisting window and group IDs never authorize a close.
+        for unowned_id in [PREEXISTING_WINDOW_ID, 31, 32, 99] {
+            assert!(
+                prepare_close(&before, &context, &remaining, &baseline, unowned_id, true).is_err()
+            );
+        }
+        match closing_id {
+            20 => {
+                node_mut(&mut tree, 31)["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(0);
+                node_mut(&mut tree, 31)["focus"] = json!([33]);
+            }
+            21 => {
+                node_mut(&mut tree, 33)["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(0);
+                node_mut(&mut tree, 33)["focus"] = json!([22]);
+            }
+            22 => {
+                node_mut(&mut tree, TARGET_WORKSPACE_ID)["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(0);
+                node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = json!([23]);
+            }
+            23 => {
+                node_mut(&mut tree, TARGET_WORKSPACE_ID)["nodes"] = json!([]);
+                node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = json!([]);
+            }
+            _ => unreachable!(),
+        }
+        let focused_id = if closing_id < 22 {
+            22
+        } else if closing_id == 22 {
+            23
+        } else {
+            TARGET_WORKSPACE_ID
+        };
+        crate::fixtures::set_focus(&mut tree, focused_id);
+        let mut after = observed(tree.clone(), "9", TARGET_WORKSPACE_ID);
+        after
+            .window_events
+            .push(window_event("close", closing_id, None));
+        assert!(
+            verify_close_observation(&after, &context, &remaining, &plan, &baseline, closing_id)
+                .unwrap()
+        );
+
+        if closing_id == 20 {
+            // A compositor that flattened the surviving tab group is not compatible.
+            let mut flattened = tree.clone();
+            let row = node_mut(&mut flattened, 31)["nodes"][0].take();
+            node_mut(&mut flattened, TARGET_WORKSPACE_ID)["nodes"][0] = row;
+            let mut changed = observed(flattened, "9", TARGET_WORKSPACE_ID);
+            changed
+                .window_events
+                .push(window_event("close", closing_id, None));
+            assert_contains(
+                &uncertain_message(verify_close_observation(
+                    &changed, &context, &remaining, &plan, &baseline, closing_id,
+                )),
+                "cleanup hierarchy changed",
+            );
+            // A different header layout is equally uncertain.
+            for replacement in [json!("stacked"), json!("splith")] {
+                let mut changed_tree = tree.clone();
+                node_mut(&mut changed_tree, 31)["layout"] = replacement;
+                let mut changed = observed(changed_tree, "9", TARGET_WORKSPACE_ID);
+                changed
+                    .window_events
+                    .push(window_event("close", closing_id, None));
+                assert!(
+                    verify_close_observation(
+                        &changed, &context, &remaining, &plan, &baseline, closing_id
+                    )
+                    .is_err()
+                );
+            }
+        }
+        remaining = plan.remaining;
+        baseline = signature(after.focused_workspace());
+    }
+    assert!(remaining.is_empty());
+}

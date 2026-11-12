@@ -34,26 +34,36 @@ user_pref("startup.homepage_welcome_url.additional", "");
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SplitAxis {
+pub enum GroupLayout {
     /// Left to right.
     Horizontal,
     /// Top to bottom.
     Vertical,
+    Tabbed,
+    Stacked,
 }
 
-impl SplitAxis {
-    /// The Sway layout of a container that splits along this axis.
+impl GroupLayout {
+    /// The native Sway layout expected for this configured group.
     pub fn sway_layout(self) -> Layout {
         match self {
-            SplitAxis::Horizontal => Layout::SplitH,
-            SplitAxis::Vertical => Layout::SplitV,
+            GroupLayout::Horizontal => Layout::SplitH,
+            GroupLayout::Vertical => Layout::SplitV,
+            GroupLayout::Tabbed => Layout::Tabbed,
+            GroupLayout::Stacked => Layout::Stacked,
         }
+    }
+
+    pub fn is_split(self) -> bool {
+        matches!(self, Self::Horizontal | Self::Vertical)
     }
 
     fn yaml_value(self) -> &'static str {
         match self {
-            SplitAxis::Horizontal => "splith",
-            SplitAxis::Vertical => "splitv",
+            GroupLayout::Horizontal => "splith",
+            GroupLayout::Vertical => "splitv",
+            GroupLayout::Tabbed => "tabbed",
+            GroupLayout::Stacked => "stacked",
         }
     }
 }
@@ -81,13 +91,14 @@ impl Selector {
     }
 }
 
-/// A configured split or window: what a scenario asks sway-stage to build. Distinct from
+/// A configured group or window: what a scenario asks sway-stage to build. Distinct from
 /// `ipc::TreeNode`, an observed Sway container.
 #[derive(Clone, Debug)]
 pub enum ConfiguredNode {
     Window(ConfiguredWindow),
-    Split {
-        axis: SplitAxis,
+    Group {
+        layout: GroupLayout,
+        /// Used only when this group is a child of a split.
         weight: u32,
         children: Vec<ConfiguredNode>,
     },
@@ -98,6 +109,7 @@ pub struct ConfiguredWindow {
     /// `window1`, `window2`, ... in depth-first order, so it is also the ID `capture`
     /// assigns to this window.
     pub layout_id: String,
+    /// Used only when this window is a child of a split.
     pub weight: u32,
     /// The executable, then literal arguments.
     pub command: Vec<String>,
@@ -134,7 +146,7 @@ impl ConfiguredNode {
     pub fn weight(&self) -> u32 {
         match self {
             ConfiguredNode::Window(window) => window.weight,
-            ConfiguredNode::Split { weight, .. } => *weight,
+            ConfiguredNode::Group { weight, .. } => *weight,
         }
     }
 
@@ -142,7 +154,7 @@ impl ConfiguredNode {
     pub fn leaves(&self) -> Vec<&ConfiguredWindow> {
         match self {
             ConfiguredNode::Window(window) => vec![window],
-            ConfiguredNode::Split { children, .. } => {
+            ConfiguredNode::Group { children, .. } => {
                 children.iter().flat_map(ConfiguredNode::leaves).collect()
             }
         }
@@ -151,18 +163,18 @@ impl ConfiguredNode {
     fn leaves_mut(&mut self) -> Vec<&mut ConfiguredWindow> {
         match self {
             ConfiguredNode::Window(window) => vec![window],
-            ConfiguredNode::Split { children, .. } => children
+            ConfiguredNode::Group { children, .. } => children
                 .iter_mut()
                 .flat_map(ConfiguredNode::leaves_mut)
                 .collect(),
         }
     }
 
-    /// Every scenario's splits have at least two children.
+    /// Every configured group has at least one child.
     pub fn first_leaf_mut(&mut self) -> &mut ConfiguredWindow {
         match self {
             ConfiguredNode::Window(window) => window,
-            ConfiguredNode::Split { children, .. } => children[0].first_leaf_mut(),
+            ConfiguredNode::Group { children, .. } => children[0].first_leaf_mut(),
         }
     }
 }
@@ -197,29 +209,29 @@ pub enum Extension {
 
 /// The Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
-    use SplitAxis::{Horizontal, Vertical};
+    use GroupLayout::{Horizontal, Stacked, Tabbed, Vertical};
 
     // deep-nesting includes a meaningful horizontal group inside another horizontal group.
-    let deep_column = split(Vertical, 3, vec![window(3, 3), window(4, 2)]);
-    let deep_inner_row = split(Horizontal, 3, vec![window(2, 2), deep_column]);
-    let deep_outer_row = split(Horizontal, 3, vec![window(1, 2), deep_inner_row]);
-    let mixed_column = split(Vertical, 3, vec![window(2, 3), window(3, 2)]);
+    let deep_column = group(Vertical, 3, vec![window(3, 3), window(4, 2)]);
+    let deep_inner_row = group(Horizontal, 3, vec![window(2, 2), deep_column]);
+    let deep_outer_row = group(Horizontal, 3, vec![window(1, 2), deep_inner_row]);
+    let mixed_column = group(Vertical, 3, vec![window(2, 3), window(3, 2)]);
 
     let layouts = [
         ("single-window", window(1, 1), "window1"),
         (
             "horizontal-pair",
-            split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
+            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
             "window2",
         ),
         (
             "vertical-pair",
-            split(Vertical, 1, vec![window(1, 2), window(2, 3)]),
+            group(Vertical, 1, vec![window(1, 2), window(2, 3)]),
             "window1",
         ),
         (
             "uneven-siblings",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![window(1, 5), window(2, 3), window(3, 2)],
@@ -228,7 +240,7 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ),
         (
             "mixed-nesting",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![window(1, 4), mixed_column, window(4, 3)],
@@ -237,17 +249,17 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ),
         (
             "deep-nesting",
-            split(Vertical, 1, vec![deep_outer_row, window(5, 2)]),
+            group(Vertical, 1, vec![deep_outer_row, window(5, 2)]),
             "window4",
         ),
         (
             "sibling-nested-groups",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![
-                    split(Vertical, 3, vec![window(1, 2), window(2, 3)]),
-                    split(Vertical, 2, vec![window(3, 3), window(4, 1)]),
+                    group(Vertical, 3, vec![window(1, 2), window(2, 3)]),
+                    group(Vertical, 2, vec![window(3, 3), window(4, 1)]),
                 ],
             ),
             "window3",
@@ -255,11 +267,11 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ("process-execution", window(1, 1), "window1"),
         (
             "default-focus",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![
-                    split(Vertical, 3, vec![window(1, 2), window(2, 3)]),
+                    group(Vertical, 3, vec![window(1, 2), window(2, 3)]),
                     window(3, 2),
                 ],
             ),
@@ -267,18 +279,101 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ),
         (
             "occupied-workspace-refusal",
-            split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
+            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
             "window2",
         ),
         (
             "capture-reload-roundtrip",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![
                     window(1, 4),
-                    split(Vertical, 3, vec![window(2, 3), window(3, 2)]),
+                    group(Vertical, 3, vec![window(2, 3), window(3, 2)]),
                     window(4, 3),
+                ],
+            ),
+            "window3",
+        ),
+        (
+            "root-tabbed",
+            group(Tabbed, 1, vec![window(1, 1), window(2, 1), window(3, 1)]),
+            "window1",
+        ),
+        (
+            "root-stacked",
+            group(Stacked, 1, vec![window(1, 1), window(2, 1), window(3, 1)]),
+            "window2",
+        ),
+        (
+            "singleton-groups",
+            group(
+                Stacked,
+                1,
+                vec![group(Tabbed, 1, vec![window(1, 1)]), window(2, 1)],
+            ),
+            "window1",
+        ),
+        (
+            "mixed-native-nesting",
+            group(
+                Horizontal,
+                1,
+                vec![
+                    group(
+                        Tabbed,
+                        3,
+                        vec![
+                            window(1, 1),
+                            group(Vertical, 1, vec![window(2, 3), window(3, 2)]),
+                        ],
+                    ),
+                    window(4, 2),
+                ],
+            ),
+            "window3",
+        ),
+        (
+            "independent-native-groups",
+            group(
+                Horizontal,
+                1,
+                vec![
+                    group(
+                        Tabbed,
+                        3,
+                        vec![
+                            window(1, 1),
+                            group(Stacked, 1, vec![window(2, 1), window(3, 1)]),
+                        ],
+                    ),
+                    group(
+                        Stacked,
+                        2,
+                        vec![
+                            group(Tabbed, 1, vec![window(4, 1), window(5, 1)]),
+                            window(6, 1),
+                        ],
+                    ),
+                ],
+            ),
+            "window3",
+        ),
+        (
+            "mixed-capture-reload",
+            group(
+                Vertical,
+                1,
+                vec![
+                    group(
+                        Tabbed,
+                        3,
+                        vec![
+                            group(Stacked, 1, vec![window(1, 1)]),
+                            group(Horizontal, 1, vec![window(2, 3), window(3, 2)]),
+                        ],
+                    ),
+                    window(4, 2),
                 ],
             ),
             "window3",
@@ -297,7 +392,7 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             skip: None,
         };
         use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
-        if name == "default-focus" {
+        if matches!(name, "default-focus" | "root-tabbed" | "singleton-groups") {
             scenario.configured_focus = None;
         }
         scenarios.push(scenario);
@@ -327,17 +422,17 @@ pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenar
     scenario
 }
 
-/// The five optional scenarios, each to be passed to `prepare_extended` immediately before
+/// The six optional scenarios, each to be passed to `prepare_extended` immediately before
 /// it runs. Until then, Firefox, Xterm, and desktop-launcher leaves are ordinary Foot windows.
 pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
-    use SplitAxis::{Horizontal, Vertical};
+    use GroupLayout::{Horizontal, Vertical};
 
-    let firefox_column = split(Vertical, 24, vec![window(3, 77), window(4, 23)]);
+    let firefox_column = group(Vertical, 24, vec![window(3, 77), window(4, 23)]);
 
     let layouts = [
         (
             "firefox-two-foot",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![window(1, 44), window(2, 32), window(3, 24)],
@@ -347,13 +442,13 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ),
         (
             "xterm-foot",
-            split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
+            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
             "window2",
             Extension::Xterm,
         ),
         (
             "nested-firefox-foot",
-            split(
+            group(
                 Horizontal,
                 1,
                 vec![window(1, 44), window(2, 32), firefox_column],
@@ -363,7 +458,7 @@ pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         ),
         (
             "duplicate-foot-ids",
-            split(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
+            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
             "window2",
             Extension::DuplicateFootIds,
         ),
@@ -426,9 +521,9 @@ fn window(number: u32, weight: u32) -> ConfiguredNode {
     })
 }
 
-fn split(axis: SplitAxis, weight: u32, children: Vec<ConfiguredNode>) -> ConfiguredNode {
-    ConfiguredNode::Split {
-        axis,
+fn group(layout: GroupLayout, weight: u32, children: Vec<ConfiguredNode>) -> ConfiguredNode {
+    ConfiguredNode::Group {
+        layout,
         weight,
         children,
     }
@@ -871,7 +966,7 @@ pub fn diagnostic_yaml(scenario: &Scenario) -> String {
 
 /// What `capture` must print for the scenario once its arrangement is verified, apart from
 /// comments: measured shares as weights, null commands, and no timeout or environment.
-/// `measured_shares` maps each non-root node's child-index path to its percentage.
+/// `measured_shares` maps children of splits to their measured percentages.
 pub fn expected_draft(
     scenario: &Scenario,
     measured_shares: &BTreeMap<Vec<usize>, f64>,
@@ -908,6 +1003,7 @@ fn render_yaml(scenario: &Scenario, rendering: &Rendering) -> Result<String, Str
         2,
         &mut Vec::new(),
         false,
+        false,
         rendering,
         &mut lines,
     )?;
@@ -915,22 +1011,25 @@ fn render_yaml(scenario: &Scenario, rendering: &Rendering) -> Result<String, Str
 }
 
 /// Appends `node`'s fields at `indent` columns, as a sequence item when `in_sequence`, then
-/// its children. `path` holds child indexes from the root, which alone has no weight.
+/// its children. Only children of split parents emit weights, including group children.
 fn emit_node(
     node: &ConfiguredNode,
     indent: usize,
     path: &mut Vec<usize>,
     in_sequence: bool,
+    weighted: bool,
     rendering: &Rendering,
     lines: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut fields = Vec::new();
     match node {
         ConfiguredNode::Window(window) => fields.push(format!("id: {}", window.layout_id)),
-        ConfiguredNode::Split { axis, .. } => fields.push(format!("group: {}", axis.yaml_value())),
+        ConfiguredNode::Group { layout, .. } => {
+            fields.push(format!("group: {}", layout.yaml_value()))
+        }
     }
 
-    if !path.is_empty() {
+    if weighted {
         let weight = match rendering {
             Rendering::Configuration | Rendering::Diagnostic => node.weight().to_string(),
             Rendering::Draft(measured_shares) => measured_shares
@@ -963,7 +1062,7 @@ fn emit_node(
                 fields.push(format!("env: {}", json_mapping(&window.env)));
             }
         }
-        ConfiguredNode::Split { .. } => fields.push("children:".to_owned()),
+        ConfiguredNode::Group { .. } => fields.push("children:".to_owned()),
     }
 
     for (field_index, field) in fields.iter().enumerate() {
@@ -975,11 +1074,22 @@ fn emit_node(
         lines.push(format!("{}{marker}{field}", " ".repeat(indent)));
     }
 
-    if let ConfiguredNode::Split { children, .. } = node {
+    if let ConfiguredNode::Group {
+        layout, children, ..
+    } = node
+    {
         let child_indent = indent + if in_sequence { 4 } else { 2 };
         for (child_index, child) in children.iter().enumerate() {
             path.push(child_index);
-            emit_node(child, child_indent, path, true, rendering, lines)?;
+            emit_node(
+                child,
+                child_indent,
+                path,
+                true,
+                layout.is_split(),
+                rendering,
+                lines,
+            )?;
             path.pop();
         }
     }

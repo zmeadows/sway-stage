@@ -15,7 +15,7 @@ const WEIGHT_TOLERANCE: f64 = 0.02;
 
 /// Fields whose generated values contain no YAML punctuation, so a serializer that quotes
 /// them changes nothing a quote-stripping comparison would miss.
-const IDENTIFIER_KEYS: [&str; 5] = ["id", "focus", "app_id", "class", "split"];
+const IDENTIFIER_KEYS: [&str; 5] = ["id", "focus", "app_id", "class", "group"];
 
 /// The lines of a draft that carry content: blank and comment lines are dropped and
 /// trailing whitespace is removed.
@@ -104,7 +104,7 @@ pub fn verify_capture(
 
 /// Builds replay YAML only by editing the fully verified capture's null commands.
 /// The independent model keeps the proven shape, selectors and focus, but takes every
-/// non-root weight from the captured text. Integer hundredths preserve capture's precision
+/// split-child weight from the captured text. Integer hundredths preserve capture's precision
 /// without changing the harness's integer-weight model or regenerating the replay YAML.
 pub fn executable_capture(
     draft: &str,
@@ -145,7 +145,7 @@ pub fn executable_capture(
 
     let mut replay = scenario.clone();
     let mut weights = captured_weights.into_iter();
-    apply_captured_weights(&mut replay.layout, true, &mut weights)?;
+    apply_captured_weights(&mut replay.layout, false, &mut weights)?;
     if weights.next().is_some() {
         return Err("extra captured weight".into());
     }
@@ -155,24 +155,24 @@ pub fn executable_capture(
 
 fn apply_captured_weights(
     configured: &mut ConfiguredNode,
-    is_root: bool,
+    weighted: bool,
     weights: &mut std::vec::IntoIter<u32>,
 ) -> Result<(), String> {
-    let weight = if is_root {
-        1
-    } else {
+    let weight = if weighted {
         weights.next().ok_or("missing captured weight")?
+    } else {
+        1
     };
     match configured {
         ConfiguredNode::Window(window) => window.weight = weight,
-        ConfiguredNode::Split {
+        ConfiguredNode::Group {
             weight: group_weight,
             children,
-            ..
+            layout,
         } => {
             *group_weight = weight;
             for child in children {
-                apply_captured_weights(child, false, weights)?;
+                apply_captured_weights(child, layout.is_split(), weights)?;
             }
         }
     }

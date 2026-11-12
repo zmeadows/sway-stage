@@ -3,20 +3,30 @@ use crate::fixtures::{FOOT, RUN_ID, SLEEP, assert_contains, extended_scenario, s
 use std::collections::HashSet;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
-/// Splits as `h(...)` or `v(...)`, with each non-root node's weight after `@`.
+/// Groups use a short layout name; only split children carry weights after `@`.
 fn outline(node: &ConfiguredNode) -> String {
     match node {
         ConfiguredNode::Window(window) => window.layout_id.clone(),
-        ConfiguredNode::Split { axis, children, .. } => {
-            let axis = match axis {
-                SplitAxis::Horizontal => "h",
-                SplitAxis::Vertical => "v",
+        ConfiguredNode::Group {
+            layout, children, ..
+        } => {
+            let label = match layout {
+                GroupLayout::Horizontal => "h",
+                GroupLayout::Vertical => "v",
+                GroupLayout::Tabbed => "t",
+                GroupLayout::Stacked => "s",
             };
             let children: Vec<String> = children
                 .iter()
-                .map(|child| format!("{}@{}", outline(child), child.weight()))
+                .map(|child| {
+                    if layout.is_split() {
+                        format!("{}@{}", outline(child), child.weight())
+                    } else {
+                        outline(child)
+                    }
+                })
                 .collect();
-            format!("{axis}({})", children.join(", "))
+            format!("{label}({})", children.join(", "))
         }
     }
 }
@@ -77,6 +87,24 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
         (
             "capture-reload-roundtrip",
             "h(window1@4, v(window2@3, window3@2)@3, window4@3)",
+            "window3",
+        ),
+        ("root-tabbed", "t(window1, window2, window3)", "window1"),
+        ("root-stacked", "s(window1, window2, window3)", "window2"),
+        ("singleton-groups", "s(t(window1), window2)", "window1"),
+        (
+            "mixed-native-nesting",
+            "h(t(window1, v(window2@3, window3@2))@3, window4@2)",
+            "window3",
+        ),
+        (
+            "independent-native-groups",
+            "h(t(window1, s(window2, window3))@3, s(t(window4, window5), window6)@2)",
+            "window3",
+        ),
+        (
+            "mixed-capture-reload",
+            "v(t(s(window1), h(window2@3, window3@2))@3, window4@2)",
             "window3",
         ),
     ];
@@ -777,4 +805,41 @@ fn omitted_focus_still_has_an_independent_expected_leaf_and_capture_focus() {
     );
     assert!(!configuration_yaml(&scenario).contains("focus:"));
     assert!(diagnostic_yaml(&scenario).contains("focus: window1"));
+}
+
+#[test]
+fn native_group_yaml_uses_parent_dependent_weights_and_no_root_weight() {
+    let scenario = standard_scenario("mixed-capture-reload");
+    let yaml = configuration_yaml(&scenario);
+    let document: serde_json::Value = serde_saphyr::from_str(&yaml).unwrap();
+    let root = &document["layout"];
+    assert_eq!(root["group"], "splitv");
+    assert!(root.get("weight").is_none());
+    let tabs = &root["children"][0];
+    assert_eq!(tabs["group"], "tabbed");
+    assert_eq!(tabs["weight"], 3);
+    let stack = &tabs["children"][0];
+    assert_eq!(stack["group"], "stacked");
+    assert!(stack.get("weight").is_none());
+    assert!(stack["children"][0].get("weight").is_none());
+    let row = &tabs["children"][1];
+    assert_eq!(row["group"], "splith");
+    assert!(row.get("weight").is_none());
+    assert_eq!(row["children"][0]["weight"], 3);
+    assert_eq!(row["children"][1]["weight"], 2);
+    assert_eq!(root["children"][1]["weight"], 2);
+    assert_eq!(yaml.matches("weight:").count(), 4);
+
+    for name in ["root-tabbed", "root-stacked", "singleton-groups"] {
+        let scenario = standard_scenario(name);
+        assert!(!configuration_yaml(&scenario).contains("weight:"));
+        let draft = expected_draft(&scenario, &BTreeMap::new()).unwrap();
+        assert!(!draft.contains("weight:"));
+        assert_contains(&draft, &format!("focus: {}", scenario.expected_focus));
+    }
+    for name in ["root-tabbed", "singleton-groups"] {
+        let scenario = standard_scenario(name);
+        assert_eq!(scenario.configured_focus, None);
+        assert!(!configuration_yaml(&scenario).contains("focus:"));
+    }
 }

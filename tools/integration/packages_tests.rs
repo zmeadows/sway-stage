@@ -480,7 +480,7 @@ fn package_registration_adds_two_cases_without_replacing_existing_assertions() {
     use crate::fixtures::{FOOT, RUN_ID, SLEEP};
     let standard = crate::scenarios::standard_scenarios(RUN_ID, FOOT, SLEEP);
     let extended = crate::scenarios::extended_scenarios(RUN_ID, FOOT, SLEEP);
-    assert_eq!(standard.len(), 11);
+    assert_eq!(standard.len(), 17);
     assert_eq!(extended.len() + SCENARIOS.len(), 8);
     assert!(
         extended

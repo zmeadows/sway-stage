@@ -507,10 +507,13 @@ fn nested_replay_retains_focus_shape_and_every_captured_weight() {
     };
     let draft = expected_draft(&scenario, &measurements.shares).unwrap();
     let (yaml, replay) = executable_capture(&draft, &scenario, &measurements).unwrap();
-    let ConfiguredNode::Split { axis, children, .. } = &replay.layout else {
+    let ConfiguredNode::Group {
+        layout, children, ..
+    } = &replay.layout
+    else {
         panic!("root split")
     };
-    assert_eq!(*axis, crate::scenarios::SplitAxis::Horizontal);
+    assert_eq!(*layout, crate::scenarios::GroupLayout::Horizontal);
     assert_eq!(
         children
             .iter()
@@ -518,10 +521,13 @@ fn nested_replay_retains_focus_shape_and_every_captured_weight() {
             .collect::<Vec<_>>(),
         [4001, 3002, 2997]
     );
-    let ConfiguredNode::Split { axis, children, .. } = &children[1] else {
+    let ConfiguredNode::Group {
+        layout, children, ..
+    } = &children[1]
+    else {
         panic!("nested split")
     };
-    assert_eq!(*axis, crate::scenarios::SplitAxis::Vertical);
+    assert_eq!(*layout, crate::scenarios::GroupLayout::Vertical);
     assert_eq!(
         children
             .iter()
@@ -737,4 +743,129 @@ fn package_capture_compares_exact_host_commands_and_all_other_fields() {
     assert!(
         verify_package_default_capture(&default.replace("window1", "window2"), &selector).is_err()
     );
+}
+
+#[test]
+fn mixed_capture_replay_aligns_only_split_child_weights_and_retains_actual_yaml() {
+    let scenario = standard_scenario("mixed-capture-reload");
+    let measurements = LayoutMeasurements {
+        shares: BTreeMap::from([
+            (vec![0], 59.75),
+            (vec![1], 40.25),
+            (vec![0, 1, 0], 60.01),
+            (vec![0, 1, 1], 39.99),
+        ]),
+        sizing_notes: Vec::new(),
+    };
+    let draft = format!(
+        "# keep this captured comment\n\n{}",
+        expected_draft(&scenario, &measurements.shares).unwrap()
+    )
+    .replace("group: tabbed", "group: 'tabbed'");
+    let (yaml, replay) = executable_capture(&draft, &scenario, &measurements).unwrap();
+    let mut normalized = yaml.clone();
+    for leaf in scenario.layout.leaves() {
+        normalized = normalized.replacen(
+            &format!("command: {}", json_sequence(&leaf.command)),
+            "command: null",
+            1,
+        );
+    }
+    assert_eq!(normalized, draft);
+    let ConfiguredNode::Group { children, .. } = &replay.layout else {
+        panic!("root group")
+    };
+    assert_eq!(children[0].weight(), 5975);
+    assert_eq!(children[1].weight(), 4025);
+    let ConfiguredNode::Group { children: tabs, .. } = &children[0] else {
+        panic!("tabs")
+    };
+    assert_eq!(tabs[0].weight(), 1);
+    assert_eq!(tabs[1].weight(), 1);
+    let ConfiguredNode::Group { children: row, .. } = &tabs[1] else {
+        panic!("row")
+    };
+    assert_eq!(row[0].weight(), 6001);
+    assert_eq!(row[1].weight(), 3999);
+    assert_eq!(replay.expected_focus, "window3");
+    assert_eq!(yaml.matches("weight:").count(), 4);
+    for (original, replacement) in [
+        ("group: 'tabbed'", "group: stacked"),
+        ("group: stacked", "group: tabbed"),
+        ("weight: 59.75\n", ""),
+        ("weight: 60.01", "weight: 50"),
+        ("group: stacked\n", "group: stacked\n          weight: 1\n"),
+        ("id: window1", "id: window2"),
+        ("focus: window3", "focus: window1"),
+        ("app_id:", "class:"),
+    ] {
+        assert!(
+            executable_capture(
+                &draft.replacen(original, replacement, 1),
+                &scenario,
+                &measurements
+            )
+            .is_err(),
+            "{original}"
+        );
+    }
+    // A displaced split-child weight cannot compensate for a weight inside a header.
+    let relocated = draft.replacen("      weight: 59.75\n", "", 1).replacen(
+        "group: stacked\n",
+        "group: stacked\n          weight: 59.75\n",
+        1,
+    );
+    assert!(executable_capture(&relocated, &scenario, &measurements).is_err());
+}
+
+#[test]
+fn header_only_capture_replay_needs_no_weights() {
+    for name in ["root-tabbed", "root-stacked", "singleton-groups"] {
+        let scenario = standard_scenario(name);
+        let measurements = LayoutMeasurements {
+            shares: BTreeMap::new(),
+            sizing_notes: Vec::new(),
+        };
+        let draft = expected_draft(&scenario, &measurements.shares).unwrap();
+        let (yaml, replay) = executable_capture(&draft, &scenario, &measurements).unwrap();
+        assert!(!yaml.contains("weight:"));
+        assert_eq!(replay.layout.leaves().len(), scenario.layout.leaves().len());
+        let weighted = draft.replacen(
+            "      command: null",
+            "      weight: 1\n      command: null",
+            1,
+        );
+        assert_ne!(weighted, draft);
+        assert!(verify_capture(&weighted, &scenario, &measurements).is_err());
+    }
+}
+
+#[test]
+fn measured_mixed_replay_is_verified_against_fresh_tree_geometry() {
+    use crate::fixtures::{
+        TARGET_WORKSPACE_ID, accepted, find, mixed_native_desktop, node_mut, parse_tree,
+    };
+    let scenario = standard_scenario("mixed-capture-reload");
+    let owned = accepted(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+    ]);
+    let mut tree = mixed_native_desktop(&scenario);
+    node_mut(&mut tree, 31)["rect"]["height"] = serde_json::json!(640);
+    node_mut(&mut tree, 23)["rect"]["y"] = serde_json::json!(640);
+    node_mut(&mut tree, 23)["rect"]["height"] = serde_json::json!(360);
+    node_mut(&mut tree, 21)["rect"]["width"] = serde_json::json!(640);
+    node_mut(&mut tree, 22)["rect"]["x"] = serde_json::json!(640);
+    node_mut(&mut tree, 22)["rect"]["width"] = serde_json::json!(360);
+    let tree = parse_tree(tree);
+    let workspace = find(&tree, TARGET_WORKSPACE_ID);
+    let measured = crate::layout::verify_layout(workspace, &scenario, &owned).unwrap();
+    assert_eq!(measured.sizing_notes.len(), 2);
+    let draft = expected_draft(&scenario, &measured.shares).unwrap();
+    let (_, replay) = executable_capture(&draft, &scenario, &measured).unwrap();
+    let replayed = crate::layout::verify_layout(workspace, &replay, &owned).unwrap();
+    assert!(replayed.sizing_notes.is_empty());
+    assert_eq!(replayed.shares, measured.shares);
 }

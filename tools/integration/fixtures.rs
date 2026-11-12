@@ -257,3 +257,39 @@ pub fn check_message<T: Debug>(result: Result<T, Failure>) -> String {
 pub fn assert_contains(text: &str, expected: &str) {
     assert!(text.contains(expected), "expected {expected:?} in:\n{text}");
 }
+
+/// mixed-capture-reload: vertical 3:2 root, a tab group with a singleton stack and
+/// a horizontal 3:2 split. IDs 20..=23 are the leaves; window3 has global focus.
+/// Header siblings deliberately overlap. This is explicit IPC data, not a conversion
+/// from the configured model, so hierarchy/weight mistakes cannot confirm themselves.
+pub fn mixed_native_desktop(scenario: &Scenario) -> Value {
+    let window = |id, layout_id: &str, rectangle| {
+        wayland_window(id, &selector_value(scenario, layout_id), rectangle)
+    };
+    let mut singleton = group(
+        32,
+        "stacked",
+        rect(0, 0, 1000, 600),
+        vec![window(20, "window1", rect(0, 20, 1000, 580))],
+    );
+    singleton["focus"] = json!([20]);
+    let mut row = group(
+        33,
+        "splith",
+        rect(0, 0, 1000, 600),
+        vec![
+            window(21, "window2", rect(0, 20, 600, 580)),
+            window(22, "window3", rect(600, 20, 400, 580)),
+        ],
+    );
+    row["focus"] = json!([22, 21]);
+    let mut tabs = group(31, "tabbed", rect(0, 0, 1000, 600), vec![singleton, row]);
+    tabs["focus"] = json!([33, 32]);
+    let mut tree = desktop(
+        "splitv",
+        vec![tabs, window(23, "window4", rect(0, 600, 1000, 400))],
+        22,
+    );
+    node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = json!([31, 23]);
+    tree
+}

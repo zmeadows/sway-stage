@@ -307,7 +307,7 @@ fn floating_fullscreen_scratchpad_and_unsupported_containers_are_uncertain() {
         cases.push((tree, state_message));
     }
 
-    // A wrapper is collapsed only after validation, even with a single child.
+    // Header wrappers are meaningful even with one child; a split-only layout refuses them.
     for layout in ["tabbed", "stacked"] {
         let mut tree = horizontal_pair_desktop(&scenario, (600, 400), 21);
         let target = node_mut(&mut tree, TARGET_WORKSPACE_ID);
@@ -317,7 +317,7 @@ fn floating_fullscreen_scratchpad_and_unsupported_containers_are_uncertain() {
             rect(0, 0, 600, 1080),
             vec![target["nodes"][0].take()],
         );
-        cases.push((tree, "unsupported group: 30:"));
+        cases.push((tree, "layout.children[0]: expected window1"));
     }
 
     let mut window_with_children = horizontal_pair_desktop(&scenario, (600, 400), 21);
@@ -589,4 +589,223 @@ fn replay_geometry_is_judged_against_captured_weights_instead_of_original_weight
         )
         .is_err()
     );
+}
+
+#[test]
+fn root_header_groups_check_selection_without_split_geometry() {
+    for (name, layout, focused_id, history) in [
+        ("root-tabbed", "tabbed", 20, json!([20, 22, 21])),
+        ("root-stacked", "stacked", 21, json!([21, 22, 20])),
+    ] {
+        let scenario = standard_scenario(name);
+        let windows = (20..=22)
+            .map(|id| {
+                wayland_window(
+                    id,
+                    &selector_value(&scenario, &format!("window{}", id - 19)),
+                    rect(0, 0, 0, 0),
+                )
+            })
+            .collect();
+        let mut tree = desktop(layout, windows, focused_id);
+        node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = history;
+        let owned = accepted(&[(20, "window1"), (21, "window2"), (22, "window3")]);
+        assert!(
+            verify(tree.clone(), &scenario, &owned)
+                .unwrap()
+                .shares
+                .is_empty()
+        );
+        for invalid in [json!([]), json!([99]), json!([22, 21, 20])] {
+            let mut changed = tree.clone();
+            node_mut(&mut changed, TARGET_WORKSPACE_ID)["focus"] = invalid;
+            assert_contains(
+                &uncertain_message(verify(changed, &scenario, &owned)),
+                "selected child differs",
+            );
+        }
+        node_mut(&mut tree, TARGET_WORKSPACE_ID)["layout"] = json!("splith");
+        assert_contains(
+            &uncertain_message(verify(tree, &scenario, &owned)),
+            "expected",
+        );
+    }
+}
+
+#[test]
+fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
+    let scenario = standard_scenario("mixed-capture-reload");
+    let tree = crate::fixtures::mixed_native_desktop(&scenario);
+    let owned = accepted(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+    ]);
+    let measurements = verify(tree.clone(), &scenario, &owned).unwrap();
+    assert_eq!(
+        measurements.shares,
+        BTreeMap::from([
+            (vec![0], 60.0),
+            (vec![1], 40.0),
+            (vec![0, 1, 0], 60.0),
+            (vec![0, 1, 1], 40.0),
+        ])
+    );
+    assert!(measurements.sizing_notes.is_empty());
+
+    let mut collapsed = tree.clone();
+    let leaf = node_mut(&mut collapsed, 32)["nodes"][0].take();
+    node_mut(&mut collapsed, 31)["nodes"][0] = leaf;
+    assert_contains(
+        &uncertain_message(verify(collapsed, &scenario, &owned)),
+        "expected stacked with 1 children",
+    );
+
+    for (id, layout) in [(31, "stacked"), (32, "tabbed"), (33, "splitv")] {
+        let mut changed = tree.clone();
+        node_mut(&mut changed, id)["layout"] = json!(layout);
+        assert!(verify(changed, &scenario, &owned).is_err());
+    }
+    let mut reordered = tree.clone();
+    node_mut(&mut reordered, 31)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    assert_contains(
+        &uncertain_message(verify(reordered, &scenario, &owned)),
+        "window order differs",
+    );
+
+    let mut bad_nested_size = tree;
+    node_mut(&mut bad_nested_size, 21)["rect"]["width"] = json!(800);
+    node_mut(&mut bad_nested_size, 22)["rect"]["x"] = json!(800);
+    node_mut(&mut bad_nested_size, 22)["rect"]["width"] = json!(200);
+    assert_contains(
+        &check_message(verify(bad_nested_size, &scenario, &owned)),
+        "layout.children[0].children[1] splith",
+    );
+}
+
+#[test]
+fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_children() {
+    let scenario = standard_scenario("independent-native-groups");
+    let window = |id, layout_id: &str| {
+        wayland_window(
+            id,
+            &selector_value(&scenario, layout_id),
+            rect(0, 0, 600, 1000),
+        )
+    };
+    let mut inner = group(
+        31,
+        "stacked",
+        rect(0, 0, 600, 1000),
+        vec![window(21, "window2"), window(22, "window3")],
+    );
+    inner["focus"] = json!([22, 21]);
+    let mut left = group(
+        30,
+        "tabbed",
+        rect(0, 0, 600, 1000),
+        vec![window(20, "window1"), inner],
+    );
+    left["focus"] = json!([31, 20]);
+    let mut inner_tabs = group(
+        33,
+        "tabbed",
+        rect(600, 0, 400, 1000),
+        vec![window(23, "window4"), window(24, "window5")],
+    );
+    inner_tabs["focus"] = json!([23, 24]);
+    let mut right = group(
+        32,
+        "stacked",
+        rect(600, 0, 400, 1000),
+        vec![inner_tabs, window(25, "window6")],
+    );
+    right["focus"] = json!([33, 25]);
+    let tree = desktop("splith", vec![left, right], 22);
+    let owned = accepted(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+        (24, "window5"),
+        (25, "window6"),
+    ]);
+    verify(tree.clone(), &scenario, &owned).unwrap();
+    for (id, bad_history) in [
+        (30, json!([20, 31])),
+        (31, json!([21, 22])),
+        (32, json!([25, 33])),
+        (33, json!([24, 23])),
+    ] {
+        let mut changed = tree.clone();
+        node_mut(&mut changed, id)["focus"] = bad_history;
+        assert_contains(
+            &uncertain_message(verify(changed, &scenario, &owned)),
+            "selected child differs",
+        );
+    }
+    // With final focus in the other branch, even the nested inactive stack resets.
+    let mut scenario = scenario;
+    scenario.expected_focus = "window6";
+    let mut elsewhere = tree;
+    set_focus(&mut elsewhere, 25);
+    node_mut(&mut elsewhere, 30)["focus"] = json!([20, 31]);
+    node_mut(&mut elsewhere, 31)["focus"] = json!([21, 22]);
+    node_mut(&mut elsewhere, 32)["focus"] = json!([25, 33]);
+    verify(elsewhere.clone(), &scenario, &owned).unwrap();
+    node_mut(&mut elsewhere, 31)["focus"] = json!([22, 21]);
+    assert_contains(
+        &uncertain_message(verify(elsewhere, &scenario, &owned)),
+        "selected child differs",
+    );
+}
+
+#[test]
+fn signature_preserves_child_focus_history_across_capture() {
+    let scenario = standard_scenario("mixed-capture-reload");
+    let mut tree = crate::fixtures::mixed_native_desktop(&scenario);
+    let before = parse_tree(tree.clone());
+    let baseline = signature(find(&before, TARGET_WORKSPACE_ID));
+    node_mut(&mut tree, 31)["focus"] = json!([32, 33]);
+    let after = parse_tree(tree);
+    assert_ne!(signature(find(&after, TARGET_WORKSPACE_ID)), baseline);
+}
+
+#[test]
+fn cleanup_shape_retains_singleton_headers_and_reaps_only_empty_ancestors() {
+    let scenario = standard_scenario("mixed-capture-reload");
+    let tree = crate::fixtures::mixed_native_desktop(&scenario);
+    let shape_of = |tree: Value| {
+        let tree = parse_tree(tree);
+        shape(find(&tree, TARGET_WORKSPACE_ID)).unwrap()
+    };
+    let mut expected = tree.clone();
+    node_mut(&mut expected, 31)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let after_first = remove_from_shape(shape_of(tree), 20).unwrap();
+    assert_eq!(after_first, shape_of(expected.clone()));
+    // Removing window2 leaves a redundant split, but the tabbed parent remains.
+    node_mut(&mut expected, 33)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let after_second = remove_from_shape(after_first, 21).unwrap();
+    assert_eq!(after_second, shape_of(expected.clone()));
+    let mut flattened = expected.clone();
+    let survivor = node_mut(&mut flattened, 33)["nodes"][0].take();
+    node_mut(&mut flattened, TARGET_WORKSPACE_ID)["nodes"][0] = survivor;
+    assert_ne!(after_second, shape_of(flattened));
+    node_mut(&mut expected, TARGET_WORKSPACE_ID)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let after_third = remove_from_shape(after_second, 22).unwrap();
+    assert_eq!(after_third, shape_of(expected));
+    assert_eq!(remove_from_shape(after_third, 23), None);
 }

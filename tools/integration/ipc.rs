@@ -307,6 +307,8 @@ pub struct TreeNode {
     pub name: Option<String>,
     pub layout: Layout,
     pub focused: bool,
+    /// Direct children in seat focus-history order, distinct from global focus.
+    pub focus: Vec<i64>,
     pub rect: Rect,
     pub app_id: Option<String>,
     pub pid: Option<i32>,

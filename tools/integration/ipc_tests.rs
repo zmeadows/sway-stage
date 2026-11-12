@@ -129,3 +129,25 @@ fn malformed_or_unknown_events_are_errors() {
         );
     }
 }
+
+#[test]
+fn tree_child_focus_history_is_required_and_distinct_from_global_focus() {
+    use crate::fixtures::{mixed_native_desktop, node_mut, standard_scenario};
+    let scenario = standard_scenario("mixed-capture-reload");
+    let tree = mixed_native_desktop(&scenario);
+    let observed: TreeNode = serde_json::from_value(tree.clone()).unwrap();
+    let tabs = crate::fixtures::find(&observed, 31);
+    assert!(!tabs.focused);
+    assert_eq!(tabs.focus, [33, 32]);
+    for invalid in [serde_json::Value::Null, serde_json::json!(["33"])] {
+        let mut changed = tree.clone();
+        node_mut(&mut changed, 31)["focus"] = invalid;
+        assert!(serde_json::from_value::<TreeNode>(changed).is_err());
+    }
+    let mut missing = tree;
+    node_mut(&mut missing, 31)
+        .as_object_mut()
+        .unwrap()
+        .remove("focus");
+    assert!(serde_json::from_value::<TreeNode>(missing).is_err());
+}
