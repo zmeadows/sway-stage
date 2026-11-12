@@ -81,7 +81,7 @@ Children of `splith` and `splitv` may have `weight`, a finite positive number de
 to `1`. This includes groups of any type. Its share is `weight / sum(sibling weights)`
 along the parent's split axis; weights need not sum to 100 and every sibling sum must be
 finite. Children of `tabbed` and `stacked` must omit `weight`, even when it would be `1`.
-The root may still have a valid weight, which has no effect. Tree order is depth-first
+The root must omit `weight` because it has no siblings. Tree order is depth-first
 launch order and sibling order, including tab/stack header order. Do not flatten nested
 splits merely because their orientation matches their parent. Global `focus` selects the
 final window and its visible tab along its ancestry; it defaults to the first leaf. After

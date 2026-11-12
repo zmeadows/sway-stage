@@ -215,6 +215,10 @@ fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     fixture.file("writing.yaml", "malformed: [");
+    fixture.file(
+        "weighted.yaml",
+        &SINGLE_WINDOW_YAML.replace("{id:", "{weight: 1, id:"),
+    );
     fixture.file("bad name.yaml", SINGLE_WINDOW_YAML);
     fixture.file("duplicate.yaml", SINGLE_WINDOW_YAML);
     fixture.file("duplicate.yml", SINGLE_WINDOW_YAML);
@@ -231,7 +235,7 @@ fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path.join("options")).unwrap(),
-        "browsing\ndevelopment\n[invalid] writing\n"
+        "browsing\ndevelopment\n[invalid] weighted\n[invalid] writing\n"
     );
     assert_log_preserved(&fixture);
     assert!(!fixture.path.join(".config").exists());

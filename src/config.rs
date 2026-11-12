@@ -40,7 +40,7 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "NodeFields")]
 pub struct LayoutNode {
-    // Retain omission so tabbed/stacked parents can reject every explicit weight.
+    // Retain omission so the root and tabbed/stacked children reject every explicit weight.
     pub weight: Option<f64>,
     pub kind: NodeKind,
 }
@@ -375,6 +375,13 @@ fn validate_node(
     if *layout_node_count > MAX_LAYOUT_NODES {
         return Err(fail("", "layout exceeds 256 nodes"));
     }
+
+    if layout_depth == 1 && layout_node.value.weight.is_some() {
+        return Err(fail(
+            ".weight",
+            "weight is not allowed on the root layout node (it has no siblings)",
+        ));
+    }
     if !layout_node.value.weight().is_finite() || layout_node.value.weight() <= 0.0 {
         return Err(fail(".weight", "expected a finite positive number"));
     }
@@ -700,16 +707,40 @@ mod tests {
         }
 
         let input = format!(
-            "version: 1\nfocus: second\nlayout: {{group: splith, weight: 7, children: [{{group: tabbed, weight: 3, children: [{{group: stacked, children: [{{group: splitv, children: [{WINDOW}, {second}]}}]}}]}}, {{id: third, command: [foot], match: {{app_id: foot}}}}]}}"
+            "version: 1\nfocus: second\nlayout: {{group: splith, children: [{{group: tabbed, weight: 3, children: [{{group: stacked, children: [{{group: splitv, children: [{WINDOW}, {second}]}}]}}]}}, {{id: third, command: [foot], match: {{app_id: foot}}}}]}}"
         );
         let config = parse(&input).unwrap();
-        assert_eq!(config.layout.value.weight(), 7.0);
+        assert_eq!(config.layout.value.weight, None);
         assert_eq!(config.focus.as_deref(), Some("second"));
         let NodeKind::Group { children, .. } = &config.layout.value.kind else {
             panic!("expected group");
         };
         assert_eq!(children[0].value.weight, Some(3.0));
         assert_eq!(children[1].value.weight, None);
+    }
+
+    #[test]
+    fn root_nodes_must_omit_weight() {
+        let second = WINDOW.replace("terminal", "second");
+        let mut roots = vec![WINDOW.to_owned()];
+        for layout in ["splith", "splitv", "tabbed", "stacked"] {
+            roots.push(format!(
+                "{{group: {layout}, children: [{WINDOW}, {second}]}}"
+            ));
+        }
+
+        for root in roots {
+            assert!(parse(&format!("version: 1\nlayout: {root}")).is_ok());
+
+            for weight in ["1", "3"] {
+                let weighted_root = root.replacen('{', &format!("{{weight: {weight}, "), 1);
+                let error = parse(&format!("version: 1\nlayout: {weighted_root}")).unwrap_err();
+                assert_eq!(
+                    error,
+                    "layout.weight (line 2, column 9): weight is not allowed on the root layout node (it has no siblings)"
+                );
+            }
+        }
     }
 
     #[test]
@@ -808,13 +839,13 @@ mod tests {
             "0", "-1", ".nan", ".inf", "-.inf", "1e999", "'1'", "true", "null",
         ] {
             let input = format!(
-                "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, weight: {weight}}}"
+                "version: 1\nlayout: {{group: splith, children: [{{id: t, command: [foot], match: {{app_id: foot}}, weight: {weight}}}, {WINDOW}]}}"
             );
             rejects(&input, "weight");
         }
         for weight in ["0.5", "1", "1e300", "5e-324"] {
             let input = format!(
-                "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, weight: {weight}}}"
+                "version: 1\nlayout: {{group: splith, children: [{{id: t, command: [foot], match: {{app_id: foot}}, weight: {weight}}}, {WINDOW}]}}"
             );
             assert!(parse(&input).is_ok(), "rejected {input}");
         }

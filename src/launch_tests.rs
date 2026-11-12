@@ -2404,12 +2404,12 @@ fn tree_with_sibling_sizes(layout: &str, dimensions: &[i32]) -> Value {
 }
 
 #[test]
-fn two_sibling_weights_use_dimensions_and_ignore_root_weight_and_percent() {
+fn two_sibling_weights_use_dimensions_and_ignore_percent() {
     let fixture = LaunchFixture::new();
     let config = layout_config(
         &fixture,
         &format!(
-            "{{weight: 999, group: splith, children: [{}, {}]}}",
+            "{{group: splith, children: [{}, {}]}}",
             weighted_window_yaml(&fixture, 0, 3.0),
             weighted_window_yaml(&fixture, 1, 1.0)
         ),

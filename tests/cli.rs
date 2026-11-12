@@ -355,6 +355,27 @@ fn check_validates_without_compositor_tools_or_application_probes() {
 }
 
 #[test]
+fn root_weights_fail_shared_validation_before_loader_ipc() {
+    let fixture = CliFixture::new();
+    for weight in [1, 3] {
+        fixture.file(
+            "weighted.yaml",
+            &SINGLE_WINDOW_YAML.replace("{id:", &format!("{{weight: {weight}, id:")),
+        );
+
+        for command in ["check", "load"] {
+            let output = fixture.run(&["--layouts-dir", ".", command, "weighted"], 1);
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("weighted.yaml: layout.weight"), "{stderr}");
+            assert!(stderr.contains("it has no siblings"), "{stderr}");
+            assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+            assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
+        }
+    }
+}
+
+#[test]
 fn unsupported_window_timeout_fails_validation_before_ipc() {
     let fixture = CliFixture::new();
     fixture.file(
