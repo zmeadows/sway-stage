@@ -75,20 +75,20 @@ impl CommandCounts {
 /// Acquiring it does not require a nonempty or representable layout.
 pub struct Snapshot {
     tree: Node,
-    target: i64,
+    target_workspace_id: i64,
 }
 
 impl Snapshot {
     /// Focused workspace identity established from the saved tree, before any menu opens.
     pub fn workspace_id(&self) -> i64 {
-        self.target
+        self.target_workspace_id
     }
 
     /// Uses the loader's strict emptiness rule, including empty structural containers.
     pub fn workspace_is_empty(&self) -> bool {
         let workspace = self
             .tree
-            .find_as_ref(|node| node.id == self.target)
+            .find_as_ref(|node| node.id == self.target_workspace_id)
             .expect("snapshot verified the focused workspace");
         workspace.nodes.is_empty() && workspace.floating_nodes.is_empty()
     }
@@ -99,29 +99,37 @@ impl Snapshot {
         }
 
         let mut container_ids = HashSet::new();
-        let mut focused_workspace = None;
+        let mut focused_workspace_id = None;
         let mut pending = vec![(&tree, None)];
         while let Some((container, workspace_id)) = pending.pop() {
             if !container_ids.insert(container.id) {
                 return Err("snapshot: duplicate container identities".into());
             }
+
             let workspace_id = if container.node_type == NodeType::Workspace {
                 Some(container.id)
             } else {
                 workspace_id
             };
+
             if container.focused {
-                let target = workspace_id.ok_or("snapshot: focus is outside a workspace")?;
-                if focused_workspace.replace(target).is_some() {
+                let target_workspace_id =
+                    workspace_id.ok_or("snapshot: focus is outside a workspace")?;
+                if focused_workspace_id.replace(target_workspace_id).is_some() {
                     return Err("snapshot: expected exactly one focused container".into());
                 }
             }
+
             for child in container.nodes.iter().chain(&container.floating_nodes) {
                 pending.push((child, workspace_id));
             }
         }
-        let target = focused_workspace.ok_or("snapshot: no focused container")?;
-        Ok(Self { tree, target })
+
+        let target_workspace_id = focused_workspace_id.ok_or("snapshot: no focused container")?;
+        Ok(Self {
+            tree,
+            target_workspace_id,
+        })
     }
 
     /// Original workspace's containing output, when Sway supplied a nonempty name.
@@ -129,7 +137,7 @@ impl Snapshot {
         let output = self.tree.nodes.iter().find(|container| {
             container.node_type == NodeType::Output
                 && container
-                    .find_as_ref(|node| node.id == self.target)
+                    .find_as_ref(|node| node.id == self.target_workspace_id)
                     .is_some()
         })?;
         output.name.as_deref().filter(|name| !name.is_empty())
@@ -146,7 +154,7 @@ impl Snapshot {
         read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
     ) -> Result<RenderedDraft, String> {
         let captured = capture_workspace(self)?;
-        let mut command_for = |container_id| {
+        let mut infer_window_command = |container_id| {
             if !infer_commands {
                 return None;
             }
@@ -155,7 +163,8 @@ impl Snapshot {
             // The process may exit, replace its argv, or have its PID reused after GET_TREE.
             read_command(pid)
         };
-        render_draft(&captured, infer_commands, &mut command_for)
+
+        render_draft(&captured, infer_commands, &mut infer_window_command)
     }
 }
 
@@ -166,25 +175,27 @@ pub fn snapshot() -> Result<Snapshot, String> {
 }
 
 fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
-    let control = socket
+    let shutdown_socket = socket
         .try_clone()
         .map_err(|error| format!("clone query socket: {error}"))?;
+
     let (sender, receiver) = mpsc::channel();
     let reader = thread::Builder::new()
         .name("sway-capture".into())
         .spawn(move || {
-            let result = Connection::from(socket)
+            let tree_result = Connection::from(socket)
                 .get_tree()
                 .map_err(|error| format!("get tree: {error}"));
-            let _ = sender.send(result);
+            let _ = sender.send(tree_result);
         })
         .map_err(|error| format!("start capture reader: {error}"))?;
 
-    let result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let tree_result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     // Cancel even a partial frame read before joining; this connection is never reused.
-    let _ = control.shutdown(Shutdown::Both);
+    let _ = shutdown_socket.shutdown(Shutdown::Both);
     reader.join().map_err(|_| "capture reader panicked")?;
-    let tree = result.map_err(|error| format!("tree deadline/channel failure: {error}"))??;
+
+    let tree = tree_result.map_err(|error| format!("tree deadline/channel failure: {error}"))??;
     Snapshot::from_tree(tree)
 }
 
@@ -198,7 +209,7 @@ pub fn capture(infer_commands: bool) -> Result<RenderedDraft, String> {
 struct CapturedWorkspace {
     root: CapturedNode,
     /// Sway's focused container, which must be one of the captured windows.
-    focused_id: i64,
+    focused_container_id: i64,
 }
 
 enum CapturedNode {
@@ -209,7 +220,7 @@ enum CapturedNode {
     Group {
         layout: GroupLayout,
         /// Present only for splits: child extents along the split axis, parallel to `children`.
-        split_extents: Option<Vec<f64>>,
+        split_extents_pixels: Option<Vec<f64>>,
         children: Vec<CapturedNode>,
     },
 }
@@ -227,7 +238,7 @@ enum Selector {
 fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
     let workspace = snapshot
         .tree
-        .find_as_ref(|node| node.id == snapshot.target)
+        .find_as_ref(|node| node.id == snapshot.target_workspace_id)
         .ok_or("target workspace missing from tree")?;
     let name = workspace.name.as_deref().unwrap_or_default();
     let in_workspace = |error: String| format!("workspace {name:?}: {error}");
@@ -244,16 +255,17 @@ fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
 
     // Sway reports fullscreen_mode=1 on every workspace for i3 compatibility. That is not
     // window state; capture_node rejects fullscreen windows and groups individually.
-    let mut node_count = 0;
-    let root = capture_group(workspace, 1, &mut node_count).map_err(in_workspace)?;
+    let mut layout_node_count = 0;
+    let root = capture_group(workspace, 1, &mut layout_node_count).map_err(in_workspace)?;
 
     // Snapshot acquisition verified exactly one focused node and its workspace ancestry.
     let focused = workspace
         .find_as_ref(|node| node.focused)
         .ok_or("no focused container in target workspace")?;
+
     Ok(CapturedWorkspace {
         root,
-        focused_id: focused.id,
+        focused_container_id: focused.id,
     })
 }
 
@@ -262,8 +274,8 @@ fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
 /// The enclosing split already measured this container's extent before any collapse.
 fn capture_group(
     group: &Node,
-    depth: usize,
-    node_count: &mut usize,
+    layout_depth: usize,
+    layout_node_count: &mut usize,
 ) -> Result<CapturedNode, String> {
     let layout = match group.layout {
         NodeLayout::SplitH => GroupLayout::SplitH,
@@ -284,10 +296,10 @@ fn capture_group(
             "container id={} holds neither a window nor child containers",
             group.id
         )),
-        [only_child] if is_split => capture_node(only_child, depth, node_count),
+        [only_child] if is_split => capture_node(only_child, layout_depth, layout_node_count),
         children => {
-            count_layout_node(depth, node_count)?;
-            let split_extents = if is_split {
+            count_layout_node(layout_depth, layout_node_count)?;
+            let split_extents_pixels = if is_split {
                 let extents = sibling_dimensions(group).map_err(|error| {
                     format!("container id={} has unusable geometry: {error}", group.id)
                 })?;
@@ -298,11 +310,12 @@ fn capture_group(
 
             let mut captured_children = Vec::new();
             for child in children {
-                captured_children.push(capture_node(child, depth + 1, node_count)?);
+                captured_children.push(capture_node(child, layout_depth + 1, layout_node_count)?);
             }
+
             Ok(CapturedNode::Group {
                 layout,
-                split_extents,
+                split_extents_pixels,
                 children: captured_children,
             })
         }
@@ -312,43 +325,46 @@ fn capture_group(
 /// Captures one tiled `con`: a window, or a structural group of further containers.
 fn capture_node(
     container: &Node,
-    depth: usize,
-    node_count: &mut usize,
+    layout_depth: usize,
+    layout_node_count: &mut usize,
 ) -> Result<CapturedNode, String> {
-    let id = container.id;
+    let container_id = container.id;
     match container.node_type {
         NodeType::Con => {}
         NodeType::FloatingCon => {
             return Err(format!(
-                "container id={id} is floating; the layout format has only tiled windows"
+                "container id={container_id} is floating; the layout format has only tiled windows"
             ));
         }
         node_type => {
             return Err(format!(
-                "unsupported Sway node type {node_type:?} at id={id}"
+                "unsupported Sway node type {node_type:?} at id={container_id}"
             ));
         }
     }
+
     let floating = matches!(
         container.floating,
         Some(Floating::AutoOn | Floating::UserOn)
     );
     if floating || !container.floating_nodes.is_empty() {
         return Err(format!(
-            "container id={id} is or holds a floating window; the layout format has only tiled windows"
+            "container id={container_id} is or holds a floating window; the layout format has only tiled windows"
         ));
     }
+
     if container.fullscreen_mode != Some(0) {
         return Err(format!(
-            "container id={id} is fullscreen or reports no fullscreen state; exit fullscreen and retry"
+            "container id={container_id} is fullscreen or reports no fullscreen state; exit fullscreen and retry"
         ));
     }
+
     if matches!(
         container.scratchpad_state,
         Some(ScratchpadState::Fresh | ScratchpadState::Changed)
     ) {
         return Err(format!(
-            "container id={id} belongs to the scratchpad; remove it from the scratchpad and retry"
+            "container id={container_id} belongs to the scratchpad; remove it from the scratchpad and retry"
         ));
     }
 
@@ -356,40 +372,42 @@ fn capture_node(
     let is_window =
         container.shell.is_some() || container.app_id.is_some() || container.window.is_some();
     if !is_window {
-        return capture_group(container, depth, node_count);
+        return capture_group(container, layout_depth, layout_node_count);
     }
     if !container.nodes.is_empty() {
         return Err(format!(
-            "window id={id} unexpectedly holds child containers"
+            "window id={container_id} unexpectedly holds child containers"
         ));
     }
 
-    count_layout_node(depth, node_count)?;
+    count_layout_node(layout_depth, layout_node_count)?;
     let selector = match (app_id(container), class(container)) {
         (Some(app_id), _) => Some(Selector::AppId(app_id.to_owned())),
         (None, Some(class)) => Some(Selector::Class(class.to_owned())),
         (None, None) => None,
     };
+
     Ok(CapturedNode::Window {
-        container_id: id,
+        container_id,
         selector,
     })
 }
 
 /// Counts one emitted layout node against the limits `check` and `load` enforce, so a
 /// filled-in draft can always be loaded. Collapsed wrappers are not layout nodes.
-fn count_layout_node(depth: usize, node_count: &mut usize) -> Result<(), String> {
-    *node_count += 1;
-    if depth > MAX_LAYOUT_DEPTH {
+fn count_layout_node(layout_depth: usize, layout_node_count: &mut usize) -> Result<(), String> {
+    *layout_node_count += 1;
+    if layout_depth > MAX_LAYOUT_DEPTH {
         return Err(format!(
             "the arrangement nests deeper than the layout format's {MAX_LAYOUT_DEPTH} levels"
         ));
     }
-    if *node_count > MAX_LAYOUT_NODES {
+    if *layout_node_count > MAX_LAYOUT_NODES {
         return Err(format!(
             "the arrangement has more than the layout format's {MAX_LAYOUT_NODES} windows and groups"
         ));
     }
+
     Ok(())
 }
 
@@ -423,7 +441,7 @@ enum DraftNode {
 /// Only launch arguments may use flow style; layout children remain ordinary sequences.
 struct DraftCommand {
     arguments: Vec<String>,
-    indent: usize,
+    indent_columns: usize,
 }
 
 impl Serialize for DraftCommand {
@@ -432,7 +450,7 @@ impl Serialize for DraftCommand {
         let flow_yaml = serde_saphyr::to_string_with_options(&flow, draft_options())
             .map_err(serde::ser::Error::custom)?;
         let sequence = flow_yaml.trim_end_matches('\n');
-        let line_length = self.indent + "command: ".len() + sequence.chars().count();
+        let line_length = self.indent_columns + "command: ".len() + sequence.chars().count();
 
         // Measure YAML quoting and escapes, not raw argv. Unexpected multiline output
         // also falls back to the established block representation.
@@ -457,26 +475,27 @@ fn draft_options() -> serde_saphyr::SerializerOptions {
 fn render_draft(
     captured: &CapturedWorkspace,
     infer_commands: bool,
-    command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
+    infer_window_command: &mut dyn FnMut(i64) -> Option<Vec<String>>,
 ) -> Result<RenderedDraft, String> {
-    let mut draft_ids = HashMap::new();
+    let mut draft_window_ids = HashMap::new();
     let mut commands = CommandCounts {
         total: 0,
         inferred: 0,
         inference_requested: infer_commands,
     };
-    let layout = draft_node(
+
+    let layout = build_draft_node(
         &captured.root,
         None,
         2,
-        &mut draft_ids,
-        command_for,
+        &mut draft_window_ids,
+        infer_window_command,
         &mut commands,
     );
-    let focus = draft_ids.remove(&captured.focused_id).ok_or_else(|| {
+    let focus = draft_window_ids.remove(&captured.focused_container_id).ok_or_else(|| {
         format!(
             "focus is on container id={} rather than a window, for example after `focus parent`; focus a window and retry",
-            captured.focused_id
+            captured.focused_container_id
         )
     })?;
 
@@ -494,6 +513,7 @@ fn render_draft(
         }
     })?;
     let inference_header = if infer_commands { INFERENCE_HEADER } else { "" };
+
     Ok(RenderedDraft {
         yaml: format!("{DRAFT_HEADER}{inference_header}{yaml}"),
         commands,
@@ -501,13 +521,13 @@ fn render_draft(
 }
 
 /// `weight` comes only from an enclosing split; the root and children of tabbed/stacked
-/// groups omit it. `draft_ids` maps each captured window's container ID to its draft ID.
-fn draft_node(
+/// groups omit it. `draft_window_ids` maps each captured window's container ID to its draft ID.
+fn build_draft_node(
     captured: &CapturedNode,
     weight: Option<f64>,
-    indent: usize,
-    draft_ids: &mut HashMap<i64, String>,
-    command_for: &mut dyn FnMut(i64) -> Option<Vec<String>>,
+    indent_columns: usize,
+    draft_window_ids: &mut HashMap<i64, String>,
+    infer_window_command: &mut dyn FnMut(i64) -> Option<Vec<String>>,
     commands: &mut CommandCounts,
 ) -> DraftNode {
     match captured {
@@ -515,46 +535,51 @@ fn draft_node(
             container_id,
             selector,
         } => {
-            let id = format!("window{}", draft_ids.len() + 1);
-            draft_ids.insert(*container_id, id.clone());
-            let command = command_for(*container_id);
+            let draft_window_id = format!("window{}", draft_window_ids.len() + 1);
+            draft_window_ids.insert(*container_id, draft_window_id.clone());
+
+            let command = infer_window_command(*container_id);
             commands.total += 1;
             if command.is_some() {
                 commands.inferred += 1;
             }
+
             DraftNode::Window {
-                id,
+                id: draft_window_id,
                 weight,
-                command: command.map(|arguments| DraftCommand { arguments, indent }),
+                command: command.map(|arguments| DraftCommand {
+                    arguments,
+                    indent_columns,
+                }),
                 selector: selector.clone(),
             }
         }
         CapturedNode::Group {
             layout,
-            split_extents,
+            split_extents_pixels,
             children,
         } => {
-            let child_weights = split_extents.as_deref().map(percentage_weights);
-            let children = children
-                .iter()
-                .enumerate()
-                .map(|(child_index, child)| {
-                    let child_weight = child_weights.as_ref().map(|weights| weights[child_index]);
-                    // Each child adds a two-space sequence indent and a two-space dash.
-                    draft_node(
-                        child,
-                        child_weight,
-                        indent + 4,
-                        draft_ids,
-                        command_for,
-                        commands,
-                    )
-                })
-                .collect();
+            let child_weights = split_extents_pixels.as_deref().map(percentage_weights);
+            let mut draft_children = Vec::new();
+            for (child_index, child) in children.iter().enumerate() {
+                let child_weight = child_weights.as_ref().map(|weights| weights[child_index]);
+
+                // Each child adds a two-space sequence indent and a two-space dash.
+                let draft_child = build_draft_node(
+                    child,
+                    child_weight,
+                    indent_columns + 4,
+                    draft_window_ids,
+                    infer_window_command,
+                    commands,
+                );
+                draft_children.push(draft_child);
+            }
+
             DraftNode::Group {
                 group: *layout,
                 weight,
-                children,
+                children: draft_children,
             }
         }
     }

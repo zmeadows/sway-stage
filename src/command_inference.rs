@@ -23,8 +23,8 @@ pub fn read_process_command(pid: i32) -> Option<Vec<String>> {
     with_stable_process(
         || read_process_identity(&process_directory, pid),
         || {
-            let metadata = File::open(process_directory.join("root/.flatpak-info"));
-            infer_process_command(metadata, || {
+            let flatpak_metadata = File::open(process_directory.join("root/.flatpak-info"));
+            infer_process_command(flatpak_metadata, || {
                 let environment = File::open(process_directory.join("environ"));
                 infer_host_command(
                     pid,
@@ -55,16 +55,17 @@ fn with_stable_process(
     mut read_identity: impl FnMut() -> Option<ProcessIdentity>,
     infer_command: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
-    let before = read_identity()?;
+    let identity_before_inference = read_identity()?;
     let command = infer_command()?;
-    let after = read_identity()?;
-    (before == after).then_some(command)
+    let identity_after_inference = read_identity()?;
+    (identity_before_inference == identity_after_inference).then_some(command)
 }
 
 fn read_process_identity(process_directory: &Path, pid: i32) -> Option<ProcessIdentity> {
     let start_time_ticks = read_start_time(File::open(process_directory.join("stat")).ok()?, pid)?;
     let executable = std::fs::read_link(process_directory.join("exe")).ok()?;
     let metadata = std::fs::metadata(process_directory.join("exe")).ok()?;
+
     Some(ProcessIdentity {
         start_time_ticks,
         executable,
@@ -74,32 +75,37 @@ fn read_process_identity(process_directory: &Path, pid: i32) -> Option<ProcessId
 }
 
 fn read_start_time(reader: impl Read, pid: i32) -> Option<u64> {
-    let mut bytes = Vec::new();
+    let mut stat_bytes = Vec::new();
     reader
         .take(MAX_STAT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut stat_bytes)
         .ok()?;
-    if pid <= 0 || bytes.len() > MAX_STAT_BYTES || bytes.last() != Some(&b'\n') {
+    if pid <= 0 || stat_bytes.len() > MAX_STAT_BYTES || stat_bytes.last() != Some(&b'\n') {
         return None;
     }
 
     // comm is parenthesized but can itself contain spaces, parentheses, newlines, and
     // non-UTF-8 bytes. Only the numeric prefix and the fields AFTER its final ')' are text.
-    let pid_end = bytes.iter().position(|byte| *byte == b' ')?;
-    if bytes[..pid_end] != *pid.to_string().as_bytes() || bytes.get(pid_end + 1) != Some(&b'(') {
+    let pid_field_end = stat_bytes.iter().position(|byte| *byte == b' ')?;
+    if stat_bytes[..pid_field_end] != *pid.to_string().as_bytes()
+        || stat_bytes.get(pid_field_end + 1) != Some(&b'(')
+    {
         return None;
     }
-    let comm_end = bytes.iter().rposition(|byte| *byte == b')')?;
-    if comm_end <= pid_end + 1 || bytes.get(comm_end + 1) != Some(&b' ') {
+    let process_name_end = stat_bytes.iter().rposition(|byte| *byte == b')')?;
+    if process_name_end <= pid_field_end + 1 || stat_bytes.get(process_name_end + 1) != Some(&b' ')
+    {
         return None;
     }
-    let fields = std::str::from_utf8(&bytes[comm_end + 2..]).ok()?;
+
+    let remaining_fields = std::str::from_utf8(&stat_bytes[process_name_end + 2..]).ok()?;
     // The tail begins at field 3 (state); starttime is field 22.
-    let start_time = fields.split_ascii_whitespace().nth(19)?;
-    if start_time.is_empty() || !start_time.bytes().all(|byte| byte.is_ascii_digit()) {
+    let start_time_field = remaining_fields.split_ascii_whitespace().nth(19)?;
+    if start_time_field.is_empty() || !start_time_field.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    start_time.parse().ok()
+
+    start_time_field.parse().ok()
 }
 
 #[derive(Debug, PartialEq)]
@@ -116,8 +122,8 @@ pub(super) fn infer_host_command(
     read_cmdline: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
     // Failed or incomplete reads cannot establish that launcher evidence is absent.
-    let bytes = read_environment(environment.ok()?)?;
-    let environment = LauncherEnvironment::parse(&bytes)?;
+    let environment_bytes = read_environment(environment.ok()?)?;
+    let environment = LauncherEnvironment::parse(&environment_bytes)?;
     match desktop_launcher(&environment, pid) {
         LauncherEvidence::Command(command) => return Some(command),
         LauncherEvidence::Unresolved => return None,
@@ -127,6 +133,7 @@ pub(super) fn infer_host_command(
     if environment.unsupported_snap {
         return None;
     }
+
     // ARGV0 alone has uses outside AppImage and establishes no package identity.
     if environment.appimage.is_none() && environment.appdir.is_none() {
         return read_cmdline();
@@ -147,18 +154,18 @@ pub(super) fn infer_host_command(
 }
 
 fn read_environment(reader: impl Read) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
+    let mut environment_bytes = Vec::new();
     if reader
         .take(MAX_ENVIRON_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut environment_bytes)
         .is_err()
-        || bytes.len() > MAX_ENVIRON_BYTES
-        || (!bytes.is_empty() && bytes.last() != Some(&0))
+        || environment_bytes.len() > MAX_ENVIRON_BYTES
+        || (!environment_bytes.is_empty() && environment_bytes.last() != Some(&0))
     {
         return None;
     }
 
-    Some(bytes)
+    Some(environment_bytes)
 }
 
 #[derive(Default)]
@@ -196,10 +203,12 @@ impl<'a> LauncherEnvironment<'a> {
                 }
                 _ => continue,
             };
+
             if destination.replace(&entry[separator? + 1..]).is_some() {
                 return None;
             }
         }
+
         Some(environment)
     }
 }
@@ -211,12 +220,15 @@ fn desktop_launcher(environment: &LauncherEnvironment<'_>, pid: i32) -> Launcher
     if desktop_file.is_none() && launched_pid.is_none() {
         return LauncherEvidence::Absent;
     }
-    let Some(recorded_pid) = launched_pid
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|text| text.parse::<i32>().ok())
-        .filter(|pid| *pid > 0)
-    else {
+
+    let Some(pid_text) = launched_pid.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
+        return LauncherEvidence::Unresolved;
+    };
+    if pid_text.is_empty() || !pid_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return LauncherEvidence::Unresolved;
+    }
+
+    let Some(recorded_pid) = pid_text.parse::<i32>().ok().filter(|pid| *pid > 0) else {
         return LauncherEvidence::Unresolved;
     };
     if recorded_pid != pid {
@@ -226,21 +238,24 @@ fn desktop_launcher(environment: &LauncherEnvironment<'_>, pid: i32) -> Launcher
     let Some(desktop_file) = desktop_file.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
         return LauncherEvidence::Unresolved;
     };
-    let path = Path::new(desktop_file);
-    if !path.is_absolute()
-        || path
+    let desktop_file_path = Path::new(desktop_file);
+    if !desktop_file_path.is_absolute()
+        || desktop_file_path
             .extension()
             .is_none_or(|extension| extension != "desktop")
-        || !path.metadata().is_ok_and(|metadata| metadata.is_file())
+        || !desktop_file_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file())
     {
         return LauncherEvidence::Unresolved;
     }
+
     // Opening verifies readability without interpreting Exec or any other desktop keys.
     // Recheck the opened file too, since the path can change between filesystem calls.
-    let usable = File::open(path)
+    let launcher_is_readable = File::open(desktop_file_path)
         .and_then(|file| file.metadata())
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-    if !usable {
+    if !launcher_is_readable {
         return LauncherEvidence::Unresolved;
     }
 
@@ -254,36 +269,42 @@ fn appimage_command(
     executable: &Path,
 ) -> Option<Vec<String>> {
     let image_text = std::str::from_utf8(environment.appimage?).ok()?;
-    let image = Path::new(image_text);
-    let appdir = Path::new(std::str::from_utf8(environment.appdir?).ok()?);
-    if !image.is_absolute() || !appdir.is_absolute() || !executable.is_absolute() {
+    let image_path = Path::new(image_text);
+    let mount_path = Path::new(std::str::from_utf8(environment.appdir?).ok()?);
+    if !image_path.is_absolute() || !mount_path.is_absolute() || !executable.is_absolute() {
         return None;
     }
 
     // APPIMAGE is documented as resolved. Do not substitute a symlink or a file inside
     // another temporary AppImage mount for the persistent host executable.
-    if image.canonicalize().ok()? != image
-        || image
+    let resolved_image_path = image_path.canonicalize().ok()?;
+    if resolved_image_path != image_path
+        || image_path
             .components()
             .any(|part| part.as_os_str().as_encoded_bytes().starts_with(b".mount_"))
     {
         return None;
     }
-    let mounted_directory = appdir.canonicalize().ok()?;
-    let mounted_executable = executable.canonicalize().ok()?;
-    if !mounted_directory.is_dir()
-        || image.starts_with(&mounted_directory)
-        || !mounted_executable.starts_with(&mounted_directory)
-        || mounted_executable == mounted_directory
+
+    let resolved_mount_path = mount_path.canonicalize().ok()?;
+    let resolved_executable_path = executable.canonicalize().ok()?;
+    if !resolved_mount_path.is_dir()
+        || image_path.starts_with(&resolved_mount_path)
+        || !resolved_executable_path.starts_with(&resolved_mount_path)
+        || resolved_executable_path == resolved_mount_path
     {
         return None;
     }
 
-    let metadata = image.metadata().ok()?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.permissions().mode() & 0o111 == 0 {
+    let image_metadata = image_path.metadata().ok()?;
+    if !image_metadata.is_file()
+        || image_metadata.len() == 0
+        || image_metadata.permissions().mode() & 0o111 == 0
+    {
         return None;
     }
-    let opened_metadata = File::open(image).ok()?.metadata().ok()?;
+
+    let opened_metadata = File::open(image_path).ok()?.metadata().ok()?;
     if !opened_metadata.is_file()
         || opened_metadata.len() == 0
         || opened_metadata.permissions().mode() & 0o111 == 0
@@ -293,7 +314,7 @@ fn appimage_command(
 
     if let Some(invocation) = environment.argv0 {
         let invocation = std::str::from_utf8(invocation).ok()?;
-        let image_basename = image.file_name()?.to_str()?;
+        let image_basename = image_path.file_name()?.to_str()?;
         let relative_invocation = format!("./{image_basename}");
         // Other paths need the original cwd or might name a symlink that changes AppRun's
         // behavior. Do not normalize or resolve them into an apparently equivalent launch.
@@ -322,15 +343,16 @@ pub(super) fn infer_process_command(
 }
 
 fn read_flatpak_command(reader: impl Read) -> Option<Vec<String>> {
-    let mut bytes = Vec::new();
+    let mut metadata_bytes = Vec::new();
     reader
         .take(MAX_FLATPAK_INFO_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut metadata_bytes)
         .ok()?;
-    if bytes.len() > MAX_FLATPAK_INFO_BYTES {
+    if metadata_bytes.len() > MAX_FLATPAK_INFO_BYTES {
         return None;
     }
-    flatpak_command(std::str::from_utf8(&bytes).ok()?)
+
+    flatpak_command(std::str::from_utf8(&metadata_bytes).ok()?)
 }
 
 /// Read only the identity fields of Flatpak's key file. Unsupported escapes in these
@@ -340,20 +362,24 @@ fn flatpak_command(metadata: &str) -> Option<Vec<String>> {
         return None;
     }
 
-    let mut section = "";
-    let mut sections = HashSet::new();
-    let mut keys = HashSet::new();
+    let mut section_name = "";
+    let mut seen_sections = HashSet::new();
+    let mut seen_keys = HashSet::new();
     let mut application_id = None;
     let mut branch = None;
-    let mut arch = None;
+    let mut architecture = None;
     for line in metadata.lines() {
         let line = line.trim_matches([' ', '\t', '\r']);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+
         if line.starts_with('[') {
-            section = line.strip_prefix('[')?.strip_suffix(']')?;
-            if section.is_empty() || section.contains(['[', ']']) || !sections.insert(section) {
+            section_name = line.strip_prefix('[')?.strip_suffix(']')?;
+            if section_name.is_empty()
+                || section_name.contains(['[', ']'])
+                || !seen_sections.insert(section_name)
+            {
                 return None;
             }
             continue;
@@ -362,13 +388,14 @@ fn flatpak_command(metadata: &str) -> Option<Vec<String>> {
         let (key, field_value) = line.split_once('=')?;
         let key = key.trim_matches([' ', '\t']);
         let field_value = field_value.trim_matches([' ', '\t']);
-        if section.is_empty() || key.is_empty() || !keys.insert((section, key)) {
+        if section_name.is_empty() || key.is_empty() || !seen_keys.insert((section_name, key)) {
             return None;
         }
-        match (section, key) {
+
+        match (section_name, key) {
             ("Application", "name") => application_id = Some(field_value),
             ("Instance", "branch") => branch = Some(field_value),
-            ("Instance", "arch") => arch = Some(field_value),
+            ("Instance", "arch") => architecture = Some(field_value),
             _ => {}
         }
     }
@@ -376,19 +403,19 @@ fn flatpak_command(metadata: &str) -> Option<Vec<String>> {
     // Runtime-only sandboxes have [Runtime], not [Application]. Conflicting groups
     // are ambiguous and must never turn a runtime name into an application launch.
     let application_id = application_id?;
-    if sections.contains("Runtime") || !valid_flatpak_id(application_id) {
+    if seen_sections.contains("Runtime") || !valid_flatpak_id(application_id) {
         return None;
     }
 
     let mut command = vec!["flatpak".into(), "run".into()];
-    for (option, field_value) in [("--branch", branch), ("--arch", arch)] {
+    for (option, field_value) in [("--branch", branch), ("--arch", architecture)] {
         if let Some(field_value) = field_value {
             // A conservative subset of reference components, with no key-file escapes,
             // whitespace, path separators, or option-like leading punctuation.
-            if !field_value.starts_with(|c: char| c.is_ascii_alphanumeric())
-                || !field_value
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+            if !field_value.starts_with(|character: char| character.is_ascii_alphanumeric())
+                || !field_value.bytes().all(|character| {
+                    character.is_ascii_alphanumeric() || b"._-".contains(&character)
+                })
             {
                 return None;
             }
@@ -396,6 +423,7 @@ fn flatpak_command(metadata: &str) -> Option<Vec<String>> {
         }
     }
     command.push(application_id.into());
+
     Some(command)
 }
 
@@ -405,37 +433,43 @@ fn valid_flatpak_id(application_id: &str) -> bool {
     if application_id.len() > 255 {
         return false;
     }
+
     let components: Vec<&str> = application_id.split('.').collect();
     if components.len() < 3 {
         return false;
     }
+
     for (component_index, component) in components.iter().enumerate() {
         let allow_hyphen = component_index == components.len() - 1;
-        let valid_initial =
-            |c: u8| c.is_ascii_alphabetic() || c == b'_' || (allow_hyphen && c == b'-');
-        if !component.bytes().next().is_some_and(valid_initial)
+        let valid_initial_byte =
+            |byte: u8| byte.is_ascii_alphabetic() || byte == b'_' || (allow_hyphen && byte == b'-');
+        if !component.bytes().next().is_some_and(valid_initial_byte)
             || !component
                 .bytes()
-                .all(|c| valid_initial(c) || c.is_ascii_digit())
+                .all(|byte| valid_initial_byte(byte) || byte.is_ascii_digit())
         {
             return false;
         }
     }
+
     true
 }
 
 fn read_command_line(reader: impl Read) -> Option<Vec<String>> {
-    let mut bytes = Vec::new();
+    let mut cmdline_bytes = Vec::new();
     reader
         .take(MAX_CMDLINE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+        .read_to_end(&mut cmdline_bytes)
         .ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_CMDLINE_BYTES || bytes.last() != Some(&0) {
+    if cmdline_bytes.is_empty()
+        || cmdline_bytes.len() > MAX_CMDLINE_BYTES
+        || cmdline_bytes.last() != Some(&0)
+    {
         return None;
     }
 
     // Remove exactly the final terminator: any other adjacent NULs are empty arguments.
-    let arguments: Vec<String> = bytes[..bytes.len() - 1]
+    let arguments: Vec<String> = cmdline_bytes[..cmdline_bytes.len() - 1]
         .split(|byte| *byte == 0)
         .map(|argument| String::from_utf8(argument.to_vec()))
         .collect::<Result<_, _>>()
@@ -443,6 +477,7 @@ fn read_command_line(reader: impl Read) -> Option<Vec<String>> {
     if arguments[0].is_empty() {
         return None;
     }
+
     Some(arguments)
 }
 
