@@ -10,6 +10,7 @@ prompt=''
 output=''
 keep_open=0
 no_sort=0
+return_index=0
 placeholder_value=0
 for argument in "$@"; do
     if test "$placeholder_value" = 1; then
@@ -22,6 +23,7 @@ for argument in "$@"; do
         --dmenu) ;;
         --no-exit-on-keyboard-focus-loss) keep_open=1 ;;
         --no-sort) no_sort=1 ;;
+        --index) return_index=1 ;;
         --placeholder) placeholder_value=1 ;;
         *) exit 92 ;;
     esac
@@ -51,6 +53,7 @@ case "$prompt" in
     exit 2
     ;;
   '--prompt=Launch in: ')
+    test "$return_index" = 1 || exit 96
     test "$no_sort" = 1 || exit 96
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
     /bin/cat > "$MENU_DIRECTORY/directories"
@@ -103,7 +106,7 @@ fn menu_command(fixture: &CliFixture, layout_output: &str, name_output: &str) ->
         .env("MENU_STATUS", "0")
         .env("NAME_OUTPUT", name_output)
         .env("NAME_STATUS", "0")
-        .env("DIRECTORY_OUTPUT", "gon\n")
+        .env("DIRECTORY_OUTPUT", "1\n")
         .env("DIRECTORY_STATUS", "0")
         .env_remove("REMOVE_DIRECTORY")
         .env_remove("REPLACE_LAYOUT")
@@ -395,7 +398,7 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         assert!(notification.contains("sway-stage menu failed"));
         assert_preload_notification(
             &fixture,
-            "Fuzzel did not return a valid choice. Check its configuration and use dmenu text output.",
+            "Fuzzel did not return a valid choice. Check its configuration.",
         );
         assert!(!fixture.path.join(".config").exists());
     }
@@ -1113,46 +1116,57 @@ fn project_layout(fixture: &CliFixture, select: bool) {
 fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
     use std::os::unix::ffi::OsStringExt;
 
-    let fixture = CliFixture::new();
-    prepare_menu_fixture(&fixture);
-    project_layout(&fixture, true);
-    let root = fixture.path.join("projects");
-    for name in [
-        "zebra",
-        "Alpha",
-        ".hidden",
-        "gon/grandchild",
-        "two words",
-        "bad\nname",
-        "bad\tname",
-    ] {
-        fs::create_dir_all(root.join(name)).unwrap();
+    for absolute_path in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        project_layout(&fixture, true);
+        let root = fixture.path.join("projects");
+        let configured_path = if absolute_path {
+            root.to_str().unwrap()
+        } else {
+            "~/projects"
+        };
+        fixture.file(
+            "writing.yaml",
+            &format!("{SINGLE_WINDOW_YAML}cwd: '{configured_path}'\ncwd_select: true\n"),
+        );
+        for name in [
+            "zebra",
+            "Alpha",
+            ".hidden",
+            "gon/grandchild",
+            "two words",
+            "bad\nname",
+            "bad\tname",
+        ] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        fs::create_dir(root.join(OsString::from_vec(vec![0xff]))).unwrap();
+        fs::create_dir(fixture.path.join("external")).unwrap();
+        symlink(fixture.path.join("external"), root.join("link")).unwrap();
+        symlink("missing", root.join("broken")).unwrap();
+        symlink("loop", root.join("loop")).unwrap();
+        fixture.file("projects/file", "ordinary file");
+        symlink("file", root.join("file-link")).unwrap();
+
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, "writing\n", "")
+                .env("DIRECTORY_OUTPUT", "")
+                .env("DIRECTORY_STATUS", "2")
+                .args(["--layouts-dir", ".", "menu"]),
+        );
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("directories")).unwrap(),
+            format!("Base directory ({configured_path})\nAlpha\ngon\nlink\ntwo words\nzebra\n")
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("outputs")).unwrap(),
+            "DP-1\nDP-1\n"
+        );
     }
-    fs::create_dir(root.join(OsString::from_vec(vec![0xff]))).unwrap();
-    fs::create_dir(fixture.path.join("external")).unwrap();
-    symlink(fixture.path.join("external"), root.join("link")).unwrap();
-    symlink("missing", root.join("broken")).unwrap();
-    symlink("loop", root.join("loop")).unwrap();
-    fixture.file("projects/file", "ordinary file");
-    symlink("file", root.join("file-link")).unwrap();
-
-    let output = run_on_empty_workspace(
-        &fixture,
-        menu_command(&fixture, "writing\n", "")
-            .env("DIRECTORY_OUTPUT", "")
-            .env("DIRECTORY_STATUS", "2")
-            .args(["--layouts-dir", ".", "menu"]),
-    );
-
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        fs::read_to_string(fixture.path.join("directories")).unwrap(),
-        "Alpha\ngon\nlink\ntwo words\nzebra\n"
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.path.join("outputs")).unwrap(),
-        "DP-1\nDP-1\n"
-    );
 }
 
 #[test]
@@ -1162,6 +1176,9 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
         ("unknown\n", "0", "not offered"),
         ("../gon\n", "0", "not offered"),
         (" gon\n", "0", "not offered"),
+        ("-1\n", "0", "not offered"),
+        ("2\n", "0", "not offered"),
+        ("Base directory (~/projects)\n", "0", "not offered"),
         ("gon", "0", "newline-terminated"),
         ("gon\nextra\n", "0", "single line"),
         ("gon\r\n", "0", "control characters"),
@@ -1211,49 +1228,70 @@ fn disabled_directory_selection_uses_the_single_prompt_loading_path() {
 }
 
 #[test]
-fn empty_root_and_disappearing_selection_never_reach_loader_ipc() {
-    for remove_before_prompt in [true, false] {
-        let fixture = CliFixture::new();
-        prepare_menu_fixture(&fixture);
-        project_layout(&fixture, true);
-        let selected = fixture.path.join("projects/gon");
-        let mut menu_command = menu_command(&fixture, "writing\n", "");
-        menu_command.args(["--layouts-dir", ".", "menu"]);
-        if remove_before_prompt {
-            fs::remove_dir(&selected).unwrap();
-        } else {
-            menu_command.env("REMOVE_DIRECTORY", &selected);
-        }
-        let output = run_on_empty_workspace(&fixture, &mut menu_command);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
-        if remove_before_prompt {
-            assert!(stderr.contains("no selectable directories"), "{stderr}");
-            assert_preload_notification(
-                &fixture,
-                "No selectable directories found under the configured working directory.",
-            );
-            assert!(!fixture.path.join("directories").exists());
-            assert_log_preserved(&fixture);
-        } else {
-            assert!(
-                stderr.contains("inspect") && stderr.contains("projects/gon"),
-                "{stderr}"
-            );
-            let log =
-                fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
-            assert!(!log.contains("subscribe"));
-        }
-    }
+fn root_without_eligible_children_still_opens_the_picker_and_can_cancel() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    project_layout(&fixture, true);
+    fs::remove_dir(fixture.path.join("projects/gon")).unwrap();
+    fs::create_dir(fixture.path.join("projects/.hidden")).unwrap();
+    fixture.file("projects/file", "ordinary file");
+
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "writing\n", "")
+            .env("DIRECTORY_OUTPUT", "")
+            .env("DIRECTORY_STATUS", "2")
+            .args(["--layouts-dir", ".", "menu"]),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("directories")).unwrap(),
+        "Base directory (~/projects)\n"
+    );
+    assert_log_preserved(&fixture);
+    assert!(!fixture.path.join("notification").exists());
+}
+
+#[test]
+fn disappearing_child_selection_never_reaches_loader_ipc() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    project_layout(&fixture, true);
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "writing\n", "")
+            .env("REMOVE_DIRECTORY", fixture.path.join("projects/gon"))
+            .args(["--layouts-dir", ".", "menu"]),
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inspect") && stderr.contains("projects/gon"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(!log.contains("subscribe"));
 }
 
 #[test]
 fn successful_menu_load_is_silent_and_preserves_window_directory_precedence() {
-    for window_override in [false, true] {
+    for (directory_index, selected_subdirectory, window_override) in [
+        ("0", None, false),
+        ("0", None, true),
+        ("1", Some("gon"), false),
+        ("1", Some("gon"), true),
+        ("1", Some("Base directory (~projects)"), false),
+    ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
         project_layout(&fixture, true);
+        if let Some(child_name) = selected_subdirectory {
+            fs::create_dir_all(fixture.path.join("projects").join(child_name)).unwrap();
+        } else {
+            fs::remove_dir(fixture.path.join("projects/gon")).unwrap();
+        }
         fixture.file("bad name.yaml", SINGLE_WINDOW_YAML);
         fixture.file("duplicate.yaml", SINGLE_WINDOW_YAML);
         fixture.file("duplicate.yml", SINGLE_WINDOW_YAML);
@@ -1342,6 +1380,7 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
             assert_eq!(events.read(&mut [0]).unwrap(), 0);
         });
         let output = menu_command(&fixture, "writing\n", "")
+            .env("DIRECTORY_OUTPUT", format!("{directory_index}\n"))
             .env("SWAYSOCK", &socket)
             .args(["--layouts-dir", ".", "menu"])
             .output()
@@ -1355,11 +1394,15 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
         assert!(!fixture.path.join("notification").exists());
         let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
         assert!(log.contains("final focus verified"), "{log}");
-        let expected = fixture.path.join(if window_override {
-            "override"
+        let expected = if window_override {
+            fixture.path.join("override")
         } else {
-            "projects/gon"
-        });
+            let root = fixture.path.join("projects");
+            match selected_subdirectory {
+                Some(name) => root.join(name),
+                None => root,
+            }
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while fs::read_to_string(fixture.path.join("result")).unwrap_or_default()
             != format!("{}\n", expected.display())

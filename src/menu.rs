@@ -32,7 +32,6 @@ pub enum FailureKind {
     FuzzelResponse,
     DraftSave,
     DirectoryRead,
-    NoDirectories,
 }
 
 impl Error {
@@ -90,6 +89,7 @@ pub fn select_layout(
         Some(&prompt_input),
         output_name,
         None,
+        false,
     )?
     else {
         return Ok(None);
@@ -112,28 +112,59 @@ pub fn select_layout(
     Ok(Some(name))
 }
 
-/// Names and paths stay paired: typed Fuzzel input never becomes a filesystem path.
-pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option<PathBuf>, Error> {
-    let choices = directory_choices(root)?;
-    let input = choices
-        .iter()
-        .map(|(name, _)| format!("{name}\n"))
-        .collect::<String>();
+#[derive(Debug)]
+pub enum DirectorySelection {
+    Base,
+    Child(PathBuf),
+}
 
-    let Some(selection) = fuzzel("--prompt=Launch in: ", Some(&input), output_name, None)? else {
+/// Row indices keep actions distinct even when the base label equals a child name.
+pub fn select_directory(
+    root: &Path,
+    display_path: &Path,
+    output_name: Option<&str>,
+) -> Result<Option<DirectorySelection>, Error> {
+    let mut choices = vec![(
+        format!("Base directory ({})", display_path.display()),
+        DirectorySelection::Base,
+    )];
+    for (name, path) in directory_choices(root)? {
+        choices.push((name, DirectorySelection::Child(path)));
+    }
+
+    // Configured paths may contain controls; escape them to preserve one row per choice.
+    let mut input = String::new();
+    for (label, _) in &choices {
+        for character in label.chars() {
+            if character.is_control() {
+                input.extend(character.escape_default());
+            } else {
+                input.push(character);
+            }
+        }
+        input.push('\n');
+    }
+
+    let Some(selection) = fuzzel(
+        "--prompt=Launch in: ",
+        Some(&input),
+        output_name,
+        None,
+        true,
+    )?
+    else {
         return Ok(None);
     };
 
-    let (_, directory) = choices
-        .into_iter()
-        .find(|(name, _)| name == &selection)
-        .ok_or_else(|| {
-            Error::new(
-                FailureKind::FuzzelResponse,
-                "directory selection: Fuzzel returned a name that was not offered",
-            )
-        })?;
-    Ok(Some(directory))
+    let selected_index = selection.parse::<usize>().ok();
+    let selected_choice = selected_index.and_then(|index| choices.into_iter().nth(index));
+    let (_, action) = selected_choice.ok_or_else(|| {
+        Error::new(
+            FailureKind::FuzzelResponse,
+            "directory selection: Fuzzel returned an index that was not offered",
+        )
+    })?;
+    Ok(Some(action))
 }
 
 fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
@@ -178,13 +209,6 @@ fn directory_choices(root: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
     }
 
     choices.sort_by(|left, right| left.0.cmp(&right.0));
-    if choices.is_empty() {
-        return Err(Error::new(
-            FailureKind::NoDirectories,
-            format!("no selectable directories in {}", root.display()),
-        ));
-    }
-
     Ok(choices)
 }
 
@@ -206,6 +230,7 @@ pub fn capture_draft(
             None,
             snapshot.output_name(),
             placeholder.as_deref(),
+            false,
         )?
         else {
             return Ok(());
@@ -233,11 +258,15 @@ fn fuzzel(
     input: Option<&str>,
     output_name: Option<&str>,
     placeholder: Option<&str>,
+    return_index: bool,
 ) -> Result<Option<String>, Error> {
     let mut command = Command::new("fuzzel");
     command.args(["--dmenu", "--no-exit-on-keyboard-focus-loss"]);
     if input.is_some() {
         command.arg("--no-sort");
+    }
+    if return_index {
+        command.arg("--index");
     }
     if let Some(output_name) = output_name {
         command.arg(format!("--output={output_name}"));
@@ -540,9 +569,10 @@ mod tests {
             directory.directory_path.join("file"),
         ] {
             fs::write(directory.directory_path.join("file"), "not a directory").unwrap();
-            let error = directory_choices(&root).unwrap_err().detail;
-            assert!(error.contains("read project directory"), "{error}");
-            assert!(error.contains(root.to_str().unwrap()), "{error}");
+            let error = directory_choices(&root).unwrap_err();
+            assert!(matches!(error.kind, FailureKind::DirectoryRead));
+            assert!(error.detail.contains("read project directory"), "{error:?}");
+            assert!(error.detail.contains(root.to_str().unwrap()), "{error:?}");
         }
     }
 

@@ -254,12 +254,19 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
             .cwd
             .as_deref()
             .expect("validated cwd_select requires cwd");
-        let Some(directory) =
-            menu::select_directory(root, output_name).map_err(report_menu_failure)?
+        let display_path = config
+            .cwd_display_path
+            .as_deref()
+            .expect("validated cwd_select retains the configured cwd");
+        let Some(selection) =
+            menu::select_directory(root, display_path, output_name).map_err(report_menu_failure)?
         else {
             return Ok(());
         };
-        Some(directory)
+        match selection {
+            menu::DirectorySelection::Base => None,
+            menu::DirectorySelection::Child(directory) => Some(directory),
+        }
     } else {
         None
     };

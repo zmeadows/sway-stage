@@ -2,7 +2,7 @@
 # Customize ~/projects to an existing directory containing the desired project subdirectories.
 version: 1
 cwd: ~/projects
-# sway-stage menu offers a picker for immediate child directories of cwd.
+# sway-stage menu offers cwd itself followed by its immediate child directories.
 # Direct load uses cwd as configured unless --cwd PATH overrides it; it never prompts.
 cwd_select: true
 focus: shell

@@ -54,7 +54,7 @@ Each file contains one UTF-8 YAML document with these top-level keys:
 | `version` | Required integer `1`; reject other versions. |
 | `layout` | Required root node: a group or a window. |
 | `cwd` | Optional default working directory for all windows; a window’s own `cwd` overrides it. |
-| `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. In the menu, select an immediate child directory as the layout default. |
+| `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. In the menu, select the base directory or an immediate child as the layout default. |
 | `focus` | Optional window `id` to focus at completion; default is the first leaf. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
@@ -416,7 +416,7 @@ Only exact offered layout labels are accepted; arbitrary typed selection text is
 All prompts use the original output when known and disable automatic exit on keyboard-focus loss,
 without changing Fuzzel's configured focus mode. Interactive input has no deadline. Escape
 at any offered prompt cancels successfully without saving/loading or replacing the launch
-log. Fuzzel cancellation requires exit status 2 and empty output; other failures, index
+log. Fuzzel cancellation requires exit status 2 and empty output; other failures, unexpected
 output, control characters, or anything other than one UTF-8 newline-terminated line are errors.
 
 - **Load:** after Fuzzel exits, rediscover and validate the selected file, then require the
@@ -425,20 +425,23 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   changes while the menu is open need not be detected; construction then uses the normal
   continuous focus/output safeguards.
   With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
-  `Launch in: `, before loading. It enumerates only immediate children of the resolved
-  top-level `cwd` using filesystem directory reads, without recursive scanning.
+  `Launch in: `, before loading. The first option, `Base directory (PATH)`, uses the
+  configured top-level `cwd`, preserving its configured spelling (such as `~/projects`).
+  Immediate child directories follow, using filesystem directory reads without recursive scanning.
   Names beginning with `.`, files, non-directory entries, non-UTF-8 names, and names
   containing control characters are excluded. Directory symlinks are included even when
   their targets are outside the root; broken or unusable symlinks are ignored. Basenames
-  appear in deterministic lexical order. Only an exact offered name is accepted; typed
-  paths, fuzzy matches, root selection, and parent traversal are unavailable.
-  An empty selectable list or enumeration failure is an error and launches nothing.
+  appear in deterministic lexical order. Only offered choices are accepted, even when
+  a child name resembles the base-directory label. Arbitrary typed paths and parent traversal
+  are unavailable. With no eligible children, the base directory is the sole option.
+  An enumeration failure is an error and launches nothing.
   Escape cancels successfully and preserves the previous launch log. Selection errors
   also leave that log untouched.
-  The selected path replaces the layout default; window `cwd` overrides still win.
-  The path is validated again before loader IPC or application launches, so a removed
-  or invalid directory fails without launching. Filesystem checks do not lock paths
-  against subsequent changes. The parent process's directory never changes.
+  Selecting the base keeps the configured default; selecting a child replaces it.
+  Window `cwd` overrides still win. A selected child path is validated again before loader IPC
+  or application launches, so a removed or invalid directory fails without launching.
+  Filesystem checks do not lock paths against subsequent changes. The parent process's
+  directory never changes.
   Both prompts retain the original output and workspace baseline; directory selection
   never captures a replacement baseline or bypasses fresh emptiness, focus, output,
   and ownership checks. With `cwd_select` omitted or false, Load uses one prompt.

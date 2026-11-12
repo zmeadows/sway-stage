@@ -176,16 +176,13 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
             "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable."
         }
         FailureKind::FuzzelResponse => {
-            "Fuzzel did not return a valid choice. Check its configuration and use dmenu text output."
+            "Fuzzel did not return a valid choice. Check its configuration."
         }
         FailureKind::DraftSave => {
             "Could not save the captured layout. Check the layouts directory, permissions, and available storage."
         }
         FailureKind::DirectoryRead => {
             "Cannot list working directories. Check the configured working directory and its permissions."
-        }
-        FailureKind::NoDirectories => {
-            "No selectable directories found under the configured working directory."
         }
     };
     summary.to_owned()
@@ -459,7 +456,6 @@ mod tests {
             FailureKind::FuzzelResponse,
             FailureKind::DraftSave,
             FailureKind::DirectoryRead,
-            FailureKind::NoDirectories,
         ] {
             let error = Error::new(kind, untrusted_detail.clone());
             let body = menu_failure_body(&error);

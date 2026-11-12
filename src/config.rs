@@ -22,6 +22,9 @@ pub struct Config {
     pub layout: Spanned<LayoutNode>,
     #[serde(default, deserialize_with = "non_null")]
     pub cwd: Option<PathBuf>,
+    // Original spelling for menu display only; cwd remains the resolved launch default.
+    #[serde(skip)]
+    pub cwd_display_path: Option<PathBuf>,
     #[serde(default, deserialize_with = "non_null")]
     pub focus: Option<String>,
     #[serde(default, deserialize_with = "unquoted_boolean")]
@@ -317,6 +320,7 @@ pub(crate) fn parse(input: &str) -> Result<Config, String> {
         ));
     }
 
+    config.cwd_display_path = config.cwd.clone();
     if let Some(directory) = &mut config.cwd {
         resolve_directory(directory).map_err(|error| format!("cwd: {error}"))?;
     }
@@ -889,6 +893,13 @@ mod tests {
                 .unwrap()
                 .cwd_select
         );
+        let config = parse(&format!("version: 1\ncwd: /tmp\nlayout: {WINDOW}")).unwrap();
+        assert_eq!(config.cwd_display_path.as_deref(), Some(Path::new("/tmp")));
+        rejects(
+            &format!("version: 1\ncwd_display_path: /tmp\nlayout: {WINDOW}"),
+            "unknown field",
+        );
+
         for enabled in [false, true] {
             let config = parse(&format!(
                 "version: 1\ncwd: /tmp\ncwd_select: {enabled}\nlayout: {WINDOW}"
