@@ -114,7 +114,13 @@ impl Diagnostics {
         if let Some(log_path) = &self.log_path {
             message.push_str(&format!("; log: {}", log_path.display()));
         }
-        if let Err(error) = notify_failure(self.operation, &message) {
+        let notification = failure_body(
+            self.operation,
+            &error,
+            &self.current_stage,
+            self.log_file.is_some(),
+        );
+        if let Err(error) = send_failure_notification(self.operation, &notification) {
             self.record(&format!("secondary notification failure: {error}"));
         }
 
@@ -138,12 +144,76 @@ impl Diagnostics {
 /// last-run log. A notification failure is secondary: it is reported to stderr and
 /// returned, and the caller still reports `message` as the primary error.
 pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
+    send_failure_notification(operation, &failure_body(operation, message, "", false))
+}
+
+fn send_failure_notification(operation: &str, message: &str) -> Result<(), String> {
     notify(
         "critical",
         &format!("sway-stage {operation} failed"),
         message,
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")))
+}
+
+/// Summarize only recognized error prefixes. Never copy arbitrary diagnostic text or
+/// user-controlled names into the desktop body; terminal and log output retain them.
+fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) -> String {
+    // Loading adds a validated ASCII layout name around the underlying launch error.
+    let mut cause = error;
+    if let Some(layout_error) = error.strip_prefix("layout \"")
+        && let Some((name, inner)) = layout_error.split_once("\": ")
+        && crate::discovery::valid_name(name)
+    {
+        cause = inner;
+    }
+    for context in ["pre-menu workspace snapshot: ", "capture: "] {
+        if let Some(inner) = cause.strip_prefix(context) {
+            cause = inner;
+        }
+    }
+
+    let summary = if stage.ends_with(": validation") {
+        "Unable to read or validate the selected layout. Check its configuration."
+    } else if cause.starts_with("window timeout: ") {
+        "The expected window was not ready in time. Check its launch command or window selector."
+    } else if cause.starts_with("workspace focus changed from target id=")
+        || cause.starts_with("snapshot: focus left target id=")
+    {
+        "Loading stopped because the target workspace lost focus."
+    } else if cause.starts_with("target workspace must be completely empty") {
+        "The target workspace is occupied. Load on an empty workspace."
+    } else if cause.starts_with("spawn application: ") {
+        "Unable to start an application. Check its launch command and working directory."
+    } else if [
+        "connect: SWAYSOCK ",
+        "connect to SWAYSOCK: ",
+        "subscribe: ",
+        "subscribe to workspace/window/tick: ",
+        "get tree: ",
+        "get workspaces: ",
+        "read Sway event: ",
+        "command IPC ",
+        "snapshot deadline/channel failure: ",
+        "tree deadline/channel failure: ",
+    ]
+    .iter()
+    .any(|prefix| cause.starts_with(prefix))
+    {
+        "Unable to communicate with Sway."
+    } else {
+        match operation {
+            "load" => "Unable to finish loading the layout.",
+            "capture" => "Unable to capture the workspace. See terminal output for details.",
+            _ => "Unable to complete the menu action.",
+        }
+    };
+
+    if log_available {
+        format!("{summary}\n\nSee last-run.log for details.")
+    } else {
+        summary.to_owned()
+    }
 }
 
 /// Best-effort save confirmation, independent of launch diagnostics.
@@ -257,6 +327,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failure_notifications_summarize_recognized_causes() {
+        for (error, expected) in [
+            (
+                "layout \"development\": window timeout: elapsed=10000ms observed=[]",
+                "The expected window was not ready in time. Check its launch command or window selector.",
+            ),
+            (
+                "layout \"development\": workspace focus changed from target id=7",
+                "Loading stopped because the target workspace lost focus.",
+            ),
+            (
+                "snapshot: focus left target id=7",
+                "Loading stopped because the target workspace lost focus.",
+            ),
+            (
+                "connect to SWAYSOCK: connection refused",
+                "Unable to communicate with Sway.",
+            ),
+            (
+                "pre-menu workspace snapshot: get tree: connection closed",
+                "Unable to communicate with Sway.",
+            ),
+            (
+                "spawn application: executable missing; child PATH and cwd",
+                "Unable to start an application. Check its launch command and working directory.",
+            ),
+            (
+                "target workspace must be completely empty, including tiled/floating containers",
+                "The target workspace is occupied. Load on an empty workspace.",
+            ),
+            (
+                "unexpected failure: window timeout: untrusted text",
+                "Unable to finish loading the layout.",
+            ),
+        ] {
+            assert_eq!(failure_body("load", error, "wait", false), expected);
+            assert_eq!(
+                failure_body("load", error, "wait", true),
+                format!("{expected}\n\nSee last-run.log for details.")
+            );
+        }
+    }
+
+    #[test]
+    fn notifications_omit_long_names_paths_and_untrusted_markup() {
+        let long_name = "a".repeat(10000);
+        let timeout = format!("layout \"{long_name}\": window timeout: leaf=<b>private</b>");
+        let body = failure_body("load", &timeout, "wait", true);
+        assert!(body.starts_with("The expected window was not ready in time."));
+        assert!(!body.contains(&long_name));
+        assert!(!body.contains("private"));
+
+        let stage = format!("load {long_name:?}: validation");
+        assert_eq!(
+            failure_body(
+                "load",
+                "/very/long/private/path: YAML details",
+                &stage,
+                false
+            ),
+            "Unable to read or validate the selected layout. Check its configuration."
+        );
+        assert_eq!(
+            failure_body(
+                "capture",
+                "workspace <b>private</b>: unsupported tree",
+                "",
+                false
+            ),
+            "Unable to capture the workspace. See terminal output for details."
+        );
+    }
+
+    #[test]
+    fn failed_log_writes_do_not_offer_the_log_as_details() {
+        let mut diagnostics = Diagnostics {
+            operation: "load",
+            log_file: Some(OpenOptions::new().write(true).open("/dev/full").unwrap()),
+            log_path: Some(PathBuf::from("/dev/full")),
+            started_at: Instant::now(),
+            current_stage: "wait".into(),
+            application_spawned: true,
+        };
+        let error = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
+        let terminal = diagnostics.report_failure(error.into());
+        assert!(terminal.contains(error));
+        assert!(terminal.contains("inspect windows before retrying"));
+        assert!(diagnostics.log_file.is_none());
+        assert!(
+            !failure_body("load", error, "wait", diagnostics.log_file.is_some())
+                .contains("last-run.log")
+        );
+    }
+
+    #[test]
     fn non_launch_failures_notify_without_replacing_the_launch_log() {
         let directory =
             env::temp_dir().join(format!("sway-stage-diagnostics-{}", std::process::id()));
@@ -273,6 +438,16 @@ mod tests {
         notify_failure("capture", "capture: get tree: connection closed").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), launch_log);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
+        let detail = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
+        let terminal = diagnostics.report_failure(detail.into());
+        assert!(terminal.contains(detail));
+        assert!(terminal.contains("launch:"));
+        assert!(terminal.contains("inspect windows before retrying"));
+        assert!(terminal.contains(path.to_str().unwrap()));
+        let failed_log = fs::read_to_string(&path).unwrap();
+        assert!(failed_log.contains(detail));
+        assert!(failed_log.contains("inspect windows before retrying"));
 
         fs::remove_dir_all(&directory).unwrap();
     }

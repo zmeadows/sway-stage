@@ -78,6 +78,22 @@ before loading. `capture --infer-commands` and `menu --infer-commands` can recov
 arguments as a starting point. Review them for secrets and reproducibility: captures are
 drafts, not executable session restorations.
 
+## Troubleshooting
+
+Desktop error notifications give a short summary. Each load attempt (including a menu Load
+selection) records detailed diagnostics in `$XDG_STATE_HOME/sway-stage/last-run.log`, or
+`$HOME/.local/state/sway-stage/last-run.log` when `XDG_STATE_HOME` is unset or empty.
+The state directory must be absolute. Inspect the latest load with:
+
+```sh
+cat "${XDG_STATE_HOME:-$HOME/.local/state}/sway-stage/last-run.log"
+```
+
+Capture, menu cancellation, and menu errors before loading preserve the previous log;
+use terminal stderr for their details. If logging is unavailable, diagnostics go to stderr.
+See the [troubleshooting reference](docs/SPECIFICATION.md#diagnostics-and-troubleshooting)
+for common causes.
+
 ## Documentation
 
 - [User reference](docs/SPECIFICATION.md): YAML, capture workflow, menu, safety, troubleshooting.
