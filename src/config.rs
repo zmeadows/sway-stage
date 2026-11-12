@@ -626,7 +626,7 @@ mod tests {
                 field,
             );
         }
-        for field in ["weight", "cwd", "env", "id", "split", "children"] {
+        for field in ["weight", "cwd", "env", "id", "group", "children"] {
             let input = format!(
                 "version: 1\nlayout: {{command: [foot], match: {{app_id: foot}}, {field}: null}}"
             );

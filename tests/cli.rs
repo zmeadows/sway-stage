@@ -799,7 +799,7 @@ fn standalone_inferred_summary_follows_successful_output_and_omits_arguments() {
 }
 
 #[test]
-fn check_accepts_new_groups_and_load_refuses_without_sway() {
+fn check_accepts_all_groups_and_load_requires_sway() {
     let fixture = Fixture::new();
     for group in ["tabbed", "stacked"] {
         fixture.file("group.yaml", &format!(
@@ -810,10 +810,6 @@ fn check_accepts_new_groups_and_load_refuses_without_sway() {
         assert!(output.stderr.is_empty());
         let output = fixture.run(&["--layouts-dir", ".", "load", "group"], 1);
         let error = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            error.contains(&format!("loading {group} groups is not implemented yet")),
-            "{error}"
-        );
-        assert!(!error.contains("SWAYSOCK"), "{error}");
+        assert!(error.contains("SWAYSOCK"), "{error}");
     }
 }

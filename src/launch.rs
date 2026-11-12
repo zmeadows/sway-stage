@@ -54,8 +54,6 @@ fn load_with(
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
 ) -> Result<Vec<String>, String> {
-    require_supported_groups(&config.layout, "layout")?;
-
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot_for_workspace(
@@ -79,7 +77,7 @@ fn load_with(
         .tree
         .find_as_ref(|node| node.id == target)
         .ok_or("target missing")?;
-    let empty_workspace = Hierarchy::Split {
+    let empty_workspace = Hierarchy::Group {
         id: Some(target),
         layout: workspace.layout,
         children: Vec::new(),
@@ -117,39 +115,14 @@ fn load_with(
     Ok(sizing_warnings)
 }
 
-// Reject unsupported groups across the whole tree before connecting or launching a leaf.
-fn require_supported_groups(
-    node: &serde_saphyr::Spanned<LayoutNode>,
-    field_path: &str,
-) -> Result<(), String> {
-    if let NodeKind::Group { layout, children } = &node.value.kind {
-        let unsupported = match layout {
-            GroupLayout::Tabbed => Some("tabbed"),
-            GroupLayout::Stacked => Some("stacked"),
-            GroupLayout::SplitH | GroupLayout::SplitV => None,
-        };
-        if let Some(layout) = unsupported {
-            return Err(format!(
-                "{field_path}.group (line {}, column {}): loading {layout} groups is not implemented yet",
-                node.referenced.line(),
-                node.referenced.column()
-            ));
-        }
-        for (child_index, child) in children.iter().enumerate() {
-            require_supported_groups(child, &format!("{field_path}.children[{child_index}]"))?;
-        }
-    }
-    Ok(())
-}
-
-// The workspace is the outer Split. Structural IDs are bound from the first verified
-// tree after a split, never predicted or retained across an explicitly replaced wrapper.
+// The workspace is the outer Group. Structural IDs are bound from the first verified
+// tree after creating a group, never predicted or retained across a replaced wrapper.
 #[derive(Clone, Debug)]
 enum Hierarchy {
     /// A window's container ID.
     Window(i64),
-    Split {
-        /// `None` until the first verified tree after creating this split supplies its ID.
+    Group {
+        /// `None` until the first verified tree after creating this group supplies its ID.
         id: Option<i64>,
         layout: NodeLayout,
         children: Vec<Hierarchy>,
@@ -161,13 +134,13 @@ impl Hierarchy {
         let Some((child_index, rest)) = path.split_first() else {
             return self;
         };
-        let Self::Split { children, .. } = self else {
-            unreachable!("split path");
+        let Self::Group { children, .. } = self else {
+            unreachable!("group path");
         };
         children[*child_index].at_mut(rest)
     }
 
-    /// Requires `observed` to match this expectation exactly, binding unknown split IDs.
+    /// Requires `observed` to match this expectation exactly, binding unknown group IDs.
     fn verify(&mut self, observed: &Node) -> Result<(), String> {
         if !observed.floating_nodes.is_empty()
             || matches!(observed.floating, Some(Floating::AutoOn | Floating::UserOn))
@@ -181,7 +154,7 @@ impl Hierarchy {
 
         match self {
             Self::Window(id) if observed.id == *id && observed.nodes.is_empty() => Ok(()),
-            Self::Split {
+            Self::Group {
                 id,
                 layout,
                 children,
@@ -216,8 +189,8 @@ impl Hierarchy {
 
     fn id(&self) -> i64 {
         match self {
-            Self::Window(id) | Self::Split { id: Some(id), .. } => *id,
-            Self::Split { id: None, .. } => unreachable!("verified structural identity"),
+            Self::Window(id) | Self::Group { id: Some(id), .. } => *id,
+            Self::Group { id: None, .. } => unreachable!("verified structural identity"),
         }
     }
 }
@@ -373,8 +346,21 @@ impl<'a> Construction<'a> {
         Ok(())
     }
 
-    /// Applies one split's weights, then recurses into nested splits. Residual deviations
-    /// become warnings; IPC, ownership and structural failures remain fatal.
+    // Workspace IDs cannot be selected with con_id criteria. Reach the frozen workspace
+    // through its verified direct child; callers fence the workspace focus before use.
+    fn focus_workspace(&mut self) -> Result<(), String> {
+        self.focus(&[0])?;
+        let direct_child_id = self.expected_hierarchy.at_mut(&[0]).id();
+        self.guarded_command(
+            format!("[con_id={direct_child_id}] focus parent"),
+            None,
+            self.expected_hierarchy.clone(),
+        )?;
+        Ok(())
+    }
+
+    /// Applies split weights and recurses through every group, including tabs/stacks.
+    /// Residual deviations become warnings; IPC, ownership and structural failures remain fatal.
     fn apply_sizing(
         &mut self,
         layout_node: &LayoutNode,
@@ -384,14 +370,28 @@ impl<'a> Construction<'a> {
         let NodeKind::Group { layout, children } = &layout_node.kind else {
             return Ok(());
         };
+        match layout {
+            GroupLayout::SplitH => self.apply_split_sizing(children, path, "width", warnings)?,
+            GroupLayout::SplitV => self.apply_split_sizing(children, path, "height", warnings)?,
+            GroupLayout::Tabbed | GroupLayout::Stacked => {}
+        }
+
+        for (child_index, child) in children.iter().enumerate() {
+            let mut child_path = path.to_vec();
+            child_path.push(child_index);
+            self.apply_sizing(&child.value, &child_path, warnings)?;
+        }
+        Ok(())
+    }
+
+    fn apply_split_sizing(
+        &mut self,
+        children: &[serde_saphyr::Spanned<LayoutNode>],
+        path: &[usize],
+        axis: &str,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), String> {
         let group_id = self.expected_hierarchy.at_mut(path).id();
-        let axis = match layout {
-            GroupLayout::SplitH => "width",
-            GroupLayout::SplitV => "height",
-            GroupLayout::Tabbed | GroupLayout::Stacked => {
-                return Err("loading tabbed or stacked groups is not implemented yet".into());
-            }
-        };
         let weights: Vec<_> = children.iter().map(|child| child.value.weight()).collect();
         let target_shares = proportions(&weights);
 
@@ -504,11 +504,6 @@ impl<'a> Construction<'a> {
             warnings.push(warning);
         }
 
-        for (child_index, child) in children.iter().enumerate() {
-            let mut child_path = path.to_vec();
-            child_path.push(child_index);
-            self.apply_sizing(&child.value, &child_path, warnings)?;
-        }
         Ok(())
     }
 
@@ -522,12 +517,15 @@ impl<'a> Construction<'a> {
         let NodeKind::Group { layout, children } = &layout_node.kind else {
             return self.launch_window(layout_node, insert_after);
         };
-        let (split_layout, split_command) = match layout {
-            GroupLayout::SplitH => (NodeLayout::SplitH, "splith"),
-            GroupLayout::SplitV => (NodeLayout::SplitV, "splitv"),
-            GroupLayout::Tabbed | GroupLayout::Stacked => {
-                return Err("loading tabbed or stacked groups is not implemented yet".into());
-            }
+        let (group_layout, layout_command, split_command) = match layout {
+            GroupLayout::SplitH => (NodeLayout::SplitH, "splith", "splith"),
+            GroupLayout::SplitV => (NodeLayout::SplitV, "splitv", "splitv"),
+            GroupLayout::Tabbed => (NodeLayout::Tabbed, "tabbed", "splith"),
+            GroupLayout::Stacked => (NodeLayout::Stacked, "stacking", "splith"),
+        };
+        let split_layout = match layout {
+            GroupLayout::SplitV => NodeLayout::SplitV,
+            _ => NodeLayout::SplitH,
         };
         let first_path = self.build(&children[0].value, insert_after)?;
 
@@ -541,16 +539,9 @@ impl<'a> Construction<'a> {
             // Select its direct owned child and explicitly focus its known parent. The
             // split has no criteria and acts on the focused node, so it requires the
             // workspace to be focused on its own settled fence.
-            let direct_child_path = vec![0];
-            self.focus(&direct_child_path)?;
-            let direct_child_id = self.expected_hierarchy.at_mut(&direct_child_path).id();
-            self.guarded_command(
-                format!("[con_id={direct_child_id}] focus parent"),
-                None,
-                self.expected_hierarchy.clone(),
-            )?;
+            self.focus_workspace()?;
 
-            let Hierarchy::Split {
+            let Hierarchy::Group {
                 layout: old_layout,
                 children: old_children,
                 ..
@@ -558,12 +549,12 @@ impl<'a> Construction<'a> {
             else {
                 unreachable!()
             };
-            let wrapped_children = Hierarchy::Split {
+            let wrapped_children = Hierarchy::Group {
                 id: None,
                 layout: old_layout,
                 children: old_children,
             };
-            expected_after = Hierarchy::Split {
+            expected_after = Hierarchy::Group {
                 id: Some(self.target),
                 layout: split_layout,
                 children: vec![wrapped_children],
@@ -574,7 +565,7 @@ impl<'a> Construction<'a> {
         } else {
             let first_id = self.expected_hierarchy.at_mut(&first_path).id();
             let parent_path = &first_path[..first_path.len() - 1];
-            let Hierarchy::Split {
+            let Hierarchy::Group {
                 layout: parent_layout,
                 children: siblings,
                 ..
@@ -586,32 +577,69 @@ impl<'a> Construction<'a> {
             let ordinary_parent = matches!(parent_layout, NodeLayout::SplitH | NodeLayout::SplitV);
 
             if singleton {
-                *parent_layout = split_layout;
+                // Only the first subtree can occupy its entire parent here, and that
+                // parent is the workspace. A leaf-targeted layout command would wrap
+                // workspace children instead of changing the workspace's own layout.
+                *parent_layout = group_layout;
                 group_path = parent_path.to_vec();
+                if ordinary_parent && matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV) {
+                    command = format!("[con_id={first_id}] {split_command}");
+                    require_focused = None;
+                } else {
+                    self.focus_workspace()?;
+                    command = format!("layout {layout_command}");
+                    require_focused = Some(self.target);
+                }
             } else {
                 let first = expected_after.at_mut(&first_path).clone();
-                *expected_after.at_mut(&first_path) = Hierarchy::Split {
+                *expected_after.at_mut(&first_path) = Hierarchy::Group {
                     id: None,
                     layout: split_layout,
                     children: vec![first],
                 };
                 group_path = first_path;
+                command = format!("[con_id={first_id}] {split_command}");
+                require_focused = None;
             }
-
-            command = if singleton && !ordinary_parent {
-                format!("[con_id={first_id}] layout {split_command}")
-            } else {
-                format!("[con_id={first_id}] {split_command}")
-            };
-            // con_id criteria select the container regardless of focus.
-            require_focused = None;
         }
 
         self.diagnostics.record(&format!(
-            "expected split/reparent transition {:?} -> {expected_after:?}",
+            "expected group/reparent transition {:?} -> {expected_after:?}",
             self.expected_hierarchy
         ));
         self.guarded_command(command, require_focused, expected_after)?;
+
+        let Hierarchy::Group {
+            layout: observed_layout,
+            ..
+        } = self.expected_hierarchy.at_mut(&group_path)
+        else {
+            unreachable!("constructed group");
+        };
+        if *observed_layout != group_layout {
+            // A split command first creates the exact wrapper. layout operates on its
+            // child's parent. This parent's siblings number at least two, preventing
+            // layout.c's singleton-grandparent flattening. At the root, operate on the
+            // workspace itself so layout cannot introduce an extra workspace wrapper.
+            let (command, require_focused) = if group_path.is_empty() {
+                self.focus_workspace()?;
+                (format!("layout {layout_command}"), Some(self.target))
+            } else {
+                let mut first_child_path = group_path.clone();
+                first_child_path.push(0);
+                let first_child_id = self.expected_hierarchy.at_mut(&first_child_path).id();
+                (
+                    format!("[con_id={first_child_id}] layout {layout_command}"),
+                    None,
+                )
+            };
+            let mut expected_after = self.expected_hierarchy.clone();
+            let Hierarchy::Group { layout, .. } = expected_after.at_mut(&group_path) else {
+                unreachable!("constructed group");
+            };
+            *layout = group_layout;
+            self.guarded_command(command, require_focused, expected_after)?;
+        }
 
         for (child_index, child) in children.iter().enumerate().skip(1) {
             let mut previous_sibling_path = group_path.clone();
@@ -716,7 +744,7 @@ impl<'a> Construction<'a> {
                 }
             } else if let Some(candidate_id) = candidate {
                 let parent_path = &window_path[..window_path.len() - 1];
-                let Hierarchy::Split { children, .. } = expected_after.at_mut(parent_path) else {
+                let Hierarchy::Group { children, .. } = expected_after.at_mut(parent_path) else {
                     unreachable!()
                 };
                 children.insert(

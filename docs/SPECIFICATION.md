@@ -54,9 +54,8 @@ two children; `tabbed` and `stacked` require at least one. Groups and windows ca
 arbitrarily within validation limits. The old `split` field and `horizontal`/`vertical`
 values are rejected; the configuration version remains `1`.
 
-`check` accepts all four group types. Loading currently supports only `splith` and `splitv`;
-a tabbed or stacked group anywhere in the tree is refused before loader IPC, application
-launches, or layout mutations. Capture still refuses tabbed/stacked structures.
+`check` and loading support all four group types, including singleton tabbed/stacked
+groups and mixed nesting. Capture still refuses tabbed/stacked structures.
 
 A window node has the following fields:
 
@@ -73,10 +72,12 @@ to `1`. This includes groups of any type. Its share is `weight / sum(sibling wei
 along the parent's split axis; weights need not sum to 100 and every sibling sum must be
 finite. Children of `tabbed` and `stacked` must omit `weight`, even when it would be `1`.
 The root may still have a valid weight, which has no effect. Tree order is depth-first
-launch order and, for splits, visual order. Do not flatten nested splits merely because
-their orientation matches their parent. The existing global `focus` semantics are unchanged.
-Selection of the first child in each tabbed/stacked group, with explicit global focus taking
-precedence, is planned for the loader stage and is not implemented yet.
+launch order and sibling order, including tab/stack header order. Do not flatten nested
+splits merely because their orientation matches their parent. Global `focus` selects the
+final window and its visible tab along its ancestry; it defaults to the first leaf. Other
+tabbed/stacked groups retain the selection left by construction.
+A separate pass selecting their first children is not implemented yet; there is no per-group
+selection setting.
 
 Window matching uses exact, case-sensitive Wayland `app_id` or Xwayland
 `window_properties.class` equality, never a title, substring, regex, or PID alone. Repeated
@@ -105,11 +106,10 @@ numbers. Explicit nulls never trigger optional defaults.
 
 ## Loading, sizing, and safety
 
-Layouts describe new applications in ordered horizontal and vertical tiles. There is no
+Layouts describe new applications in ordered split, tabbed, and stacked groups. There is no
 session restoration, existing-window reuse, daemon, ongoing enforcement, workspace/output
-assignment, or management of application lifetimes after launch. Tabbed and stacked groups
-are accepted by validation but cannot yet be loaded or captured. Floating and fullscreen
-arrangements are outside the layout format.
+assignment, or management of application lifetimes after launch. Capture supports split
+groups only. Floating and fullscreen arrangements are outside the layout format.
 
 The following safeguards apply to standalone and menu loading:
 
@@ -129,7 +129,8 @@ The following safeguards apply to standalone and menu loading:
    multiple matches, a floating/fullscreen match, or an unexpected window entering the
    target is fatal. Delayed identifiers may resolve within the window timeout; uncertain
    ownership is never guessed. An existing matching window cannot substitute for a new one.
-4. Preserve grouping, orientation, and order, including meaningful same-axis nested groups.
+4. Preserve group layouts, nesting, and order, including meaningful same-axis nested groups
+   and singleton tabbed/stacked groups.
    Recheck workspace, output, focus, ownership, and hierarchy before every launch or mutation;
    verify command replies and resulting structure. Accepted windows must retain their
    identity, selector, tiled state, and location. Closing one or changing its state stops
@@ -138,8 +139,15 @@ The following safeguards apply to standalone and menu loading:
    run. Never close, move, resize, or reuse preexisting windows, use broad app-ID/class
    criteria for mutations, or manipulate the global scratchpad. Construction uses neither
    window moves nor placeholder windows.
-6. Apply weights from outer splits inward, then focus the configured leaf (the first
-   depth-first leaf by default), verify it, and exit.
+6. Apply weights from outer splits inward, skipping sibling sizing at tabbed/stacked levels
+   while still sizing nested splits. Then focus the configured leaf (the first depth-first
+   leaf by default), verify it, and exit.
+
+Construction verifies intermediate wrappers as well as the completed hierarchy. Unexpected
+wrapping, flattening, or reparenting is fatal, even when the result looks similar. An empty
+workspace may initially report any of the four layouts. Sway rules or `workspace_layout`
+settings that introduce additional containers can still cause a safe hierarchy refusal;
+the loader does not remove unexpected wrappers.
 
 Any window move event, even elsewhere, stops the run because its workspace ancestry is
 unknown. Other uncertain structural activity between launches or during command verification

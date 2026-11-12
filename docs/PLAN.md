@@ -1,12 +1,17 @@
 # Release roadmap
 
-Split-layout functionality is implemented. Behavior is defined in the
+Loading supports all four native group layouts. Behavior is defined in the
 [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
-- **Native groups.** The version 1 schema accepts `splith`, `splitv`, `tabbed`, and `stacked`.
-  Implement guarded tabbed/stacked loading and default child selection, then capture support;
-  loading and capture currently refuse these structures.
+- **Native groups, Stage 3.** Add the final first-child selection pass for otherwise inactive
+  tabbed/stacked groups, preserving global focus precedence; assess any further sizing needs.
+  Guarded construction and minimal recursive split sizing are implemented. Manually verify
+  root and nested groups, singleton ancestry, sibling insertion, and empty workspaces with
+  initial tabbed/stacked layouts against the installed Sway version. Offline tree/event
+  fixtures verify reactions, not the compositor's actual construction behavior.
+- **Native groups, Stage 4.** Add tabbed/stacked capture support; capture currently refuses
+  these structures.
 
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release

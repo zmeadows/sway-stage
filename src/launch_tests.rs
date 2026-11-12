@@ -44,8 +44,10 @@ impl Fixture {
     fn run_finished(&self, config: &Config, mut steps: Vec<Step>) -> Result<(), String> {
         let tree = steps.last().unwrap().tree.clone();
         fn sizing(steps: &mut Vec<Step>, tree: &Value, node: &LayoutNode) {
-            if let NodeKind::Group { children, .. } = &node.kind {
-                steps.push(step(tree.clone()));
+            if let NodeKind::Group { layout, children } = &node.kind {
+                if matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV) {
+                    steps.push(step(tree.clone()));
+                }
                 for child in children {
                     sizing(steps, tree, &child.value);
                 }
@@ -1495,27 +1497,36 @@ fn four_window_reference_transcript_uses_three_root_children() {
     }
 }
 
+// These workspace-layout transitions use a workspace-focused command. Targeting the
+// leaf with layout would wrap the workspace's children in upstream Sway instead.
 #[test]
-fn initial_tabbed_workspace_is_oriented_without_an_extra_wrapper() {
-    let fixture = Fixture::new();
-    let config = layout_config(
-        &fixture,
-        &format!(
-            "{{group: splitv, children: [{}, {}]}}",
-            leaf(&fixture, 0),
-            leaf(&fixture, 1)
-        ),
-    );
-    let initial = arranged("tabbed", vec![], 10);
-    let a = arranged("tabbed", vec![window(20)], 20);
-    let b = arranged("splitv", vec![window(20)], 20);
-    let c = arranged("splitv", vec![window(20), window(21)], 21);
-    let mut steps = vec![step(initial.clone())];
-    launch_steps(&mut steps, &initial, &a);
-    operation(&mut steps, "[con_id=20] layout splitv", &a, &b);
-    operation(&mut steps, "[con_id=20] focus", &b, &b);
-    launch_steps(&mut steps, &b, &c);
-    finish(&fixture, &config, steps, 2);
+fn initial_tabbed_and_stacked_workspaces_change_layout_without_extra_wrappers() {
+    for initial_layout in ["tabbed", "stacked"] {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: splitv, children: [{}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1)
+            ),
+        );
+        let initial = arranged(initial_layout, vec![], 10);
+        let first = arranged(initial_layout, vec![window(20)], 20);
+        let oriented = arranged("splitv", vec![window(20)], 10);
+        let complete = arranged("splitv", vec![window(20), window(21)], 21);
+        let mut steps = vec![step(initial.clone())];
+        launch_steps(&mut steps, &initial, &first);
+        workspace_focus_steps(&mut steps, &first);
+        let mut workspace_focused = first.clone();
+        focus_only(&mut workspace_focused, 10);
+        operation(&mut steps, "layout splitv", &workspace_focused, &oriented);
+        final_focus_steps(&mut steps, &oriented, 20);
+        let mut insertion = oriented.clone();
+        focus_only(&mut insertion, 20);
+        launch_steps(&mut steps, &insertion, &complete);
+        finish(&fixture, &config, steps, 2);
+    }
 }
 
 #[test]
@@ -1703,7 +1714,7 @@ fn completed_session(
                     accepted.insert(actual.id, matcher);
                     Hierarchy::Window(actual.id)
                 }
-                NodeKind::Group { children, .. } => Hierarchy::Split {
+                NodeKind::Group { children, .. } => Hierarchy::Group {
                     id: Some(actual.id),
                     layout: actual.layout,
                     children: children
@@ -2191,39 +2202,42 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
 
 #[test]
 fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
-    for explicit in [false, true] {
-        let fixture = Fixture::new();
-        let mut config = layout_config(
-            &fixture,
-            &format!(
-                "{{group: splith, children: [{{group: splitv, children: [{}, {}]}}, {}]}}",
-                leaf(&fixture, 0),
-                leaf(&fixture, 1),
-                leaf(&fixture, 2)
-            ),
-        );
-        if explicit {
-            config.focus = Some("w1".into());
+    for (outer, inner) in [
+        ("splith", "splitv"),
+        ("tabbed", "stacked"),
+        ("stacked", "tabbed"),
+    ] {
+        for explicit in [false, true] {
+            let fixture = Fixture::new();
+            let mut config = layout_config(
+                &fixture,
+                &format!(
+                    "{{group: {outer}, children: [{{group: {inner}, children: [{}, {}]}}, {}]}}",
+                    leaf(&fixture, 0),
+                    leaf(&fixture, 1),
+                    leaf(&fixture, 2)
+                ),
+            );
+            if explicit {
+                config.focus = Some("w1".into());
+            }
+            let a = arranged(
+                outer,
+                vec![group(100, inner, vec![window(20), window(21)]), window(22)],
+                22,
+            );
+            let id = if explicit { 21 } else { 20 };
+            let mut steps = vec![step(a.clone())];
+            final_focus_steps(&mut steps, &a, id);
+            completed_session(&fixture, &config, steps, |session| {
+                let (logical, path) =
+                    find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
+                assert_eq!(logical, if explicit { "w1" } else { "w0" });
+                assert_eq!(path, [0, if explicit { 1 } else { 0 }]);
+                session.focus(&path)
+            })
+            .unwrap();
         }
-        let a = arranged(
-            "splith",
-            vec![
-                group(100, "splitv", vec![window(20), window(21)]),
-                window(22),
-            ],
-            22,
-        );
-        let id = if explicit { 21 } else { 20 };
-        let mut steps = vec![step(a.clone())];
-        final_focus_steps(&mut steps, &a, id);
-        completed_session(&fixture, &config, steps, |session| {
-            let (logical, path) =
-                find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
-            assert_eq!(logical, if explicit { "w1" } else { "w0" });
-            assert_eq!(path, [0, if explicit { 1 } else { 0 }]);
-            session.focus(&path)
-        })
-        .unwrap();
     }
 }
 
@@ -2273,32 +2287,548 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
     }
 }
 
+fn workspace_focus_steps(steps: &mut Vec<Step>, before: &Value) {
+    let child_id = before["nodes"][0]["nodes"][0]["nodes"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let mut child_focused = before.clone();
+    focus_only(&mut child_focused, child_id);
+    operation(
+        steps,
+        &format!("[con_id={child_id}] focus"),
+        before,
+        &child_focused,
+    );
+    let mut workspace_focused = before.clone();
+    focus_only(&mut workspace_focused, 10);
+    operation(
+        steps,
+        &format!("[con_id={child_id}] focus parent"),
+        &child_focused,
+        &workspace_focused,
+    );
+}
+
 #[test]
-fn unsupported_groups_refuse_before_connections_or_launches() {
-    let fixture = Fixture::new();
-    for group in ["tabbed", "stacked"] {
-        for nested in [false, true] {
-            let mut layout = format!("{{group: {group}, children: [{}]}}", leaf(&fixture, 0));
-            if nested {
-                for index in 1..8 {
-                    layout = format!(
-                        "{{group: splith, children: [{}, {layout}]}}",
-                        leaf(&fixture, index)
-                    );
-                }
-            }
-            let config = layout_config(&fixture, &layout);
-            let mut connect = || -> Result<UnixStream, String> {
-                panic!("unsupported groups must fail before any IPC connection");
-            };
-            let mut diagnostics = Diagnostics::start("unsupported group test");
-            let error = load_with(&config, None, &mut connect, &mut diagnostics).unwrap_err();
-            assert!(
-                error.contains(&format!("loading {group} groups is not implemented yet")),
-                "{error}"
+fn root_tabs_and_stacks_preserve_singletons_order_and_initial_workspace_layout() {
+    for (layout, command, initial_layout, count) in [
+        ("tabbed", "tabbed", "splith", 1),
+        ("stacked", "stacking", "splith", 1),
+        ("tabbed", "tabbed", "splitv", 3),
+        ("stacked", "stacking", "splith", 2),
+        ("tabbed", "tabbed", "tabbed", 2),
+        ("stacked", "stacking", "stacked", 1),
+    ] {
+        let fixture = Fixture::new();
+        let leaves = (0..count)
+            .map(|i| leaf(&fixture, i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = layout_config(
+            &fixture,
+            &format!("{{group: {layout}, children: [{leaves}]}}"),
+        );
+        let initial = arranged(initial_layout, vec![], 10);
+        let first = arranged(initial_layout, vec![window(20)], 20);
+        let mut steps = vec![step(initial.clone())];
+        launch_steps(&mut steps, &initial, &first);
+        workspace_focus_steps(&mut steps, &first);
+        let mut before = first.clone();
+        focus_only(&mut before, 10);
+        let mut current = arranged(layout, vec![window(20)], 10);
+        operation(&mut steps, &format!("layout {command}"), &before, &current);
+        for child_index in 1..count {
+            let previous_id = 19 + child_index as i64;
+            let mut insertion = current.clone();
+            focus_only(&mut insertion, previous_id);
+            operation(
+                &mut steps,
+                &format!("[con_id={previous_id}] focus"),
+                &current,
+                &insertion,
             );
-            assert!(error.contains("layout"), "{error}");
-            assert!(!fixture.path.join("launches").exists());
+            let next = arranged(
+                layout,
+                (0..=child_index).map(|i| window(20 + i as i64)).collect(),
+                20 + child_index as i64,
+            );
+            launch_steps(&mut steps, &insertion, &next);
+            current = next;
         }
+        finish(&fixture, &config, steps, count);
     }
+}
+
+#[test]
+fn nested_tabs_and_stacks_between_split_siblings_preserve_insertion_level() {
+    for (parent_layout, layout, command, count) in [
+        ("splith", "tabbed", "tabbed", 2),
+        ("splitv", "stacked", "stacking", 2),
+        ("splitv", "tabbed", "tabbed", 1),
+        ("splith", "stacked", "stacking", 1),
+    ] {
+        let fixture = Fixture::new();
+        let nested = (1..=count)
+            .map(|i| leaf(&fixture, i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: {parent_layout}, children: [{}, {{group: {layout}, children: [{nested}]}}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, count + 1)
+            ),
+        );
+        let first = arranged("splith", vec![window(20)], 20);
+        let oriented = arranged(parent_layout, vec![window(20)], 20);
+        let siblings = arranged(parent_layout, vec![window(20), window(21)], 21);
+        let staged = arranged(
+            parent_layout,
+            vec![window(20), group(100, "splith", vec![window(21)])],
+            21,
+        );
+        let mut current = arranged(
+            parent_layout,
+            vec![window(20), group(100, layout, vec![window(21)])],
+            21,
+        );
+        let mut steps = vec![step(tree())];
+        launch_steps(&mut steps, &tree(), &first);
+        operation(
+            &mut steps,
+            &format!("[con_id=20] {parent_layout}"),
+            &first,
+            &oriented,
+        );
+        operation(&mut steps, "[con_id=20] focus", &oriented, &oriented);
+        launch_steps(&mut steps, &oriented, &siblings);
+        operation(&mut steps, "[con_id=21] splith", &siblings, &staged);
+        operation(
+            &mut steps,
+            &format!("[con_id=21] layout {command}"),
+            &staged,
+            &current,
+        );
+        if count == 2 {
+            let next = arranged(
+                parent_layout,
+                vec![window(20), group(100, layout, vec![window(21), window(22)])],
+                22,
+            );
+            operation(&mut steps, "[con_id=21] focus", &current, &current);
+            launch_steps(&mut steps, &current, &next);
+            current = next;
+        }
+        let mut insertion = current.clone();
+        focus_only(&mut insertion, 100);
+        operation(&mut steps, "[con_id=100] focus", &current, &insertion);
+        let mut complete = insertion.clone();
+        complete["nodes"][0]["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(window(21 + count as i64));
+        focus_only(&mut complete, 21 + count as i64);
+        launch_steps(&mut steps, &insertion, &complete);
+        finish(&fixture, &config, steps, count + 2);
+    }
+}
+
+#[test]
+fn singleton_tab_stack_ancestry_preserves_first_split_group_and_later_sibling() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{group: tabbed, children: [{{group: stacked, children: [{{group: splitv, children: [{}, {}]}}]}}, {}]}}",
+            leaf(&fixture, 0),
+            leaf(&fixture, 1),
+            leaf(&fixture, 2)
+        ),
+    );
+    let first = arranged("splith", vec![window(20)], 20);
+    let vertical = arranged("splitv", vec![window(20)], 20);
+    let split_complete = arranged("splitv", vec![window(20), window(21)], 21);
+    let staged_stack = arranged(
+        "splith",
+        vec![group(100, "splitv", vec![window(20), window(21)])],
+        100,
+    );
+    let stack_complete = arranged(
+        "stacked",
+        vec![group(100, "splitv", vec![window(20), window(21)])],
+        10,
+    );
+    let staged_tabs = arranged(
+        "splith",
+        vec![group(
+            101,
+            "stacked",
+            vec![group(100, "splitv", vec![window(20), window(21)])],
+        )],
+        101,
+    );
+    let tabs_complete = arranged(
+        "tabbed",
+        vec![group(
+            101,
+            "stacked",
+            vec![group(100, "splitv", vec![window(20), window(21)])],
+        )],
+        10,
+    );
+    let insertion = arranged(
+        "tabbed",
+        vec![group(
+            101,
+            "stacked",
+            vec![group(100, "splitv", vec![window(20), window(21)])],
+        )],
+        101,
+    );
+    let complete = arranged(
+        "tabbed",
+        vec![
+            group(
+                101,
+                "stacked",
+                vec![group(100, "splitv", vec![window(20), window(21)])],
+            ),
+            window(22),
+        ],
+        22,
+    );
+    let mut steps = vec![step(tree())];
+    launch_steps(&mut steps, &tree(), &first);
+    operation(&mut steps, "[con_id=20] splitv", &first, &vertical);
+    operation(&mut steps, "[con_id=20] focus", &vertical, &vertical);
+    launch_steps(&mut steps, &vertical, &split_complete);
+    workspace_focus_steps(&mut steps, &split_complete);
+    let mut before = split_complete.clone();
+    focus_only(&mut before, 10);
+    operation(&mut steps, "splith", &before, &staged_stack);
+    workspace_focus_steps(&mut steps, &staged_stack);
+    before = staged_stack.clone();
+    focus_only(&mut before, 10);
+    operation(&mut steps, "layout stacking", &before, &stack_complete);
+    workspace_focus_steps(&mut steps, &stack_complete);
+    operation(&mut steps, "splith", &stack_complete, &staged_tabs);
+    workspace_focus_steps(&mut steps, &staged_tabs);
+    before = staged_tabs.clone();
+    focus_only(&mut before, 10);
+    operation(&mut steps, "layout tabbed", &before, &tabs_complete);
+    operation(&mut steps, "[con_id=101] focus", &tabs_complete, &insertion);
+    launch_steps(&mut steps, &insertion, &complete);
+    finish(&fixture, &config, steps, 3);
+}
+
+#[test]
+fn split_inside_stack_after_a_window_uses_a_new_container() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{group: stacked, children: [{}, {{group: splith, children: [{}, {}]}}]}}",
+            leaf(&fixture, 0),
+            leaf(&fixture, 1),
+            leaf(&fixture, 2)
+        ),
+    );
+    let first = arranged("splith", vec![window(20)], 20);
+    let stack = arranged("stacked", vec![window(20)], 10);
+    let siblings = arranged("stacked", vec![window(20), window(21)], 21);
+    let nested = arranged(
+        "stacked",
+        vec![window(20), group(100, "splith", vec![window(21)])],
+        21,
+    );
+    let complete = arranged(
+        "stacked",
+        vec![
+            window(20),
+            group(100, "splith", vec![window(21), window(22)]),
+        ],
+        22,
+    );
+    let mut steps = vec![step(tree())];
+    launch_steps(&mut steps, &tree(), &first);
+    workspace_focus_steps(&mut steps, &first);
+    let mut before = first.clone();
+    focus_only(&mut before, 10);
+    operation(&mut steps, "layout stacking", &before, &stack);
+    let mut insertion = stack.clone();
+    focus_only(&mut insertion, 20);
+    operation(&mut steps, "[con_id=20] focus", &stack, &insertion);
+    launch_steps(&mut steps, &insertion, &siblings);
+    operation(&mut steps, "[con_id=21] splith", &siblings, &nested);
+    operation(&mut steps, "[con_id=21] focus", &nested, &nested);
+    launch_steps(&mut steps, &nested, &complete);
+    finish(&fixture, &config, steps, 3);
+}
+
+#[test]
+fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_launch() {
+    for scenario in 0..9 {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: splith, children: [{}, {{group: tabbed, children: [{}, {}]}}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1),
+                leaf(&fixture, 2)
+            ),
+        );
+        let first = arranged("splith", vec![window(20)], 20);
+        let siblings = arranged("splith", vec![window(20), window(21)], 21);
+        let staged = arranged(
+            "splith",
+            vec![window(20), group(100, "splith", vec![window(21)])],
+            21,
+        );
+        let converted = arranged(
+            "splith",
+            vec![window(20), group(100, "tabbed", vec![window(21)])],
+            21,
+        );
+        let mut steps = vec![step(tree())];
+        launch_steps(&mut steps, &tree(), &first);
+        operation(&mut steps, "[con_id=20] splith", &first, &first);
+        operation(&mut steps, "[con_id=20] focus", &first, &first);
+        launch_steps(&mut steps, &first, &siblings);
+        operation(&mut steps, "[con_id=21] splith", &siblings, &staged);
+        let mut before = step(staged.clone());
+        let mut command = command_step("[con_id=21] layout tabbed");
+        let mut after = step(converted.clone());
+        let expected = match scenario {
+            0 => {
+                after.tree = siblings; // Unexpected flattening of the new group.
+                "unexpected hierarchy"
+            }
+            1 => {
+                after.tree = arranged(
+                    "tabbed",
+                    vec![window(20), group(100, "splith", vec![window(21)])],
+                    21,
+                );
+                "unexpected hierarchy"
+            }
+            2 => {
+                after.tree = arranged(
+                    "splith",
+                    vec![group(100, "tabbed", vec![window(20), window(21)])],
+                    21,
+                );
+                "unexpected hierarchy"
+            }
+            3 => {
+                after.tree = arranged(
+                    "splith",
+                    vec![group(100, "tabbed", vec![window(21)]), window(20)],
+                    21,
+                );
+                "unexpected hierarchy"
+            }
+            4 => {
+                after.tree = arranged(
+                    "splith",
+                    vec![window(20), group(101, "tabbed", vec![window(21)])],
+                    21,
+                );
+                "unexpected hierarchy" // Bound structural IDs cannot be replaced.
+            }
+            5 => {
+                before.events.push((
+                    WINDOW,
+                    json!({"change": "move", "container": group(100, "splith", vec![window(21)])}),
+                ));
+                "uncertain"
+            }
+            6 => {
+                command.events.push((WORKSPACE, focus(11, 10)));
+                command.events.push((WORKSPACE, focus(10, 11)));
+                "focus changed"
+            }
+            7 => {
+                before
+                    .events
+                    .push((WINDOW, json!({"change": "new", "container": window(99)})));
+                "ownership is uncertain"
+            }
+            _ => {
+                command.command.as_mut().unwrap().1 =
+                    json!([{"success": false, "error": "fixture rejection"}]);
+                "fixture rejection"
+            }
+        };
+        steps.extend([before, command, after]);
+        let error = fixture.run(&config, steps).unwrap_err();
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        assert!(!log.contains("launch leaf=\\\"w2\\\""), "{log}");
+    }
+}
+
+#[test]
+fn workspace_tab_layout_requires_workspace_focus_at_the_command_fence() {
+    for wrong_focus in [true, false] {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: tabbed, children: [{}, {}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1)
+            ),
+        );
+        let first = arranged("splith", vec![window(20)], 20);
+        let mut steps = vec![step(tree())];
+        launch_steps(&mut steps, &tree(), &first);
+        workspace_focus_steps(&mut steps, &first);
+        let mut before = first;
+        focus_only(&mut before, if wrong_focus { 20 } else { 10 });
+        let mut fence = step(before);
+        if !wrong_focus {
+            fence.events.push((WORKSPACE, workspace_move(10)));
+        }
+        steps.push(fence);
+        let error = fixture.run(&config, steps).unwrap_err();
+        assert!(
+            error.contains(if wrong_focus {
+                "requires focused container id=10"
+            } else {
+                "moved to another output"
+            }),
+            "{error}"
+        );
+        assert_eq!(fixture.launches(), 1);
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        assert!(!log.contains("launch leaf=\\\"w1\\\""), "{log}");
+    }
+}
+
+#[test]
+fn sizing_reaches_weighted_splits_through_singleton_tabs_and_stacks() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{group: tabbed, children: [{{group: stacked, children: [{{group: splitv, children: [{}, {}]}}]}}]}}",
+            leaf(&fixture, 0).replace("{id:", "{weight: 3, id:"),
+            leaf(&fixture, 1)
+        ),
+    );
+    let mut before = arranged(
+        "tabbed",
+        vec![group(
+            100,
+            "stacked",
+            vec![group(101, "splitv", vec![window(20), window(21)])],
+        )],
+        21,
+    );
+    set_dimension(&mut before, 20, "height", 500);
+    set_dimension(&mut before, 21, "height", 500);
+    let mut after = before.clone();
+    set_dimension(&mut after, 20, "height", 750);
+    set_dimension(&mut after, 21, "height", 250);
+    let mut steps = vec![step(before.clone()), step(before.clone())];
+    operation(
+        &mut steps,
+        "[con_id=20] resize set height 750 px",
+        &before,
+        &after,
+    );
+    completed_session(&fixture, &config, steps, |session| {
+        let mut warnings = Vec::new();
+        session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn nested_singleton_groups_after_a_completed_tab_group_keep_every_wrapper() {
+    let fixture = Fixture::new();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{group: splith, children: [{{group: tabbed, children: [{}]}}, {{group: tabbed, children: [{{group: stacked, children: [{}]}}]}}]}}",
+            leaf(&fixture, 0),
+            leaf(&fixture, 1)
+        ),
+    );
+    let first = arranged("splith", vec![window(20)], 20);
+    let first_tab = arranged("tabbed", vec![window(20)], 10);
+    let wrapped_first = arranged("splith", vec![group(100, "tabbed", vec![window(20)])], 100);
+    let siblings = arranged(
+        "splith",
+        vec![group(100, "tabbed", vec![window(20)]), window(21)],
+        21,
+    );
+    let staged_stack = arranged(
+        "splith",
+        vec![
+            group(100, "tabbed", vec![window(20)]),
+            group(101, "splith", vec![window(21)]),
+        ],
+        21,
+    );
+    let stack = arranged(
+        "splith",
+        vec![
+            group(100, "tabbed", vec![window(20)]),
+            group(101, "stacked", vec![window(21)]),
+        ],
+        21,
+    );
+    let staged_tab = arranged(
+        "splith",
+        vec![
+            group(100, "tabbed", vec![window(20)]),
+            group(102, "splith", vec![group(101, "stacked", vec![window(21)])]),
+        ],
+        21,
+    );
+    let complete = arranged(
+        "splith",
+        vec![
+            group(100, "tabbed", vec![window(20)]),
+            group(102, "tabbed", vec![group(101, "stacked", vec![window(21)])]),
+        ],
+        21,
+    );
+    let mut steps = vec![step(tree())];
+    launch_steps(&mut steps, &tree(), &first);
+    workspace_focus_steps(&mut steps, &first);
+    let mut before = first.clone();
+    focus_only(&mut before, 10);
+    operation(&mut steps, "layout tabbed", &before, &first_tab);
+    workspace_focus_steps(&mut steps, &first_tab);
+    operation(&mut steps, "splith", &first_tab, &wrapped_first);
+    operation(
+        &mut steps,
+        "[con_id=100] focus",
+        &wrapped_first,
+        &wrapped_first,
+    );
+    launch_steps(&mut steps, &wrapped_first, &siblings);
+    operation(&mut steps, "[con_id=21] splith", &siblings, &staged_stack);
+    operation(
+        &mut steps,
+        "[con_id=21] layout stacking",
+        &staged_stack,
+        &stack,
+    );
+    operation(&mut steps, "[con_id=101] splith", &stack, &staged_tab);
+    // The criteria select the structural child, not its leaf. Selecting window 21
+    // would hit singleton parent/grandparent flattening and destroy group 101.
+    operation(
+        &mut steps,
+        "[con_id=101] layout tabbed",
+        &staged_tab,
+        &complete,
+    );
+    finish(&fixture, &config, steps, 2);
 }
