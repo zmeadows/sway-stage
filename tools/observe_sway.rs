@@ -39,8 +39,8 @@ fn observe() -> Result<(), String> {
             print_event(event);
         }
 
-        let poll = deadline.min(Instant::now() + Duration::from_millis(250));
-        while let Some(event) = observer.next_until(poll)? {
+        let event_poll_deadline = deadline.min(Instant::now() + Duration::from_millis(250));
+        while let Some(event) = observer.next_until(event_poll_deadline)? {
             print_event(event);
         }
         if Instant::now() >= deadline {

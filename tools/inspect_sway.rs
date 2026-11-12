@@ -28,8 +28,8 @@ fn inspect() -> Result<(), String> {
     let workspaces = connection
         .get_workspaces()
         .map_err(|error| format!("get workspaces: {error}"))?;
-    let mut focused = workspaces.iter().filter(|workspace| workspace.focused);
-    let focused = match (focused.next(), focused.next()) {
+    let mut focused_workspace = workspaces.iter().filter(|workspace| workspace.focused);
+    let focused_workspace = match (focused_workspace.next(), focused_workspace.next()) {
         (Some(workspace), None) => workspace,
         (None, _) => return Err("identify workspace: Sway reported no focused workspace".into()),
         (Some(_), Some(_)) => {
@@ -41,12 +41,14 @@ fn inspect() -> Result<(), String> {
         .get_tree()
         .map_err(|error| format!("get container tree: {error}"))?;
     let workspace = tree
-        .find_as_ref(|node| node.node_type == NodeType::Workspace && node.id == focused.id)
+        .find_as_ref(|node| {
+            node.node_type == NodeType::Workspace && node.id == focused_workspace.id
+        })
         .ok_or_else(|| {
             format!(
                 "locate workspace: focused workspace id={} is absent from the tree; \
                  it may have changed between reads; rerun the example",
-                focused.id
+                focused_workspace.id
             )
         })?;
 
@@ -56,18 +58,18 @@ fn inspect() -> Result<(), String> {
     }
 
     // Empty containers still count as occupancy, even when they contain no windows.
-    let occupancy = if workspace.nodes.is_empty() && workspace.floating_nodes.is_empty() {
+    let workspace_occupancy = if workspace.nodes.is_empty() && workspace.floating_nodes.is_empty() {
         "empty"
     } else {
         "occupied"
     };
-    let name = workspace.name.as_deref().unwrap_or(&focused.name);
+    let workspace_name = workspace.name.as_deref().unwrap_or(&focused_workspace.name);
     println!(
-        "Workspace {name:?} id={} layout={:?} orientation={:?}",
+        "Workspace {workspace_name:?} id={} layout={:?} orientation={:?}",
         workspace.id, workspace.layout, workspace.orientation
     );
     println!(
-        "Occupancy: {occupancy} ({} tiled, {} floating direct children)",
+        "Occupancy: {workspace_occupancy} ({} tiled, {} floating direct children)",
         workspace.nodes.len(),
         workspace.floating_nodes.len()
     );
