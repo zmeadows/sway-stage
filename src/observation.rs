@@ -17,8 +17,8 @@ use swayipc::{
 };
 
 // Overflow is fatal rather than silently dropping events or allowing unbounded retention.
-const EVENT_CAPACITY: usize = 256;
-static NEXT_FENCE: AtomicU64 = AtomicU64::new(0);
+const EVENT_QUEUE_CAPACITY: usize = 256;
+static NEXT_FENCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Sway's own IPC socket. Never use `Connection::new()`: it prefers `I3SOCK` and can spawn
 /// socket-discovery processes, so it could reach another compositor or launch a process.
@@ -40,7 +40,7 @@ enum Message {
 }
 
 pub struct Snapshot {
-    pub target: i64,
+    pub target_workspace_id: i64,
     pub tree: Node,
     /// Ordered history through the tick sent after the queries; not an atomic tree/event view.
     pub events: Vec<Event>,
@@ -54,25 +54,26 @@ pub struct Observer {
     /// A terminal failure, set by the reader thread or the observer; never cleared.
     failure: Arc<Mutex<Option<String>>>,
     /// The focused workspace frozen by the first snapshot.
-    target: Option<i64>,
+    target_workspace_id: Option<i64>,
     /// Containing output's container ID, frozen with the target workspace.
-    target_output: Option<i64>,
+    target_output_id: Option<i64>,
 }
 
 impl Observer {
     /// Returns only after Sway acknowledges all subscriptions. Connections are supplied
     /// explicitly so neither socket discovery nor a live compositor is needed in tests.
     pub fn subscribe(socket: UnixStream, deadline: Instant) -> Result<Self, String> {
-        let control = socket
+        let shutdown_socket = socket
             .try_clone()
             .map_err(|error| format!("clone event socket: {error}"))?;
+
         // Never time out/retry read_exact: swayipc discards partial-frame progress.
         socket
             .set_read_timeout(None)
             .and_then(|()| socket.set_write_timeout(None))
             .map_err(|error| format!("configure event socket: {error}"))?;
 
-        let (sender, messages) = mpsc::sync_channel(EVENT_CAPACITY);
+        let (sender, messages) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
         let reader_failure = Arc::clone(&failure);
         let reader = thread::Builder::new()
@@ -85,6 +86,7 @@ impl Observer {
                     sender
                         .try_send(Message::Subscribed)
                         .map_err(|_| "event history unavailable".to_owned())?;
+
                     loop {
                         let event = event_stream
                             .next()
@@ -96,6 +98,7 @@ impl Observer {
                         })?;
                     }
                 };
+
                 if let Err(error) = read_events()
                     && let Ok(mut failure) = reader_failure.lock()
                     && failure.is_none()
@@ -106,13 +109,14 @@ impl Observer {
             .map_err(|error| format!("start event reader: {error}"))?;
 
         let mut observer = Self {
-            event_socket: control,
+            event_socket: shutdown_socket,
             reader: Some(reader),
             messages,
             failure,
-            target: None,
-            target_output: None,
+            target_workspace_id: None,
+            target_output_id: None,
         };
+
         match observer.receive(deadline)? {
             Some(Message::Subscribed) => Ok(observer),
             _ => {
@@ -121,7 +125,7 @@ impl Observer {
         }
     }
 
-    fn healthy(&self) -> Result<(), String> {
+    fn check_health(&self) -> Result<(), String> {
         let failure = self
             .failure
             .lock()
@@ -129,6 +133,7 @@ impl Observer {
         if let Some(error) = failure.as_ref() {
             return Err(error.clone());
         }
+
         if self
             .reader
             .as_ref()
@@ -136,6 +141,7 @@ impl Observer {
         {
             return Err("event reader stopped; history cannot be trusted".into());
         }
+
         Ok(())
     }
 
@@ -143,19 +149,22 @@ impl Observer {
         if let Ok(mut failure) = self.failure.lock() {
             *failure = Some(error.clone());
         }
+
         let _ = self.event_socket.shutdown(Shutdown::Both);
         Err(error)
     }
 
     fn receive(&mut self, deadline: Instant) -> Result<Option<Message>, String> {
-        self.healthy()?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        self.check_health()?;
+        let remaining_time = deadline.saturating_duration_since(Instant::now());
+        if remaining_time.is_zero() {
             return Ok(None);
         }
-        let result = self.messages.recv_timeout(remaining);
-        self.healthy()?;
-        match result {
+
+        let received_message = self.messages.recv_timeout(remaining_time);
+        self.check_health()?;
+
+        match received_message {
             Ok(message) => Ok(Some(message)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -167,19 +176,21 @@ impl Observer {
     /// Idle expiry is not an IPC error and does not interrupt the reader's frame.
     /// Periodically query fresh trees too: not every identity/property update emits an event.
     pub fn next_until(&mut self, deadline: Instant) -> Result<Option<Event>, String> {
-        if self.target.is_none() {
+        if self.target_workspace_id.is_none() {
             return self.fail("capture an initial snapshot before consuming events".into());
         }
+
         match self.receive(deadline)? {
             Some(Message::Event(event)) => {
                 if let Event::Workspace(workspace) = &event {
                     if workspace.change == WorkspaceChange::Reload {
                         return self.fail("workspace reload: revalidation required".into());
                     }
-                    let Some(current) = workspace.current.as_ref() else {
+
+                    let Some(current_workspace) = workspace.current.as_ref() else {
                         return self.fail("workspace event has no current workspace".into());
                     };
-                    if current.node_type != NodeType::Workspace
+                    if current_workspace.node_type != NodeType::Workspace
                         || workspace
                             .old
                             .as_ref()
@@ -189,22 +200,30 @@ impl Observer {
                     }
 
                     if workspace.change == WorkspaceChange::Focus
-                        && let Some(target) = self.target
-                        && (current.id != target
-                            || workspace.old.as_ref().is_some_and(|old| old.id != target))
+                        && let Some(target_workspace_id) = self.target_workspace_id
+                        && (current_workspace.id != target_workspace_id
+                            || workspace
+                                .old
+                                .as_ref()
+                                .is_some_and(|old| old.id != target_workspace_id))
                     {
-                        return self
-                            .fail(format!("workspace focus changed from target id={target}"));
+                        return self.fail(format!(
+                            "workspace focus changed from target id={target_workspace_id}"
+                        ));
                     }
-                    if workspace.change == WorkspaceChange::Empty && Some(current.id) == self.target
+
+                    if workspace.change == WorkspaceChange::Empty
+                        && Some(current_workspace.id) == self.target_workspace_id
                     {
                         return self.fail("target workspace was destroyed".into());
                     }
-                    if workspace.change == WorkspaceChange::Move && Some(current.id) == self.target
+
+                    if workspace.change == WorkspaceChange::Move
+                        && Some(current_workspace.id) == self.target_workspace_id
                     {
                         return self.fail(format!(
                             "target workspace id={} moved to another output",
-                            current.id
+                            current_workspace.id
                         ));
                     }
                 }
@@ -236,16 +255,17 @@ impl Observer {
         &mut self,
         socket: UnixStream,
         deadline: Instant,
-        expected_workspace: Option<i64>,
+        expected_workspace_id: Option<i64>,
     ) -> Result<Snapshot, String> {
-        self.healthy()?;
-        let control = socket
+        self.check_health()?;
+
+        let shutdown_socket = socket
             .try_clone()
             .map_err(|error| format!("clone query socket: {error}"))?;
         let fence_token = format!(
             "sway-stage:{}:{}",
             std::process::id(),
-            NEXT_FENCE.fetch_add(1, Ordering::Relaxed)
+            NEXT_FENCE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let query_fence_token = fence_token.clone();
 
@@ -261,6 +281,7 @@ impl Observer {
                     let tree = connection
                         .get_tree()
                         .map_err(|error| format!("get tree: {error}"))?;
+
                     // Sway queues this tick behind earlier events on the event socket.
                     // Unlike an empty channel, its receipt proves the reader caught up.
                     if !connection
@@ -278,10 +299,11 @@ impl Observer {
         let query_result =
             receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         // Also cancels a read_exact partway through a header/payload. Never reuse it.
-        let _ = control.shutdown(Shutdown::Both);
+        let _ = shutdown_socket.shutdown(Shutdown::Both);
         if query_thread.join().is_err() {
             return self.fail("snapshot reader panicked".into());
         }
+
         let (workspaces, tree) = match query_result {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => return self.fail(error),
@@ -289,10 +311,11 @@ impl Observer {
         };
 
         let mut focused_workspaces = workspaces.iter().filter(|workspace| workspace.focused);
-        let target = match (focused_workspaces.next(), focused_workspaces.next()) {
+        let target_workspace_id = match (focused_workspaces.next(), focused_workspaces.next()) {
             (Some(workspace), None) => workspace.id,
             _ => return self.fail("snapshot: expected exactly one focused workspace".into()),
         };
+
         let mut workspace_ids = HashSet::new();
         if workspaces
             .iter()
@@ -300,19 +323,23 @@ impl Observer {
         {
             return self.fail("snapshot: duplicate workspace identities".into());
         }
-        if let Some(previous) = self.target
-            && previous != target
-        {
-            return self.fail(format!("snapshot: focus left target id={previous}"));
-        }
-        if let Some(expected) = expected_workspace
-            && expected != target
+
+        if let Some(original_workspace_id) = self.target_workspace_id
+            && original_workspace_id != target_workspace_id
         {
             return self.fail(format!(
-                "snapshot: focused workspace id={target} differs from pre-menu workspace id={expected}; keep the original workspace focused"
+                "snapshot: focus left target id={original_workspace_id}"
             ));
         }
-        self.target = Some(target);
+
+        if let Some(expected_workspace_id) = expected_workspace_id
+            && expected_workspace_id != target_workspace_id
+        {
+            return self.fail(format!(
+                "snapshot: focused workspace id={target_workspace_id} differs from pre-menu workspace id={expected_workspace_id}; keep the original workspace focused"
+            ));
+        }
+        self.target_workspace_id = Some(target_workspace_id);
 
         let mut container_ids = HashSet::new();
         if tree.node_type != NodeType::Root
@@ -320,7 +347,8 @@ impl Observer {
         {
             return self.fail("snapshot: invalid root or duplicate container identities".into());
         }
-        let Some(workspace) = tree.find_as_ref(|node| node.id == target) else {
+
+        let Some(workspace) = tree.find_as_ref(|node| node.id == target_workspace_id) else {
             return self.fail("snapshot: target workspace missing from tree".into());
         };
         if workspace.node_type != NodeType::Workspace
@@ -332,19 +360,21 @@ impl Observer {
 
         let Some(output) = tree.nodes.iter().find(|container| {
             container.node_type == NodeType::Output
-                && container.find_as_ref(|node| node.id == target).is_some()
+                && container
+                    .find_as_ref(|node| node.id == target_workspace_id)
+                    .is_some()
         }) else {
             return self.fail("snapshot: target workspace has no containing output".into());
         };
-        if let Some(original_output) = self.target_output
-            && output.id != original_output
+        if let Some(original_output_id) = self.target_output_id
+            && output.id != original_output_id
         {
             return self.fail(format!(
-                "snapshot: target workspace id={target} changed output from id={original_output} to id={}",
+                "snapshot: target workspace id={target_workspace_id} changed output from id={original_output_id} to id={}",
                 output.id
             ));
         }
-        self.target_output = Some(output.id);
+        self.target_output_id = Some(output.id);
 
         let mut events = Vec::new();
         loop {
@@ -352,7 +382,7 @@ impl Observer {
                 Some(Event::Tick(tick)) if !tick.first && tick.payload == fence_token => break,
                 Some(Event::Tick(_)) => {}
                 Some(event) => {
-                    if events.len() == EVENT_CAPACITY {
+                    if events.len() == EVENT_QUEUE_CAPACITY {
                         return self.fail("snapshot event history limit exceeded".into());
                     }
                     events.push(event);
@@ -360,8 +390,9 @@ impl Observer {
                 None => return self.fail("snapshot: event fence deadline expired".into()),
             }
         }
+
         Ok(Snapshot {
-            target,
+            target_workspace_id,
             tree,
             events,
         })
@@ -383,7 +414,7 @@ impl Drop for Observer {
 /// alone never establishes ownership.
 pub struct LocatedWindow<'a> {
     pub node: &'a Node,
-    pub workspace: Option<i64>,
+    pub workspace_id: Option<i64>,
     pub floating: bool,
     pub fullscreen: bool,
     pub scratchpad: bool,
@@ -401,25 +432,27 @@ pub fn locate_windows(tree: &Node) -> Vec<LocatedWindow<'_>> {
 /// The flags carry placement inherited from `node`'s ancestors.
 fn collect_windows<'a>(
     node: &'a Node,
-    workspace: Option<i64>,
+    workspace_id: Option<i64>,
     floating: bool,
     fullscreen: bool,
     scratchpad: bool,
     windows: &mut Vec<LocatedWindow<'a>>,
 ) {
-    let workspace = if node.node_type == NodeType::Workspace {
+    let workspace_id = if node.node_type == NodeType::Workspace {
         Some(node.id)
     } else {
-        workspace
+        workspace_id
     };
     let floating = floating
         || node.node_type == NodeType::FloatingCon
         || matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn));
+
     // Sway sets fullscreen_mode=1 on every workspace for i3 compatibility.
     // Only container values describe fullscreen state that applies to descendants.
     let fullscreen = fullscreen
         || (matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
             && node.fullscreen_mode.is_some_and(|mode| mode != 0));
+
     let scratchpad = scratchpad
         || matches!(
             node.scratchpad_state,
@@ -435,17 +468,25 @@ fn collect_windows<'a>(
     {
         windows.push(LocatedWindow {
             node,
-            workspace,
+            workspace_id,
             floating,
             fullscreen,
             scratchpad,
         });
     }
+
     for child in &node.nodes {
-        collect_windows(child, workspace, floating, fullscreen, scratchpad, windows);
+        collect_windows(
+            child,
+            workspace_id,
+            floating,
+            fullscreen,
+            scratchpad,
+            windows,
+        );
     }
     for child in &node.floating_nodes {
-        collect_windows(child, workspace, true, fullscreen, scratchpad, windows);
+        collect_windows(child, workspace_id, true, fullscreen, scratchpad, windows);
     }
 }
 
@@ -476,6 +517,7 @@ pub fn sibling_dimensions(group: &Node) -> Result<Vec<f64>, String> {
             ));
         }
     };
+
     let dimensions: Vec<_> = group
         .nodes
         .iter()
@@ -492,6 +534,7 @@ pub fn sibling_dimensions(group: &Node) -> Result<Vec<f64>, String> {
             "nonpositive or missing sibling dimensions: {dimensions:?}"
         ));
     }
+
     Ok(dimensions)
 }
 

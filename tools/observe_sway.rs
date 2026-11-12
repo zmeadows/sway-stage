@@ -31,7 +31,7 @@ fn observe() -> Result<(), String> {
         let snapshot = observer.snapshot(connect()?, deadline)?;
         println!(
             "Workspace id={}: {} tree nodes, {} events through snapshot fence",
-            snapshot.target,
+            snapshot.target_workspace_id,
             snapshot.tree.iter().count(),
             snapshot.events.len()
         );

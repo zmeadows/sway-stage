@@ -1839,7 +1839,7 @@ fn completed_session(
         let initial = observer.snapshot(connect()?, deadline())?;
         let workspace = initial
             .tree
-            .find_as_ref(|n| n.id == initial.target)
+            .find_as_ref(|n| n.id == initial.target_workspace_id)
             .unwrap();
         fn owned<'a>(
             config: &'a LayoutNode,
@@ -1868,7 +1868,7 @@ fn completed_session(
             observer,
             connect,
             diagnostics,
-            target: initial.target,
+            target: initial.target_workspace_id,
             preexisting_ids: HashSet::new(),
             baseline_foreign_ids: HashSet::new(),
             accepted,

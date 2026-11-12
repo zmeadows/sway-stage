@@ -61,13 +61,13 @@ fn load_with(
         Instant::now() + IPC_TIMEOUT,
         expected_workspace,
     )?;
-    let target = initial.target;
+    let target = initial.target_workspace_id;
 
     diagnostics.stage(format!("prelaunch workspace={target}"));
     require_empty(&initial, diagnostics)?;
     let baseline_foreign_ids = locate_windows(&initial.tree)
         .iter()
-        .filter(|window| window.workspace.is_some() && window.workspace != Some(target))
+        .filter(|window| window.workspace_id.is_some() && window.workspace_id != Some(target))
         .map(|window| window.node.id)
         .collect();
     let mut preexisting_ids = initial.tree.iter().map(|node| node.id).collect();
@@ -1003,7 +1003,7 @@ fn validate_accepted_windows(
             .iter()
             .find(|window| window.node.id == *id)
             .ok_or_else(|| format!("accepted window id={id} disappeared"))?;
-        if located.workspace != Some(target)
+        if located.workspace_id != Some(target)
             || located.floating
             || located.fullscreen
             || located.scratchpad
@@ -1145,11 +1145,11 @@ fn reap_if_exited(
 fn require_empty(snapshot: &Snapshot, diagnostics: &mut Diagnostics) -> Result<(), String> {
     let workspace = snapshot
         .tree
-        .find_as_ref(|node| node.id == snapshot.target)
+        .find_as_ref(|node| node.id == snapshot.target_workspace_id)
         .ok_or("target workspace missing")?;
     diagnostics.record(&format!(
         "selected workspace id={}; initial occupancy: tiled={} floating={}",
-        snapshot.target,
+        snapshot.target_workspace_id,
         workspace.nodes.len(),
         workspace.floating_nodes.len()
     ));
@@ -1326,7 +1326,7 @@ impl NewWindowTracker<'_> {
                 continue;
             }
             if self.preexisting_ids.contains(&node.id) {
-                if located.workspace == Some(self.target) {
+                if located.workspace_id == Some(self.target) {
                     return Err(format!(
                         "preexisting window id={} entered target workspace",
                         node.id
@@ -1337,13 +1337,13 @@ impl NewWindowTracker<'_> {
 
             let location = format!(
                 "workspace={:?} scratchpad={} floating={}",
-                located.workspace, located.scratchpad, located.floating
+                located.workspace_id, located.scratchpad, located.floating
             );
             if located.floating || located.fullscreen {
                 self.disqualified.insert(node.id, "was floating/fullscreen");
             }
             self.observe_window(node, &location, diagnostics)?;
-            if located.workspace == Some(self.target)
+            if located.workspace_id == Some(self.target)
                 && (located.floating || located.fullscreen || located.scratchpad)
             {
                 return Err(format!(
@@ -1353,7 +1353,7 @@ impl NewWindowTracker<'_> {
             }
 
             if matches_window(self.matcher, node) {
-                if located.workspace != Some(self.target) || located.scratchpad {
+                if located.workspace_id != Some(self.target) || located.scratchpad {
                     return Err(format!(
                         "placement failure: matching window id={} on wrong workspace or scratchpad ({location}); expected workspace={}; check Sway assignment rules and activation context",
                         node.id, self.target
@@ -1366,7 +1366,7 @@ impl NewWindowTracker<'_> {
                     ));
                 }
                 candidate = Some(node.id);
-            } else if located.workspace == Some(self.target) {
+            } else if located.workspace_id == Some(self.target) {
                 if identity(self.matcher, node).is_some() {
                     return Err(format!(
                         "unexpected target-workspace window id={}: expected {:?}, observed {}; refusing adoption",

@@ -132,7 +132,7 @@ fn unrelated_workspace_move_and_output_reconfiguration_keep_target_valid() {
     workspaces[1]["output"] = json!("fixture");
     send(&mut events, WORKSPACE, workspace_move(11));
     let snapshot = snapshot(&mut observer, &mut events, workspaces, desktop).unwrap();
-    assert_eq!(snapshot.target, 10);
+    assert_eq!(snapshot.target_workspace_id, 10);
     assert_eq!(snapshot.events.len(), 1);
 }
 
@@ -266,7 +266,7 @@ fn failed_malformed_closed_and_stalled_subscriptions_fail() {
 #[test]
 fn overflow_invalidates_all_history() {
     let (mut observer, mut events) = initialized();
-    for _ in 0..=EVENT_CAPACITY {
+    for _ in 0..=EVENT_QUEUE_CAPACITY {
         send(
             &mut events,
             TICK,
@@ -429,7 +429,7 @@ fn located_windows_keep_workspace_floating_fullscreen_and_scratchpad_ancestry() 
         .map(|window| {
             (
                 window.node.id,
-                window.workspace,
+                window.workspace_id,
                 window.floating,
                 window.fullscreen,
                 window.scratchpad,

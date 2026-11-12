@@ -170,7 +170,7 @@ pub(crate) fn snapshot(
 pub(crate) fn initialized() -> (Observer, UnixStream) {
     let (mut observer, mut events) = subscribed();
     let snapshot = snapshot(&mut observer, &mut events, workspaces(), tree()).unwrap();
-    assert_eq!(snapshot.target, 10);
+    assert_eq!(snapshot.target_workspace_id, 10);
     assert_eq!(snapshot.tree.iter().count(), 3);
     assert!(snapshot.events.is_empty());
     (observer, events)
