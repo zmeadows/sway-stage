@@ -31,7 +31,12 @@ pub fn select_layout(
         prompt_input.push('\n');
     }
 
-    let Some(selection) = fuzzel("--prompt=Load layout: ", Some(&prompt_input), output_name)?
+    let Some(selection) = fuzzel(
+        "--prompt=Load layout: ",
+        Some(&prompt_input),
+        output_name,
+        None,
+    )?
     else {
         return Ok(None);
     };
@@ -54,7 +59,7 @@ pub fn select_directory(root: &Path, output_name: Option<&str>) -> Result<Option
         .map(|(name, _)| format!("{name}\n"))
         .collect::<String>();
 
-    let Some(selection) = fuzzel("--prompt=Launch in: ", Some(&input), output_name)? else {
+    let Some(selection) = fuzzel("--prompt=Launch in: ", Some(&input), output_name, None)? else {
         return Ok(None);
     };
 
@@ -115,20 +120,30 @@ pub fn capture_draft(
     let draft = snapshot
         .render(infer_commands)
         .map_err(|error| format!("capture: {error}"))?;
-    let Some(name) = fuzzel(
-        "--prompt-only=Capture layout as: ",
-        None,
-        snapshot.output_name(),
-    )?
-    else {
-        return Ok(());
-    };
+    let mut placeholder = None;
+    loop {
+        let Some(name) = fuzzel(
+            "--prompt-only=Capture layout as: ",
+            None,
+            snapshot.output_name(),
+            placeholder.as_deref(),
+        )?
+        else {
+            return Ok(());
+        };
 
-    let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
-    let path = save_draft(&layouts_directory.path, &name, &draft.yaml)?;
-    diagnostics::notify_draft_saved(&path, &draft.commands);
-
-    Ok(())
+        let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir.clone())?;
+        match save_draft(&layouts_directory.path, &name, &draft.yaml) {
+            Ok(path) => {
+                diagnostics::notify_draft_saved(&path, &draft.commands);
+                return Ok(());
+            }
+            Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {
+                placeholder = Some(name_error_placeholder(&name, &error));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 /// Returns one exact line, or cancellation. Fuzzel 1.11 introduced prompt-only and
@@ -137,6 +152,7 @@ fn fuzzel(
     prompt: &str,
     input: Option<&str>,
     output_name: Option<&str>,
+    placeholder: Option<&str>,
 ) -> Result<Option<String>, String> {
     let mut command = Command::new("fuzzel");
     command.args(["--dmenu", "--no-exit-on-keyboard-focus-loss"]);
@@ -145,6 +161,10 @@ fn fuzzel(
     }
     if let Some(output_name) = output_name {
         command.arg(format!("--output={output_name}"));
+    }
+
+    if let Some(placeholder) = placeholder {
+        command.arg("--placeholder").arg(placeholder);
     }
 
     let mut fuzzel_process = command
@@ -218,8 +238,65 @@ fn validate_draft_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn save_draft(layouts_directory: &Path, name: &str, draft_yaml: &str) -> Result<PathBuf, String> {
-    validate_draft_name(name)?;
+#[derive(Debug)]
+enum DraftSaveError {
+    InvalidName(String),
+    NameConflict(String),
+    Operational(String),
+}
+
+impl std::fmt::Display for DraftSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(message)
+            | Self::NameConflict(message)
+            | Self::Operational(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl From<String> for DraftSaveError {
+    fn from(message: String) -> Self {
+        Self::Operational(message)
+    }
+}
+
+fn name_error_placeholder(name: &str, error: &DraftSaveError) -> String {
+    // Bound display length and escape controls without changing the submitted name.
+    const MAX_DISPLAY_CHARACTERS: usize = 60;
+    let mut displayed_name = String::new();
+    for character in name.chars().take(MAX_DISPLAY_CHARACTERS) {
+        if character.is_control() {
+            displayed_name.extend(character.escape_default());
+        } else {
+            displayed_name.push(character);
+        }
+    }
+    if name.chars().count() > MAX_DISPLAY_CHARACTERS {
+        displayed_name.push('…');
+    }
+    if displayed_name.is_empty() {
+        displayed_name.push_str("(empty name)");
+    }
+
+    match error {
+        DraftSaveError::InvalidName(reason) => format!(
+            "{displayed_name} is invalid — {}",
+            reason.strip_prefix("draft name: ").unwrap_or(reason)
+        ),
+        DraftSaveError::NameConflict(_) => {
+            format!("{displayed_name} already exists — enter another name")
+        }
+        DraftSaveError::Operational(_) => unreachable!("operational errors are not retried"),
+    }
+}
+
+fn save_draft(
+    layouts_directory: &Path,
+    name: &str,
+    draft_yaml: &str,
+) -> Result<PathBuf, DraftSaveError> {
+    validate_draft_name(name).map_err(DraftSaveError::InvalidName)?;
 
     let destination_path = layouts_directory.join(format!("{name}.yaml"));
     let alternate_layout_path = layouts_directory.join(format!("{name}.yml"));
@@ -266,10 +343,16 @@ fn save_draft(layouts_directory: &Path, name: &str, draft_yaml: &str) -> Result<
         &alternate_layout_path,
         draft_yaml,
     ) {
-        return Err(format!(
+        let message = format!(
             "{error}; unsaved staging file retained at {}",
             partial_path.display()
-        ));
+        );
+        if matches!(error, DraftSaveError::NameConflict(_)) {
+            // A retry must still report the retained staging file for inspection.
+            let _ = writeln!(io::stderr().lock(), "sway-stage: {message}");
+            return Err(DraftSaveError::NameConflict(message));
+        }
+        return Err(DraftSaveError::Operational(message));
     }
 
     // Publication succeeded. Cleanup is secondary and never removes the saved draft.
@@ -292,7 +375,7 @@ fn publish_draft(
     destination_path: &Path,
     alternate_layout_path: &Path,
     draft_yaml: &str,
-) -> Result<(), String> {
+) -> Result<(), DraftSaveError> {
     partial_file
         .write_all(draft_yaml.as_bytes())
         .and_then(|()| partial_file.sync_all())
@@ -300,21 +383,29 @@ fn publish_draft(
 
     reject_existing_layout(alternate_layout_path)?;
     fs::hard_link(partial_path, destination_path).map_err(|error| {
-        format!(
+        let message = format!(
             "publish draft {} without overwriting: {error}",
             destination_path.display()
-        )
+        );
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            DraftSaveError::NameConflict(message)
+        } else {
+            DraftSaveError::Operational(message)
+        }
     })
 }
 
-fn reject_existing_layout(path: &Path) -> Result<(), String> {
+fn reject_existing_layout(path: &Path) -> Result<(), DraftSaveError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Err(format!(
+        Ok(_) => Err(DraftSaveError::NameConflict(format!(
             "layout already exists at {}; choose another name",
             path.display()
-        )),
+        ))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("inspect layout path {}: {error}", path.display())),
+        Err(error) => Err(DraftSaveError::Operational(format!(
+            "inspect layout path {}: {error}",
+            path.display()
+        ))),
     }
 }
 
@@ -385,6 +476,26 @@ mod tests {
     }
 
     #[test]
+    fn error_placeholders_bound_names_and_escape_control_characters() {
+        let name = "a".repeat(251);
+        let error = DraftSaveError::InvalidName(validate_draft_name(&name).unwrap_err());
+        let placeholder = name_error_placeholder(&name, &error);
+        assert_eq!(
+            placeholder,
+            format!(
+                "{}… is invalid — maximum length is 250 ASCII characters",
+                "a".repeat(60)
+            )
+        );
+
+        let name = "bad\tname\0";
+        let error = DraftSaveError::InvalidName(validate_draft_name(name).unwrap_err());
+        let placeholder = name_error_placeholder(name, &error);
+        assert!(placeholder.starts_with(r"bad\tname\u{0} is invalid"));
+        assert!(!placeholder.chars().any(char::is_control));
+    }
+
+    #[test]
     fn saves_are_complete_and_do_not_change_existing_directory_permissions() {
         let directory = Directory::new();
         fs::set_permissions(&directory.directory_path, fs::Permissions::from_mode(0o750)).unwrap();
@@ -411,6 +522,7 @@ mod tests {
             assert!(
                 save_draft(&directory.directory_path, "draft", "replacement")
                     .unwrap_err()
+                    .to_string()
                     .contains("already exists")
             );
             assert_eq!(fs::read_to_string(&existing).unwrap(), "original");
@@ -439,9 +551,32 @@ mod tests {
             .open(&partial)
             .unwrap();
         fs::write(&path, "concurrent draft").unwrap();
-        assert!(publish_draft(&mut file, &partial, &path, &alternate, "new draft").is_err());
+        assert!(matches!(
+            publish_draft(&mut file, &partial, &path, &alternate, "new draft"),
+            Err(DraftSaveError::NameConflict(_))
+        ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent draft");
         assert_eq!(fs::read_to_string(&partial).unwrap(), "new draft");
+    }
+
+    #[test]
+    fn unrelated_publication_errors_are_operational() {
+        let directory = Directory::new();
+        let partial = directory.directory_path.join("staging.partial");
+        let mut file = File::create(&partial).unwrap();
+        let destination = directory.directory_path.join("missing/draft.yaml");
+        let error = publish_draft(
+            &mut file,
+            &partial,
+            &destination,
+            &destination.with_extension("yml"),
+            "new draft",
+        )
+        .unwrap_err();
+        assert!(matches!(error, DraftSaveError::Operational(_)));
+        assert!(error.to_string().contains("publish draft"));
+        assert_eq!(fs::read_to_string(&partial).unwrap(), "new draft");
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -459,7 +594,8 @@ mod tests {
             "draft",
         )
         .unwrap_err();
-        assert!(error.contains("write draft"));
+        assert!(matches!(error, DraftSaveError::Operational(_)));
+        assert!(error.to_string().contains("write draft"));
         assert!(!path.exists());
         assert!(partial.exists());
     }

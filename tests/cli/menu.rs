@@ -10,13 +10,19 @@ prompt=''
 output=''
 keep_open=0
 no_sort=0
+placeholder_value=0
 for argument in "$@"; do
+    if test "$placeholder_value" = 1; then
+        placeholder_value=0
+        continue
+    fi
     case "$argument" in
         --prompt=*|--prompt-only=*) prompt="$argument" ;;
         --output=*) output="${argument#--output=}" ;;
         --dmenu) ;;
         --no-exit-on-keyboard-focus-loss) keep_open=1 ;;
         --no-sort) no_sort=1 ;;
+        --placeholder) placeholder_value=1 ;;
         *) exit 92 ;;
     esac
 done
@@ -28,8 +34,21 @@ case "$prompt" in
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
     : > "$MENU_DIRECTORY/name-opened"
-    printf '%b' "$NAME_OUTPUT"
-    exit "$NAME_STATUS"
+    attempt=1
+    if test -f "$MENU_DIRECTORY/name-attempt"; then
+        read -r attempt < "$MENU_DIRECTORY/name-attempt"
+        attempt=$((attempt + 1))
+    fi
+    printf '%s\n' "$attempt" > "$MENU_DIRECTORY/name-attempt"
+    if test "$attempt" = 1; then
+        printf '%b' "$NAME_OUTPUT"
+        exit "$NAME_STATUS"
+    fi
+    if test -f "$MENU_DIRECTORY/name-$attempt"; then
+        /bin/cat "$MENU_DIRECTORY/name-$attempt"
+        exit 0
+    fi
+    exit 2
     ;;
   '--prompt=Launch in: ')
     test "$no_sort" = 1 || exit 96
@@ -395,21 +414,43 @@ fn name_prompt_cancellation_discards_capture_without_creating_directories() {
 }
 
 #[test]
-fn invalid_draft_names_and_name_prompt_failures_do_not_save() {
-    for (name, status, expected) in [
-        ("\n".to_owned(), "0", "draft name"),
-        ("bad name\n".to_owned(), "0", "draft name"),
-        ("../escape\n".to_owned(), "0", "draft name"),
-        ("name.yaml\n".to_owned(), "0", "draft name"),
-        (" trimmed\n".to_owned(), "0", "draft name"),
-        ("_hidden\n".to_owned(), "0", "draft name"),
-        (format!("{}\n", "a".repeat(251)), "0", "maximum length"),
-        ("name\nextra\n".to_owned(), "0", "single line"),
-        ("".to_owned(), "1", "exit status: 1"),
+fn invalid_draft_names_retry_and_can_be_canceled_without_saving() {
+    for (name, expected) in [
+        ("".to_owned(), "(empty name) is invalid"),
+        ("bad name".to_owned(), "bad name is invalid"),
+        ("../escape".to_owned(), "../escape is invalid"),
+        ("name.yaml".to_owned(), "name.yaml is invalid"),
+        (" trimmed".to_owned(), " trimmed is invalid"),
+        ("_hidden".to_owned(), "_hidden is invalid"),
+        ("a".repeat(251), "maximum length is 250 ASCII characters"),
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
-        let mut menu_command = menu_command(&fixture, "", &name);
+        let mut menu_command = menu_command(&fixture, "", &format!("{name}\n"));
+        menu_command.arg("menu");
+        let output = run_capture(&fixture, &mut menu_command);
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
+        assert!(arguments.contains(expected), "{arguments}");
+        assert!(arguments.contains("--placeholder\n"), "{arguments}");
+        assert!(!arguments.contains("--mesg"));
+        assert!(!fixture.path.join(".config").exists());
+        assert!(!fixture.path.join("notification").exists());
+        assert_log_preserved(&fixture);
+    }
+}
+
+#[test]
+fn name_prompt_operational_failures_do_not_retry() {
+    for (name, status, expected) in [
+        ("name\nextra\n", "0", "single line"),
+        ("name\t\n", "0", "control characters"),
+        ("", "1", "exit status: 1"),
+    ] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        let mut menu_command = menu_command(&fixture, "", name);
         menu_command.env("NAME_STATUS", status).arg("menu");
         let output = run_capture(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -417,10 +458,51 @@ fn invalid_draft_names_and_name_prompt_failures_do_not_save() {
             String::from_utf8_lossy(&output.stderr).contains(expected),
             "{output:?}"
         );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("name-attempt")).unwrap(),
+            "1\n"
+        );
         assert!(!fixture.path.join(".config").exists());
-        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage menu failed"));
+        assert_log_preserved(&fixture);
     }
+}
+
+#[test]
+fn repeated_name_retries_save_the_original_snapshot() {
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    let layouts = fixture.path.join("layouts");
+    fs::create_dir(&layouts).unwrap();
+    fs::write(layouts.join("development.yml"), "original").unwrap();
+    fixture.file("name-2", "development\n");
+    fixture.file("name-3", "work.yaml\n");
+    fixture.file("name-4", "accepted\n");
+    let mut menu_command = menu_command(&fixture, "", "My Workspace\n");
+    menu_command.args(["--layouts-dir", "layouts", "menu"]);
+    // The fake compositor accepts exactly one GET_TREE and closes after the snapshot.
+    let output = run_capture(&fixture, &mut menu_command);
+    assert!(output.status.success(), "{output:?}");
+    let saved = fs::read_to_string(layouts.join("accepted.yaml")).unwrap();
+    assert!(saved.contains("app_id: editor"), "{saved}");
+    assert!(saved.contains("command: null"), "{saved}");
+    assert_eq!(
+        fs::read_to_string(layouts.join("development.yml")).unwrap(),
+        "original"
+    );
+    let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
+    assert_eq!(
+        arguments
+            .matches("--prompt-only=Capture layout as: ")
+            .count(),
+        4
+    );
+    assert_eq!(arguments.matches("--placeholder\n").count(), 3);
+    assert!(arguments.contains("--placeholder\nMy Workspace is invalid — use [A-Za-z0-9][A-Za-z0-9_-]* without spaces or an extension\n"));
+    assert!(arguments.contains("--placeholder\ndevelopment already exists — enter another name\n"));
+    assert!(arguments.contains("--placeholder\nwork.yaml is invalid — use [A-Za-z0-9][A-Za-z0-9_-]* without spaces or an extension\n"));
+    assert!(!arguments.contains("--mesg"));
+    assert_eq!(fs::read_dir(&layouts).unwrap().count(), 2);
+    assert_log_preserved(&fixture);
 }
 
 #[test]
@@ -539,10 +621,13 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
         let mut menu_command = menu_command(&fixture, "", "development\n");
         menu_command.arg("menu");
         let output = run_capture(&fixture, &mut menu_command);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-
         let stderr = String::from_utf8_lossy(&output.stderr);
         if obstacle == "dangling layouts link" {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("name-attempt")).unwrap(),
+                "1\n"
+            );
             assert!(stderr.contains("create layouts directory"), "{stderr}");
             assert!(
                 fs::symlink_metadata(&layouts)
@@ -552,16 +637,24 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
             );
             assert!(!layouts.parent().unwrap().join("absent").exists());
         } else {
-            assert!(stderr.contains("already exists"), "{stderr}");
+            assert!(output.status.success(), "{output:?}");
+            assert!(stderr.is_empty(), "{stderr}");
+            let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
+            assert!(arguments.contains("development already exists — enter another name"));
             assert_eq!(
                 fs::read_to_string(layouts.join(obstacle)).unwrap(),
                 "preserve me"
             );
             assert_eq!(fs::read_dir(&layouts).unwrap().count(), 1);
         }
-        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage menu failed"));
-        assert!(!notification.contains("command:"));
+        if obstacle == "dangling layouts link" {
+            let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+            assert!(notification.contains("sway-stage menu failed"));
+            assert!(!notification.contains("command:"));
+        } else {
+            assert!(!fixture.path.join("notification").exists());
+        }
+        assert_log_preserved(&fixture);
     }
 }
 

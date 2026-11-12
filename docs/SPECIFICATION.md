@@ -429,8 +429,12 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   Both prompts retain the original output and workspace baseline; directory selection
   never captures a replacement baseline or bypasses fresh emptiness, focus, output,
   and ownership checks. With `cwd_select` omitted or false, Load uses one prompt.
-- **Capture:** render only the pre-menu snapshot, then ask for a draft name in a single
-  prompt. Later workspace, window, output, or focus changes do not alter the draft.
+- **Capture:** render only the pre-menu snapshot, then ask for a draft name.
+  Invalid names and existing-name conflicts reopen the same prompt with an error placeholder
+  identifying the rejected input (abbreviated when long). Type another name or Escape to cancel;
+  input is never prepopulated. Retries reuse the original rendered draft without further Sway
+  queries or command inference. Operational save errors terminate instead of retrying.
+  Later workspace, window, output, or focus changes do not alter the draft.
   Unsupported capture state fails before the name prompt. `--infer-commands` runs after
   eligibility validation and before the prompt, using the saved PIDs; process arguments
   may have changed since the snapshot.
