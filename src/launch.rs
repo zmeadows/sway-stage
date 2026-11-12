@@ -164,30 +164,28 @@ impl ExpectedHierarchy {
             return Err(format!("invalid hierarchy state id={}", observed.id));
         }
 
-        match self {
-            Self::Window(id) if observed.id == *id && observed.nodes.is_empty() => Ok(()),
-            Self::Group {
-                id,
-                layout,
-                children,
-            } if id.is_none_or(|id| id == observed.id)
-                && observed.layout == *layout
-                && observed.nodes.len() == children.len()
-                && (observed.node_type == NodeType::Workspace
-                    || (observed.node_type == NodeType::Con
-                        && observed.fullscreen_mode == Some(0)
-                        && observed.app_id.is_none()
-                        && observed.window.is_none()
-                        && observed.shell.is_none())) =>
-            {
-                *id = Some(observed.id);
-                for (expected_child, observed_child) in children.iter_mut().zip(&observed.nodes) {
-                    expected_child.verify(observed_child)?;
-                }
-
-                Ok(())
+        let matches_expected_node = match &*self {
+            Self::Window(expected_window_id) => {
+                observed.id == *expected_window_id && observed.nodes.is_empty()
             }
-            _ => Err(format!(
+            Self::Group {
+                id: expected_group_id,
+                layout: expected_layout,
+                children: expected_children,
+            } => {
+                expected_group_id.is_none_or(|group_id| group_id == observed.id)
+                    && observed.layout == *expected_layout
+                    && observed.nodes.len() == expected_children.len()
+                    && (observed.node_type == NodeType::Workspace
+                        || (observed.node_type == NodeType::Con
+                            && observed.fullscreen_mode == Some(0)
+                            && observed.app_id.is_none()
+                            && observed.window.is_none()
+                            && observed.shell.is_none()))
+            }
+        };
+        if !matches_expected_node {
+            return Err(format!(
                 "unexpected hierarchy at id={} layout={:?} children={:?}",
                 observed.id,
                 observed.layout,
@@ -196,8 +194,17 @@ impl ExpectedHierarchy {
                     .iter()
                     .map(|child| child.id)
                     .collect::<Vec<_>>()
-            )),
+            ));
         }
+
+        if let Self::Group { id, children, .. } = self {
+            *id = Some(observed.id);
+            for (expected_child, observed_child) in children.iter_mut().zip(&observed.nodes) {
+                expected_child.verify(observed_child)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn id(&self) -> i64 {

@@ -155,11 +155,11 @@ pub(super) fn infer_host_command(
 
 fn read_environment(reader: impl Read) -> Option<Vec<u8>> {
     let mut environment_bytes = Vec::new();
-    if reader
+    reader
         .take(MAX_ENVIRON_BYTES as u64 + 1)
         .read_to_end(&mut environment_bytes)
-        .is_err()
-        || environment_bytes.len() > MAX_ENVIRON_BYTES
+        .ok()?;
+    if environment_bytes.len() > MAX_ENVIRON_BYTES
         || (!environment_bytes.is_empty() && environment_bytes.last() != Some(&0))
     {
         return None;
@@ -204,7 +204,9 @@ impl<'a> LauncherEnvironment<'a> {
                 _ => continue,
             };
 
-            if destination.replace(&entry[separator? + 1..]).is_some() {
+            let separator_index = separator?;
+            let field_value = &entry[separator_index + 1..];
+            if destination.replace(field_value).is_some() {
                 return None;
             }
         }
@@ -243,10 +245,14 @@ fn desktop_launcher(environment: &LauncherEnvironment<'_>, pid: i32) -> Launcher
         || desktop_file_path
             .extension()
             .is_none_or(|extension| extension != "desktop")
-        || !desktop_file_path
-            .metadata()
-            .is_ok_and(|metadata| metadata.is_file())
     {
+        return LauncherEvidence::Unresolved;
+    }
+
+    let path_is_regular_file = desktop_file_path
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file());
+    if !path_is_regular_file {
         return LauncherEvidence::Unresolved;
     }
 

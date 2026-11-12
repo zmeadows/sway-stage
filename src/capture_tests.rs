@@ -35,11 +35,11 @@ fn group(id: i64, layout: &str, width: i32, height: i32, children: Vec<Value>) -
 }
 
 /// A tree whose focused workspace (id 10) holds `children`, with only `focused_id` focused.
-fn workspace(layout: &str, children: Vec<Value>, focused_container_id: i64) -> Value {
-    fn focus_only(value: &mut Value, focused_container_id: i64) {
-        value["focused"] = json!(value["id"] == focused_container_id);
+fn workspace(layout: &str, children: Vec<Value>, focused_id: i64) -> Value {
+    fn focus_only(value: &mut Value, focused_id: i64) {
+        value["focused"] = json!(value["id"] == focused_id);
         for child in value["nodes"].as_array_mut().unwrap() {
-            focus_only(child, focused_container_id);
+            focus_only(child, focused_id);
         }
     }
     let mut tree = tree();
@@ -47,7 +47,7 @@ fn workspace(layout: &str, children: Vec<Value>, focused_container_id: i64) -> V
     workspace["name"] = json!("1");
     workspace["layout"] = json!(layout);
     workspace["nodes"] = json!(children);
-    focus_only(&mut tree, focused_container_id);
+    focus_only(&mut tree, focused_id);
     tree
 }
 
