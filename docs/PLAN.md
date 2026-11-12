@@ -4,9 +4,9 @@ Loading supports all four native group layouts. Behavior is defined in the
 [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
-- **Native groups, Stage 3.** Add the final first-child selection pass for otherwise inactive
-  tabbed/stacked groups, preserving global focus precedence; assess any further sizing needs.
-  Guarded construction and minimal recursive split sizing are implemented. Manually verify
+- **Native groups, manual verification.** Guarded construction, recursive split sizing,
+  and postorder first-child tab/stack selection with final global focus are implemented.
+  Manually verify inactive selection retention and explicit focus precedence, plus
   root and nested groups, singleton ancestry, sibling insertion, and empty workspaces with
   initial tabbed/stacked layouts against the installed Sway version. Offline tree/event
   fixtures verify reactions, not the compositor's actual construction behavior.

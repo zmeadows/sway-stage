@@ -74,10 +74,10 @@ finite. Children of `tabbed` and `stacked` must omit `weight`, even when it woul
 The root may still have a valid weight, which has no effect. Tree order is depth-first
 launch order and sibling order, including tab/stack header order. Do not flatten nested
 splits merely because their orientation matches their parent. Global `focus` selects the
-final window and its visible tab along its ancestry; it defaults to the first leaf. Other
-tabbed/stacked groups retain the selection left by construction.
-A separate pass selecting their first children is not implemented yet; there is no per-group
-selection setting.
+final window and its visible tab along its ancestry; it defaults to the first leaf. After
+sizing, every tabbed/stacked group selects its first child, including inactive and nested
+groups. Global focus is applied last and may override those selections along its ancestry.
+There is no per-group selection setting.
 
 Window matching uses exact, case-sensitive Wayland `app_id` or Xwayland
 `window_properties.class` equality, never a title, substring, regex, or PID alone. Repeated

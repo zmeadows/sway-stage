@@ -54,7 +54,25 @@ impl Fixture {
             }
         }
         sizing(&mut steps, &tree, &config.layout.value);
-        final_focus_steps(&mut steps, &tree, 20);
+        // Derive expected initialization commands from the observed fixture hierarchy.
+        fn selections(steps: &mut Vec<Step>, current: &mut Value, group: &Value) {
+            for child in group["nodes"].as_array().unwrap() {
+                selections(steps, current, child);
+            }
+            if matches!(group["layout"].as_str(), Some("tabbed" | "stacked")) {
+                let mut first_leaf = group;
+                while let Some(child) = first_leaf["nodes"].as_array().unwrap().first() {
+                    first_leaf = child;
+                }
+                let id = first_leaf["id"].as_i64().unwrap();
+                final_focus_steps(steps, current, id);
+                focus_only(current, id);
+            }
+        }
+        let workspace = &tree["nodes"][0]["nodes"][0];
+        let mut selected = tree.clone();
+        selections(&mut steps, &mut selected, workspace);
+        final_focus_steps(&mut steps, &selected, 20);
         self.run(config, steps)
     }
 
@@ -2831,4 +2849,189 @@ fn nested_singleton_groups_after_a_completed_tab_group_keep_every_wrapper() {
         &complete,
     );
     finish(&fixture, &config, steps, 2);
+}
+
+// A limited simulation for these fixtures: a leaf focus promotes only the direct
+// child on each ancestor's focus list. Unrelated groups retain their lists. This
+// supplies IPC trees; it does not verify an installed compositor's focus behavior.
+fn select_fixture_leaf(tree: &mut Value, id: i64) -> bool {
+    tree["focused"] = json!(tree["id"] == id);
+    let mut selected_child = None;
+    for child in tree["nodes"].as_array_mut().unwrap() {
+        if select_fixture_leaf(child, id) {
+            selected_child = child["id"].as_i64();
+        }
+    }
+    if let Some(child_id) = selected_child {
+        let mut history: Vec<_> = tree["focus"].as_array().cloned().unwrap_or_default();
+        history.retain(|entry| *entry != json!(child_id));
+        history.insert(0, json!(child_id));
+        tree["focus"] = json!(history);
+    }
+    selected_child.is_some() || tree["id"] == id
+}
+
+#[test]
+fn group_selection_is_postorder_and_global_focus_wins_only_along_its_ancestry() {
+    for (outer, inner) in [("tabbed", "stacked"), ("stacked", "tabbed")] {
+        for shape in ["independent", "nested", "singleton", "split"] {
+            for explicit in [false, true] {
+                let fixture = Fixture::new();
+                let left = if shape == "singleton" {
+                    vec![window(20)]
+                } else {
+                    vec![window(20), window(21)]
+                };
+                let right = vec![window(22), window(23)];
+                let root_layout = if shape == "nested" { outer } else { "splith" };
+                let child_layout = if shape == "split" { "splitv" } else { inner };
+                let left_leaves = if shape == "singleton" {
+                    leaf(&fixture, 0)
+                } else {
+                    format!("{}, {}", leaf(&fixture, 0), leaf(&fixture, 1))
+                };
+                let mut config = layout_config(
+                    &fixture,
+                    &format!(
+                        "{{group: {root_layout}, children: [{{group: {child_layout}, children: [{left_leaves}]}}, {{group: {child_layout}, children: [{}, {}]}}]}}",
+                        leaf(&fixture, 2),
+                        leaf(&fixture, 3)
+                    ),
+                );
+                if explicit {
+                    config.focus = Some("w3".into());
+                }
+                let mut current = arranged(
+                    root_layout,
+                    vec![
+                        group(100, child_layout, left),
+                        group(101, child_layout, right),
+                    ],
+                    23,
+                );
+                // Begin with non-first selections, including in the inactive left group.
+                for id in [20, 21, 22, 23] {
+                    if shape != "singleton" || id != 21 {
+                        select_fixture_leaf(&mut current, id);
+                    }
+                }
+                let mut steps = vec![step(current.clone())];
+                let mut expected_focus_ids = Vec::new();
+                if shape != "split" {
+                    expected_focus_ids.extend([20, 22]);
+                }
+                if shape == "nested" {
+                    expected_focus_ids.push(20);
+                }
+                expected_focus_ids.push(if explicit { 23 } else { 20 });
+                for id in expected_focus_ids {
+                    let mut after = current.clone();
+                    select_fixture_leaf(&mut after, id);
+                    operation(
+                        &mut steps,
+                        &format!("[con_id={id}] focus"),
+                        &current,
+                        &after,
+                    );
+                    current = after;
+                }
+                let workspace = &current["nodes"][0]["nodes"][0];
+                assert_eq!(
+                    workspace["nodes"][0]["focus"][0],
+                    if shape == "split" && explicit { 21 } else { 20 }
+                );
+                assert_eq!(
+                    workspace["nodes"][1]["focus"][0],
+                    if explicit || shape == "split" { 23 } else { 22 }
+                );
+                if shape == "nested" {
+                    assert_eq!(workspace["focus"][0], if explicit { 101 } else { 100 });
+                }
+                let final_id = if explicit { 23 } else { 20 };
+                assert!(
+                    nodes(&current)
+                        .iter()
+                        .any(|node| node["id"] == final_id && node["focused"] == true)
+                );
+                completed_session(&fixture, &config, steps, |session| {
+                    session.initialize_group_selection(&config.layout.value, &[])?;
+                    let (_, path) =
+                        find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[])
+                            .unwrap();
+                    session.focus(&path)
+                })
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn group_selection_failure_stops_before_later_groups_and_global_focus() {
+    for scenario in 0..6 {
+        let fixture = Fixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: tabbed, children: [{{group: stacked, children: [{}, {}]}}, {{group: tabbed, children: [{}]}}]}}",
+                leaf(&fixture, 0),
+                leaf(&fixture, 1),
+                leaf(&fixture, 2)
+            ),
+        );
+        let initial = arranged(
+            "tabbed",
+            vec![
+                group(100, "stacked", vec![window(20), window(21)]),
+                group(101, "tabbed", vec![window(22)]),
+            ],
+            22,
+        );
+        let mut before = step(initial.clone());
+        let mut command = command_step("[con_id=20] focus");
+        let mut after = initial.clone();
+        focus_only(&mut after, 20);
+        let mut after = step(after);
+        let expected = match scenario {
+            0 => {
+                command.command.as_mut().unwrap().1 =
+                    json!([{"success": false, "error": "selection rejected"}]);
+                "selection rejected"
+            }
+            1 => {
+                after.tree = initial.clone();
+                "was not observed"
+            }
+            2 => {
+                command.events = vec![(WORKSPACE, focus(11, 10)), (WORKSPACE, focus(10, 11))];
+                "focus changed"
+            }
+            3 => {
+                before.tree["nodes"][0]["nodes"][0]["nodes"][0]["layout"] = json!("tabbed");
+                "unexpected hierarchy"
+            }
+            4 => {
+                after.disconnect = true;
+                "get workspaces"
+            }
+            _ => {
+                before
+                    .events
+                    .push((WINDOW, json!({"change": "new", "container": window(99)})));
+                "ownership is uncertain"
+            }
+        };
+        // No later command is supplied: any attempted continuation fails the transcript.
+        let steps = if scenario == 0 {
+            vec![step(initial), before, command]
+        } else {
+            vec![step(initial), before, command, after]
+        };
+        let error = completed_session(&fixture, &config, steps, |session| {
+            session.initialize_group_selection(&config.layout.value, &[])?;
+            session.focus(&[0, 0])
+        })
+        .unwrap_err();
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
+    }
 }

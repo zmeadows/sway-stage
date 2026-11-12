@@ -101,6 +101,11 @@ fn load_with(
     let mut sizing_warnings = Vec::new();
     session.apply_sizing(&config.layout.value, &root_path, &mut sizing_warnings)?;
 
+    session
+        .diagnostics
+        .stage("initialize tabbed/stacked selections");
+    session.initialize_group_selection(&config.layout.value, &root_path)?;
+
     let (focus_leaf, focus_path) =
         find_focus_leaf(&config.layout.value, config.focus.as_deref(), &root_path)
             .ok_or("validated final focus window missing from layout")?;
@@ -356,6 +361,31 @@ impl<'a> Construction<'a> {
             None,
             self.expected_hierarchy.clone(),
         )?;
+        Ok(())
+    }
+
+    fn initialize_group_selection(
+        &mut self,
+        layout_node: &LayoutNode,
+        path: &[usize],
+    ) -> Result<(), String> {
+        let NodeKind::Group { layout, children } = &layout_node.kind else {
+            return Ok(());
+        };
+        for (child_index, child) in children.iter().enumerate() {
+            let mut child_path = path.to_vec();
+            child_path.push(child_index);
+            self.initialize_group_selection(&child.value, &child_path)?;
+        }
+
+        // Focusing a descendant also selects its ancestors. Restore this group's first
+        // child after visiting descendants in later children; inactive groups keep their
+        // own child selections when focus subsequently leaves their subtree.
+        if matches!(layout, GroupLayout::Tabbed | GroupLayout::Stacked) {
+            let (_, first_leaf_path) = find_focus_leaf(layout_node, None, path)
+                .ok_or("validated group has no first leaf")?;
+            self.focus(&first_leaf_path)?;
+        }
         Ok(())
     }
 
