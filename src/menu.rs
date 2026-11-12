@@ -53,7 +53,7 @@ pub fn select(
         prompt_input.push('\n');
     }
 
-    let Some(selection) = fuzzel("--prompt=Layout: ", Some(&prompt_input), output_name)? else {
+    let Some(selection) = fuzzel("--prompt=⊞ ", Some(&prompt_input), output_name)? else {
         return Ok(None);
     };
 

@@ -42,7 +42,7 @@ case "$prompt" in
     printf '%b' "$DIRECTORY_OUTPUT"
     exit "$DIRECTORY_STATUS"
     ;;
-  '--prompt=Layout: ')
+  '--prompt=⊞ ')
     test "$no_sort" = 1 || exit 96
     if test "$REQUIRE_SNAPSHOT" = 1; then
         test -f "$MENU_DIRECTORY/snapshot-ready" || exit 94
@@ -333,7 +333,7 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_opt_in_inference()
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
                 "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n",
-                "--output=DP-1\n--prompt=Layout: \n",
+                "--output=DP-1\n--prompt=⊞ \n",
                 "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
                 "--output=DP-1\n--prompt-only=Draft name: \n",
             )
