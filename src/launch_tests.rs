@@ -1845,13 +1845,13 @@ fn completed_session(
             config: &'a LayoutNode,
             actual: &Node,
             accepted: &mut BTreeMap<i64, &'a Matcher>,
-        ) -> Hierarchy {
+        ) -> ExpectedHierarchy {
             match &config.kind {
                 NodeKind::Window { matcher, .. } => {
                     accepted.insert(actual.id, matcher);
-                    Hierarchy::Window(actual.id)
+                    ExpectedHierarchy::Window(actual.id)
                 }
-                NodeKind::Group { children, .. } => Hierarchy::Group {
+                NodeKind::Group { children, .. } => ExpectedHierarchy::Group {
                     id: Some(actual.id),
                     layout: actual.layout,
                     children: children
@@ -1868,10 +1868,10 @@ fn completed_session(
             observer,
             connect,
             diagnostics,
-            target: initial.target_workspace_id,
-            preexisting_ids: HashSet::new(),
-            baseline_foreign_ids: HashSet::new(),
-            accepted,
+            target_workspace_id: initial.target_workspace_id,
+            preexisting_container_ids: HashSet::new(),
+            baseline_foreign_window_ids: HashSet::new(),
+            accepted_windows: accepted,
             expected_hierarchy: expected,
             default_cwd: None,
             window_timeout_ms: config.window_timeout_ms,
@@ -2329,8 +2329,10 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
             }
         };
         let steps = vec![step(a.clone()), retitled, next];
-        let error =
-            completed_session(&fixture, &config, steps, |session| session.focus(&[0])).unwrap_err();
+        let error = completed_session(&fixture, &config, steps, |session| {
+            session.focus_container(&[0])
+        })
+        .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         assert!(log.contains("Title id=21; observing again"), "{log}");
@@ -2372,7 +2374,7 @@ fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
                     find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
                 assert_eq!(logical, if explicit { "w1" } else { "w0" });
                 assert_eq!(path, [0, if explicit { 1 } else { 0 }]);
-                session.focus(&path)
+                session.focus_container(&path)
             })
             .unwrap();
         }
@@ -2419,8 +2421,10 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
             }
         };
         let steps = vec![step(a), before, command_step("[con_id=20] focus"), after];
-        let error =
-            completed_session(&fixture, &config, steps, |session| session.focus(&[0])).unwrap_err();
+        let error = completed_session(&fixture, &config, steps, |session| {
+            session.focus_container(&[0])
+        })
+        .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
 }
@@ -3078,7 +3082,7 @@ fn group_selection_is_postorder_and_global_focus_wins_only_along_its_ancestry() 
                     let (_, path) =
                         find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[])
                             .unwrap();
-                    session.focus(&path)
+                    session.focus_container(&path)
                 })
                 .unwrap();
             }
@@ -3149,7 +3153,7 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
         };
         let error = completed_session(&fixture, &config, steps, |session| {
             session.initialize_group_selection(&config.layout.value, &[])?;
-            session.focus(&[0, 0])
+            session.focus_container(&[0, 0])
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
