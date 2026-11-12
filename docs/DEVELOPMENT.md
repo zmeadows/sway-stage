@@ -73,32 +73,92 @@ Run manually, one invocation at a time:
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers eleven Foot scenarios: single window, horizontal/vertical pairs,
+The standard run covers seventeen Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
 uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
 groups, process execution, default final focus, occupied-workspace refusal, and capture/reload
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
-capture, and guarded cleanup.
+capture, and guarded cleanup. The six native-group additions are:
+
+| Scenario | Independent expectations |
+| --- | --- |
+| `root-tabbed` | Three tabs, omitted global focus, first child selected. |
+| `root-stacked` | Three stacked windows, explicit focus on the second. |
+| `singleton-groups` | Singleton tabbed group inside a stacked root; both select their first child. |
+| `mixed-native-nesting` | Split containing tabs, nested vertical split, and a later sibling outside the tabs. |
+| `independent-native-groups` | Differently nested tab/stack groups, explicit focus overriding its ancestors while unrelated inactive groups retain first-child selection. |
+| `mixed-capture-reload` | Vertical split containing tabs, a singleton stack, and a weighted horizontal split; capture and replay with interior focus. |
+
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect eleven passes for the standard suite. Extended runs contain eight cases,
-for nineteen total, plus the separate foreign fixture. With the original optional prerequisites
-available, an extended run without package flags reports seventeen passes and two package
-SKIPs; supplying one package enables eighteen possible passes, and both enable nineteen.
+commands. Expect seventeen passes for the standard suite. Extended runs add eight cases,
+for twenty-five total, plus the separate foreign fixture. With the original optional prerequisites
+available, an extended run without package flags reports twenty-three passes and two package
+SKIPs; supplying one package enables twenty-four possible passes, and both enable twenty-five.
 Other missing optional prerequisites still produce explicit SKIPs.
 The process-execution case uses a private relative cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
 run-specific environment override; verified window cleanup must also observe its exit.
 No shell evaluates the test arguments.
 
-The `capture-reload-roundtrip` case builds four uniquely identified Foot windows with nested
-horizontal/vertical splits, unequal weights, and interior-leaf focus. After full capture
-comparison, it fills only the actual captured YAML's null commands with the corresponding
-literal launch arrays and runs `check`. The replay file retains captured weights, selectors,
-IDs, hierarchy, and focus. Only successful exact-ID cleanup and an empty, preserved desktop
-permit the second load. A fresh synchronized baseline and new launch bindings replace the
-first cycle's evidence; retired container IDs are refused. The reconstructed layout is
-independently checked against the captured weights with the ordinary sizing tolerance,
-then captured and safely cleaned again. Failure reports the initial/replay phase and leaves
-remaining windows alone; no speculative cleanup or retry follows.
+The `capture-reload-roundtrip` and `mixed-capture-reload` cases each build four uniquely
+identified Foot windows with unequal split weights and interior-leaf focus. The former
+uses nested horizontal/vertical splits; the latter includes tabs and a singleton stacked
+group. After full capture comparison, each fills only the actual captured YAML's null
+commands with the corresponding literal launch arrays and runs `check`. Only children of
+splits have captured weights, including tab/stack groups beneath splits; header children
+omit them. The replay file retains captured weights, selectors, IDs, hierarchy, and focus.
+Only successful exact-ID cleanup and an empty, preserved desktop permit the second load. A
+fresh synchronized baseline and new launch bindings replace the first cycle's evidence;
+retired container IDs are refused. The reconstructed layout is independently checked
+against the captured weights with the ordinary sizing tolerance, then captured and safely
+cleaned again. The standard suite has two replay scenarios; the extended suite adds the
+existing desktop-launcher replay for three total. Replays are additional construction
+cycles within those passes, not additional scenario counts. Failure reports the
+initial/replay phase and leaves remaining windows alone; no speculative cleanup or retry
+follows.
+
+Native selection checks use the first entry of each tabbed/stacked container's `focus`
+array, separately from the window's global `focused` flag. The
+[Sway IPC contract](https://github.com/swaywm/sway/blob/master/sway/sway-ipc.7.scd)
+defines child focus order; [IPC serialization](https://github.com/swaywm/sway/blob/master/sway/ipc-json.c)
+filters the default seat's focus stack to direct children. The same ordering drives
+[`seat_get_active_tiling_child`](https://github.com/swaywm/sway/blob/master/sway/input/seat.c)
+and the [rendered inactive selection](https://github.com/swaywm/sway/blob/master/sway/desktop/transaction.c).
+This supports checking inactive and nested groups without focusing them. The harness requires
+that history and checks every header group, including singletons. Capture preserves the
+history in the desktop, but its YAML records only global focus; replay checks first-child
+defaults again. Missing or contrary history fails; no rectangle/visibility approximation is used.
+Only one seat is supported. These upstream source semantics do not establish compatibility
+with an installed release; record `sway --version` with manual results.
+
+Cleanup predicts the [view-unmap path](https://github.com/swaywm/sway/blob/master/sway/tree/view.c)
+and [`container_reap_empty`](https://github.com/swaywm/sway/blob/master/sway/tree/container.c):
+empty ancestors disappear, surviving tabbed/stacked groups retain their IDs/layouts and may
+have one child. Only redundant single-child split wrappers normalize away. This is distinct
+from Sway's explicit container-flattening operation. After each individually verified window
+close, exact surviving header nesting/identity must agree before any next close. Unexpected
+flattening, retained empty groups, reparenting, or foreign-window changes stop cleanup and
+leave the remaining windows. Offline fixtures establish the verifier's reaction, not actual
+Sway transitions. Singleton construction and cleanup still need live acceptance.
+
+For native-group manual acceptance:
+
+1. Build both release executables with the commands above and record `sway --version`.
+2. From a third workspace, run the standard command above with two absent/empty disposable
+   workspace numbers. Leave input idle until it finishes; expect seventeen passes, including
+   both capture/reload cycles. Preserve output on failure and inspect reported remaining
+   windows manually before another run. Do not rerun into a partially populated target.
+3. On a separate disposable workspace, visually check tab/stack header order and singleton
+   headers with a trusted local native-group layout. Confirm default first-child selection,
+   explicit global focus along nested ancestors, and first selections in unrelated inactive
+   groups. Capture from a delayed command on another workspace and compare the draft; fill
+   only its null commands, check it, then load on another empty target. Do not interact with
+   windows during the harness itself: it deliberately treats interference as failure.
+4. Repeat the standard suite with empty targets initially using tabbed and stacked workspace
+   layouts, prepared manually. Record layout, Sway version, and results. Run `--extended`
+   separately for existing optional coverage. Repeat the interference/interrupt procedures
+   below as separate runs; a standard pass alone does not establish those guards live.
+
+No native-group live run has been performed as part of Stage 5 implementation.
 
 The fifth extended case, `desktop-launcher-roundtrip`, creates a uniquely named `.desktop`
 file under a private `XDG_DATA_HOME/applications` inside the harness's temporary directory,
@@ -351,7 +411,8 @@ For capture, compare default and inferred drafts with the original hierarchy, se
 proportions, and focus. Default commands must be null. `check` must reject placeholders;
 fill them, check, load on another empty target, and recapture. Expect at most small weight
 rounding/sizing differences (aim within 1 percentage point). Confirm floating, fullscreen,
-tabbed/stacked, and structural-container focus refuse capture without YAML. Capture must
+and structural-container focus refuse capture without YAML. Native tabbed/stacked groups,
+including singletons, must capture successfully with weights only beneath splits. Capture must
 leave desktop state and the launch log unchanged.
 
 For optional real AppImage and Flatpak command inference, use the package harness cases

@@ -1,7 +1,8 @@
 # Release roadmap
 
-Loading and capture support all four native group layouts. Stage 4 capture and offline
-serialization round-trip checks are complete. Behavior is defined in the
+Loading and capture support all four native group layouts. Stage 4 capture/offline
+serialization and Stage 5 independent manual-harness coverage are implemented; live
+native-group acceptance remains outstanding. Behavior is defined in the
 [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
@@ -11,10 +12,14 @@ serialization round-trip checks are complete. Behavior is defined in the
   root and nested groups, singleton ancestry, sibling insertion, and empty workspaces with
   initial tabbed/stacked layouts against the installed Sway version. Offline tree/event
   fixtures verify reactions, not the compositor's actual construction behavior.
-- **Native groups, Stage 5.** Extend the manual integration harness with native-group
-  construction and capture/reload scenarios after review. Verify mixed nesting, singleton
-  preservation, split proportions, first-child defaults, and global focus against Sway;
-  offline serialization checks do not establish compositor reconstruction behavior.
+- **Native groups, harness acceptance.** Run the seventeen-scenario standard suite,
+  including six native-group additions and two capture/reload cases. The independent
+  harness checks exact mixed hierarchy, singleton preservation, split proportions,
+  per-container child-focus history, final global focus, capture weights, and conservative
+  success-only cleanup transitions. Verify these source-backed expectations against the
+  installed Sway version, including initially tabbed/stacked empty workspaces. Offline
+  fixtures do not establish compositor reconstruction or cleanup behavior; record manual
+  results before marking this acceptance complete.
 
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release
