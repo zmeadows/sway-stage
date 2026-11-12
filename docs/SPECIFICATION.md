@@ -247,8 +247,8 @@ Identity fields use a conservative ASCII subset; unsupported key-file escapes ar
 
 Only when `.flatpak-info` is missing does inference read `/proc/PID/environ`, once per
 window, bounded to 64 KiB with complete NUL-separated entries. It extracts only the GLib,
-AppImage, and Snap fields described below. Duplicate or malformed relevant entries, and
-inaccessible, oversized, or incomplete reads leave `command: null`. Unrelated values,
+AppImage, and unsupported Snap markers described below. Duplicate or malformed GLib/AppImage
+entries and inaccessible, oversized, or incomplete reads leave `command: null`. Unrelated values,
 including non-UTF-8 bytes, are ignored; no environment mapping or values enter diagnostics.
 Linux exposes the [initial environment of the current executable](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html),
 which need not reflect later environment changes; access restrictions can also prevent
@@ -285,36 +285,16 @@ is not AppImage identity. Missing/inconsistent supporting metadata, vanished ima
 nonexecutable files, and unavailable process executables leave `command: null`. These are
 modest filesystem checks, not AppImage format, mount, or wrapper validation.
 
-Snap inference requires `SNAP_INSTANCE_NAME`, `SNAP_APP_NAME`, `SNAP_NAME`, and `SNAP`.
-Package names use 2–40 lowercase ASCII letters/digits with single internal hyphens and at
-least one letter. Instance names must match the package, optionally followed by `_` and a
-1–10 character lowercase ASCII letter/digit key. If `SNAP_INSTANCE_KEY` is present it must
-agree. Application names use ASCII letters/digits with single internal hyphens.
-`SNAP` must identify that package or instance at a positive numeric revision (optionally
-prefixed with `x`) under `/snap` or `/var/lib/snapd/snap`. `/proc/PID/exe` must be inside
-that package's or instance's mount at the same revision. Both paths are accepted because
-parallel installations can expose the base package path inside the Snap mount namespace.
-A host executable or different package/revision is insufficient evidence.
+After Flatpak detection, a verified exact-PID GLib launcher wins; unresolved GLib evidence
+blocks all fallback. With GLib absent or inherited, any `SNAP`, `SNAP_NAME`,
+`SNAP_INSTANCE_NAME`, `SNAP_APP_NAME`, or `SNAP_INSTANCE_KEY` marker leaves `command: null`.
+Snap environments are unsupported: marker presence alone blocks both AppImage reconstruction
+and ordinary argv, even with empty, malformed, duplicate, or non-UTF-8 values. An independently
+verified GLib launcher may still supply a command. Otherwise, AppImage evidence is resolved
+as described above; unusable evidence blocks argv. Only absence of AppImage and unsupported
+Snap evidence permits ordinary `/proc/PID/cmdline` inference.
 
-The command is `[snap, run, INSTANCE]` when the application name equals the base package
-name, otherwise `[snap, run, INSTANCE.APPLICATION]`. Parallel instance names are preserved.
-Internal executables, basenames, aliases, titles, and app IDs never supply the application
-name. `SNAP_APP_NAME` requires snapd 2.77+; missing fields on older versions leave the
-command unresolved. `snap` must be available on host `PATH`; it launches the instance's
-current revision, without pinning the observed revision.
-
-After successful environment parsing, precedence is explicit: Flatpak has already won or
-blocked all fallback; verified GLib launcher metadata wins next. Unresolved GLib metadata
-blocks all fallback. With GLib absent or inherited, exactly one package type may establish
-a host command. AppImage and Snap evidence together is ambiguous and leaves `command: null`
-without choosing between them. Recognized but unusable package evidence also blocks argv,
-including metadata inherited by an unrelated host descendant. Only absence of both package
-identities permits ordinary `/proc/PID/cmdline` inference. A verified GLib launcher may
-therefore win even when both package types are recorded; it identifies an explicit launcher
-rather than choosing a package. Malformed/duplicate relevant environment fields fail before
-this selection.
-
-Deleted process executables cannot corroborate AppImage or Snap membership, even if a new
+Deleted process executables cannot corroborate AppImage membership, even if a new
 file exists at the former path. Filesystem checks describe only the inspected files: a
 launcher may have been updated since launch or change again before replay. No original
 launcher contents or executable format, access policy, or future launch success is verified.
@@ -344,14 +324,11 @@ GLib launcher identity follows its
 [`gio launch`](https://manpages.debian.org/testing/libglib2.0-bin/gio.1.en.html)
 accepts a desktop-file path from any location. AppImage identity and invocation-name
 constraints follow its [environment documentation](https://docs.appimage.org/packaging-guide/environment-variables.html).
-Snap reconstruction follows its [environment documentation](https://snapcraft.io/docs/reference/development/environment-variables/),
-[command namespace rules](https://snapcraft.io/docs/commands-and-aliases/), and
-[parallel installation namespaces](https://snapcraft.io/docs/explanation/how-snaps-work/parallel-installs/).
 
 GLib 2.84.4's [`gio launch` implementation](https://github.com/GNOME/glib/blob/2.84.4/gio/gio-tool-launch.c)
 loses the source filename while loading the desktop entry. Replaying an inferred launcher
 command still starts the application, but its PID-only metadata makes a subsequent inferred
-capture leave `command: null`, even if AppImage or Snap evidence is also available. This
+capture leave `command: null`, even if AppImage evidence is also available. This
 preserves the unresolved launcher boundary rather than bypassing missing provenance.
 Fill that placeholder before another load, or retain the previously reviewed launcher command. The
 [newer implementation](https://github.com/GNOME/glib/blob/main/gio/gio-tool-launch.c)

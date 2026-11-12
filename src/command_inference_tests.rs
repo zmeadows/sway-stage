@@ -109,14 +109,6 @@ fn package_inference(environment: &[u8], executable: Option<PathBuf>) -> Option<
     )
 }
 
-fn snap_environment(instance: &str, application: &str, package: &str, mount: &str) -> Vec<u8> {
-    format!(
-        "SNAP_INSTANCE_NAME={instance}\0SNAP_APP_NAME={application}\0\
-         SNAP_NAME={package}\0SNAP={mount}\0"
-    )
-    .into_bytes()
-}
-
 #[test]
 fn appimage_inference_preserves_the_persistent_path_as_one_argument() {
     for name in [
@@ -254,272 +246,75 @@ fn appimage_rejects_temporary_host_paths_and_ambiguous_invocation_names() {
 }
 
 #[test]
-fn snap_reconstructs_documented_commands_and_retains_parallel_instances() {
-    for (instance, application, expected) in [
-        ("example", "example", "example"),
-        ("example", "editor", "example.editor"),
-        ("example_foo", "example", "example_foo"),
-        ("example_foo", "editor", "example_foo.editor"),
-        (
-            "example_a123456789",
-            "Editor-2",
-            "example_a123456789.Editor-2",
-        ),
-    ] {
-        for root in ["/snap", "/var/lib/snapd/snap"] {
-            for revision in ["42", "x1"] {
-                for mounted_package in ["example", instance] {
-                    let mount = format!("{root}/{mounted_package}/{revision}");
-                    let environment = snap_environment(instance, application, "example", &mount);
-                    for executable_package in ["example", instance] {
-                        let executable = PathBuf::from(format!(
-                            "{root}/{executable_package}/{revision}/usr/bin/unrelated-basename"
-                        ));
-                        assert_eq!(
-                            package_inference(&environment, Some(executable)),
-                            Some(vec!["snap".into(), "run".into(), expected.into()])
-                        );
-                    }
-                }
-            }
-        }
-    }
-    for (instance, key) in [("example", ""), ("example_foo", "foo")] {
-        let environment = snap_environment(instance, "example", "example", "/snap/example/42");
-        assert!(
-            package_inference(
-                &environment_with_field(&environment, "SNAP_INSTANCE_KEY", Some(key)),
-                Some("/snap/example/42/application".into())
-            )
-            .is_some()
-        );
-    }
-}
-
-#[test]
-fn snap_missing_or_inconsistent_identities_never_guess_an_application() {
-    let environment = snap_environment("example_foo", "editor", "example", "/snap/example/42");
-    for key in ["SNAP_INSTANCE_NAME", "SNAP_APP_NAME", "SNAP_NAME", "SNAP"] {
-        // Older snapd lacks SNAP_APP_NAME. Neither argv nor the package name substitutes.
-        for value in [None, Some("")] {
-            assert_eq!(
-                package_inference(
-                    &environment_with_field(&environment, key, value),
-                    Some("/snap/example/42/editor".into())
-                ),
-                None
-            );
-        }
-    }
-    for (key, values) in [
-        (
-            "SNAP_INSTANCE_NAME",
-            vec![
-                "other_foo",
-                "example_",
-                "example_FOO",
-                "example_foo_bar",
-                "example_12345678901",
-            ],
-        ),
-        (
-            "SNAP_NAME",
-            vec![
-                "other",
-                "example_foo",
-                "x",
-                "123",
-                "Example",
-                "-example",
-                "exam--ple",
-                "example-",
-            ],
-        ),
-        (
-            "SNAP_APP_NAME",
-            vec![
-                "-editor",
-                "--shell",
-                "editor-",
-                "edit--or",
-                "example.editor",
-                "editor_name",
-                "editor/other",
-                "editor other",
-                "$(sh)",
-                "雪",
-            ],
-        ),
-        (
-            "SNAP",
-            vec![
-                "relative",
-                "/snap/other/42",
-                "/snap/example_away/42",
-                "/snap/example/current",
-                "/snap/example/0",
-                "/snap/example/x",
-                "/snap/example/42/extra",
-                "/snap/example/../42",
-                "/arbitrary/example/42",
-            ],
-        ),
-        ("SNAP_INSTANCE_KEY", vec!["", "other", "FOO"]),
-    ] {
-        for value in values {
-            assert_eq!(
-                package_inference(
-                    &environment_with_field(&environment, key, Some(value)),
-                    Some("/snap/example/42/editor".into())
-                ),
-                None,
-                "invalid field {key}"
-            );
-        }
-    }
-    for key in ["SNAP_NAME", "SNAP_INSTANCE_NAME", "SNAP_APP_NAME"] {
-        for value in [
-            "--help",
-            "app;sh",
-            "app\nname",
-            "app name",
-            "app/name",
-            ".app",
-        ] {
-            assert_eq!(
-                package_inference(
-                    &environment_with_field(&environment, key, Some(value)),
-                    Some("/snap/example/42/editor".into())
-                ),
-                None
-            );
-        }
-    }
-    assert!(!valid_snap_name(&"a".repeat(41)));
-    assert!(valid_snap_name(&"a".repeat(40)));
-}
-
-#[test]
-fn snap_requires_process_evidence_from_the_identified_package_revision() {
-    let environment = snap_environment("example_foo", "editor", "example", "/snap/example/42");
-    for executable in [
-        None,
-        Some("/usr/bin/editor"), // Host descendant inheriting Snap metadata.
-        Some("/snap/other/42/editor"),
-        Some("/snap/example_other/42/editor"),
-        Some("/snap/example/43/editor"),
-        Some("/snap/example/42-other/editor"),
-        Some("/snap/example/42"),
-        Some("/snap/example/42/../editor"),
-        Some("relative"),
-    ] {
-        assert_eq!(
-            package_inference(&environment, executable.map(PathBuf::from)),
-            None
-        );
-    }
-}
-
-#[test]
-fn package_environment_fields_fail_closed_when_malformed_or_incomplete() {
+fn appimage_environment_fields_fail_closed_when_malformed_or_incomplete() {
     let fixture = AppImageFixture::new("application");
-    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
-    for (environment, executable, keys) in [
-        (
-            fixture.environment(),
-            fixture.executable.clone(),
-            vec!["APPIMAGE", "APPDIR", "ARGV0"],
-        ),
-        (
-            snap,
-            PathBuf::from("/snap/example/42/editor"),
-            vec![
-                "SNAP",
-                "SNAP_NAME",
-                "SNAP_INSTANCE_NAME",
-                "SNAP_APP_NAME",
-                "SNAP_INSTANCE_KEY",
-            ],
-        ),
-    ] {
-        for key in keys {
-            let mut invalid_utf8 = environment_with_field(&environment, key, None);
-            invalid_utf8.extend_from_slice(format!("{key}=").as_bytes());
-            invalid_utf8.extend_from_slice(b"\xff\0");
+    let environment = fixture.environment();
+    let executable = fixture.executable.clone();
+    for key in ["APPIMAGE", "APPDIR", "ARGV0"] {
+        let mut invalid_utf8 = environment_with_field(&environment, key, None);
+        invalid_utf8.extend_from_slice(format!("{key}=").as_bytes());
+        invalid_utf8.extend_from_slice(b"\xff\0");
+        assert_eq!(
+            package_inference(&invalid_utf8, Some(executable.clone())),
+            None
+        );
+
+        let mut missing_separator = environment_with_field(&environment, key, None);
+        missing_separator.extend_from_slice(format!("{key}\0").as_bytes());
+        assert_eq!(
+            package_inference(&missing_separator, Some(executable.clone())),
+            None
+        );
+
+        let original_value = std::str::from_utf8(&environment)
+            .unwrap()
+            .split_terminator('\0')
+            .filter_map(|entry| entry.split_once('='))
+            .find(|(entry_key, _)| *entry_key == key)
+            .unwrap()
+            .1;
+        for duplicate in [original_value, "different", ""] {
+            let mut duplicated = environment.clone();
+            duplicated.extend_from_slice(format!("{key}={duplicate}\0").as_bytes());
             assert_eq!(
-                package_inference(&invalid_utf8, Some(executable.clone())),
+                package_inference(&duplicated, Some(executable.clone())),
                 None
             );
-
-            let mut missing_separator = environment_with_field(&environment, key, None);
-            missing_separator.extend_from_slice(format!("{key}\0").as_bytes());
-            assert_eq!(
-                package_inference(&missing_separator, Some(executable.clone())),
-                None
-            );
-
-            let complete = if key == "SNAP_INSTANCE_KEY" {
-                environment_with_field(&environment, key, Some(""))
-            } else {
-                environment.clone()
-            };
-            assert!(package_inference(&complete, Some(executable.clone())).is_some());
-            let original_value = std::str::from_utf8(&complete)
-                .unwrap()
-                .split_terminator('\0')
-                .filter_map(|entry| entry.split_once('='))
-                .find(|(entry_key, _)| *entry_key == key)
-                .unwrap()
-                .1;
-            for duplicate in [original_value, "different", ""] {
-                let mut duplicated = complete.clone();
-                duplicated.extend_from_slice(format!("{key}={duplicate}\0").as_bytes());
-                assert_eq!(
-                    package_inference(&duplicated, Some(executable.clone())),
-                    None
-                );
-            }
         }
-        let mut truncated = environment.clone();
-        truncated.pop();
-        assert_eq!(
-            package_inference(&truncated, Some(executable.clone())),
-            None
-        );
-        let mut unrelated_truncation = environment.clone();
-        unrelated_truncation.extend_from_slice(b"SECRET=truncated");
-        assert_eq!(
-            package_inference(&unrelated_truncation, Some(executable.clone())),
-            None
-        );
-
-        let mut maximum = environment;
-        maximum.extend_from_slice(b"SECRET=");
-        maximum.resize(MAX_ENVIRON_BYTES, b'x');
-        maximum[MAX_ENVIRON_BYTES - 1] = 0;
-        assert!(package_inference(&maximum, Some(executable.clone())).is_some());
-        maximum.push(0);
-        assert_eq!(package_inference(&maximum, Some(executable)), None);
     }
-}
-
-#[test]
-fn package_conflicts_and_launcher_precedence_are_explicit() {
-    let fixture = AppImageFixture::new("application");
-    let appimage = fixture.environment();
-    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
-    let mut conflicting = appimage.clone();
-    conflicting.extend_from_slice(&snap);
+    let mut truncated = environment.clone();
+    truncated.pop();
     assert_eq!(
-        package_inference(&conflicting, Some(fixture.executable.clone())),
+        package_inference(&truncated, Some(executable.clone())),
+        None
+    );
+    let mut unrelated_truncation = environment.clone();
+    unrelated_truncation.extend_from_slice(b"SECRET=truncated");
+    assert_eq!(
+        package_inference(&unrelated_truncation, Some(executable.clone())),
         None
     );
 
-    for (package_environment, executable) in [
-        (&appimage, fixture.executable.clone()),
-        (&snap, PathBuf::from("/snap/example/42/editor")),
-        (&conflicting, fixture.executable.clone()),
-    ] {
+    let mut maximum = environment;
+    maximum.extend_from_slice(b"SECRET=");
+    maximum.resize(MAX_ENVIRON_BYTES, b'x');
+    maximum[MAX_ENVIRON_BYTES - 1] = 0;
+    assert!(package_inference(&maximum, Some(executable.clone())).is_some());
+    maximum.push(0);
+    assert_eq!(package_inference(&maximum, Some(executable)), None);
+}
+
+#[test]
+fn launcher_precedence_preserves_appimage_inference_and_snap_exclusion() {
+    let fixture = AppImageFixture::new("application");
+    let appimage = fixture.environment();
+    let snap = b"SNAP=unsupported\0".to_vec();
+    let mut unsupported = appimage.clone();
+    unsupported.extend_from_slice(&snap);
+    assert_eq!(package_inference(&unsupported, None), None);
+
+    for package_environment in [&appimage, &snap, &unsupported] {
+        let executable = fixture.executable.clone();
         // Flatpak's strict result wins without inspecting any host metadata.
         for (metadata, expected) in [
             (
@@ -568,10 +363,42 @@ fn package_conflicts_and_launcher_precedence_are_explicit() {
     );
     let mut inherited = fixture.directory.environment("102");
     inherited.extend_from_slice(&snap);
-    assert_eq!(
-        package_inference(&inherited, Some("/snap/example/42/editor".into())),
-        Some(vec!["snap".into(), "run".into(), "example.editor".into()])
-    );
+    assert_eq!(package_inference(&inherited, None), None);
+}
+
+#[test]
+fn each_snap_marker_excludes_argv_and_appimage_regardless_of_value() {
+    let fixture = AppImageFixture::new("application");
+    for key in [
+        "SNAP",
+        "SNAP_NAME",
+        "SNAP_INSTANCE_NAME",
+        "SNAP_APP_NAME",
+        "SNAP_INSTANCE_KEY",
+    ] {
+        for suffix in [
+            b"=example\0".as_slice(),
+            b"=\0",
+            b"=\xff\0",
+            b"\0",
+            b"=one\0SNAP=two\0",
+        ] {
+            let mut marker = key.as_bytes().to_vec();
+            marker.extend_from_slice(suffix);
+            for mut environment in [Vec::new(), fixture.environment()] {
+                environment.extend_from_slice(&marker);
+                assert_eq!(
+                    infer_host_command(
+                        101,
+                        Ok(environment.as_slice()),
+                        || panic!("unsupported Snap needs no executable inspection"),
+                        || panic!("unsupported Snap must not use argv"),
+                    ),
+                    None
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1157,9 +984,7 @@ fn missing_or_malformed_process_observations_remain_silent() {
 }
 
 #[test]
-fn deleted_package_executables_never_corroborate_an_inherited_launch() {
-    let snap = snap_environment("example", "editor", "example", "/snap/example/42");
-    assert!(package_inference(&snap, Some("/snap/example/42/editor (deleted)".into())).is_none());
+fn deleted_appimage_executables_never_corroborate_an_inherited_launch() {
     let fixture = AppImageFixture::new("application");
     // Even a replacement with this literal name cannot stand in for a deleted executable.
     let deleted = fixture.appdir.join("application (deleted)");

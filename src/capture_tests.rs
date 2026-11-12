@@ -1228,11 +1228,7 @@ fn command_line_limit_counts_yaml_escaping_and_indentation() {
 fn package_commands_serialize_literally_alongside_unresolved_commands() {
     let saved = saved_snapshot(workspace(
         "splith",
-        vec![
-            view_with_pid(20, json!(101)),
-            view_with_pid(21, json!(102)),
-            view_with_pid(22, json!(103)),
-        ],
+        vec![view_with_pid(20, json!(101)), view_with_pid(21, json!(102))],
         20,
     ))
     .unwrap();
@@ -1244,20 +1240,11 @@ fn package_commands_serialize_literally_alongside_unresolved_commands() {
             if pid == 101 {
                 return Some(image_command.clone());
             }
-            let environment = if pid == 102 {
-                b"SNAP_INSTANCE_NAME=example_foo\0SNAP_APP_NAME=editor\0\
-                  SNAP_NAME=example\0SNAP=/snap/example/42\0\
-                  SECRET=environment-only-secret\0BINARY=\xff\0"
-                    .as_slice()
-            } else {
-                // Missing version-dependent metadata must leave this leaf unresolved.
-                b"SNAP_INSTANCE_NAME=example\0SNAP_NAME=example\0\
-                  SNAP=/snap/example/42\0SECRET=environment-only-secret\0"
-            };
+            let environment = b"SNAP=unsupported\0SECRET=environment-only-secret\0BINARY=\xff\0";
             infer_host_command(
                 pid,
-                Ok(environment),
-                || Some("/snap/example/42/internal-application".into()),
+                Ok(environment.as_slice()),
+                || panic!("unsupported Snap needs no executable inspection"),
                 || panic!("must not fall back to sandbox argv"),
             )
         })
@@ -1269,7 +1256,6 @@ fn package_commands_serialize_literally_alongside_unresolved_commands() {
     };
     for (child, expected) in children.iter().zip([
         image_command,
-        vec!["snap".into(), "run".into(), "example_foo.editor".into()],
         vec!["app".into()], // filled() replaces only the unresolved placeholder.
     ]) {
         let NodeKind::Window {
@@ -1285,14 +1271,14 @@ fn package_commands_serialize_literally_alongside_unresolved_commands() {
     assert_eq!(
         draft.commands,
         CommandCounts {
-            total: 3,
-            inferred: 2,
+            total: 2,
+            inferred: 1,
             inference_requested: true,
         }
     );
     assert_eq!(
         draft.commands.summary(),
-        "Commands inferred: 2; unresolved: 1. Manual editing required."
+        "Commands inferred: 1; unresolved: 1. Manual editing required."
     );
     assert!(!draft.commands.summary().contains("/private"));
     assert!(!draft.yaml.contains("SECRET"));

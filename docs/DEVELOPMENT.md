@@ -207,7 +207,7 @@ launch. Only complete success permits normal guarded cleanup. Any scenario failu
 the suite without retries, window cleanup, or workspace restoration. If the private file
 cannot be restored and verified, its directory is retained and reported for manual inspection;
 all windows remain untouched. This case adds no standard-suite dependencies and requires
-neither AppImage nor Snap.
+no application packages.
 
 The seventh and eighth extended cases, `appimage-inference` and `flatpak-inference`, are
 optional real-package capture checks. Supply either flag independently, or both; the other
@@ -418,15 +418,6 @@ leave desktop state and the launch log unchanged.
 For optional real AppImage and Flatpak command inference, use the package harness cases
 above instead of repeating manual capture acceptance. General edited-draft replay remains
 covered by the existing round-trip scenarios and can also be checked manually if desired.
-
-Snap has no live harness case. For optional Snap acceptance, manually open an already installed
-application on a disposable workspace and capture with `--infer-commands`. Expect separate
-`snap`, `run`, and namespaced application arguments, with no temporary mount executable.
-Compare the ordinary capture's arrangement/selectors. If available, test a separately named
-application or parallel instance; snapd before 2.77 lacks `SNAP_APP_NAME` and should leave null
-unless verified GLib metadata supplies a launcher. Review inferred commands before any replay.
-Snap inference and its offline coverage are unchanged; no packaging installation is required
-by offline tests or the standard harness.
 
 For menu acceptance, use a keybinding or delayed invocation with a temporary layouts
 directory. Check normal Load sizing/focus, occupied-target refusal, both Escape cancellations,
