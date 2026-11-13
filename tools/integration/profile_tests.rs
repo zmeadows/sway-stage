@@ -92,7 +92,13 @@ fn launch_binding_requires_complete_first_layout_before_the_switch() {
         bind_ordered_launches(&events, first.len(), &layouts, &HashSet::new(), false).unwrap();
     assert_eq!(
         accepted[0],
-        accepted_windows(&[(20, "window1"), (21, "window2")])
+        layouts[0]
+            .layout
+            .leaves()
+            .iter()
+            .enumerate()
+            .map(|(index, leaf)| (20 + index as i64, leaf.layout_id.to_owned()))
+            .collect()
     );
     assert_eq!(
         accepted[1],
@@ -288,5 +294,27 @@ fn named_evidence_checks_true_number_identity_output_and_restoration() {
             "{scenario}"
         );
         assert!(target.verify(&changed).is_err() || scenario == "focus");
+    }
+}
+
+#[test]
+fn captured_profile_references_preserve_targets_and_ordinal_order() {
+    for primary in ["8", "stage-test music"] {
+        let target = if primary == "8" {
+            "8"
+        } else {
+            "\"stage-test music\""
+        };
+        let yaml = format!(
+            "version: 1\nworkspaces:\n  - workspace: {target}\n    layout: captured-001\n  - workspace: 10\n    layout: captured-002\n"
+        );
+        verify_captured_references(&yaml, primary, "10").unwrap();
+        for changed in [
+            yaml.replace("captured-001", "wrong"),
+            yaml.replace("workspace: 10", "workspace: 9"),
+            yaml.replace("version: 1", "version: 2"),
+        ] {
+            assert!(verify_captured_references(&changed, primary, "10").is_err());
+        }
     }
 }

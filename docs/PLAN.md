@@ -18,6 +18,10 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   installation on the chosen baseline, including understandable failures for missing
   optional tools. Record the Sway version actually verified without implying broader
   compatibility.
+- **Profile capture live acceptance.** Run the updated two-target successful and named
+  profile harness scenarios; verify inactive focus, nested selections, generated references,
+  and read-only preservation. Offline coverage is implemented; these new live steps remain
+  user-only and unverified.
 - **Final acceptance.** Complete the optional unified-menu acceptance procedure, keybinding
   launch-context and loader interference checks, and additional manual profile variants
   in the developer guide. Real multi-monitor verification remains incomplete; output-migration safeguards are implemented

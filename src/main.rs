@@ -3,10 +3,12 @@ mod command_inference;
 mod config;
 mod diagnostics;
 mod discovery;
+mod draft_file;
 mod launch;
 mod menu;
 mod observation;
 mod profile;
+mod profile_capture;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use diagnostics::Diagnostics;
@@ -21,10 +23,10 @@ use std::process::ExitCode;
     after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses one Fuzzel selector to load layouts or profiles, or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
 )]
 struct Cli {
-    /// Read layouts, and save menu captures, in PATH instead of the XDG configuration directory
+    /// Read layouts and save captures in PATH instead of the XDG configuration directory
     #[arg(long, global = true, value_name = "PATH")]
     layouts_dir: Option<PathBuf>,
-    /// Read profiles in PATH instead of the XDG configuration directory
+    /// Read and capture profiles in PATH instead of the XDG configuration directory
     #[arg(long, global = true, value_name = "PATH")]
     profiles_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -48,7 +50,7 @@ enum CliCommand {
         /// Layout name (the YAML filename without its extension)
         name: String,
     },
-    /// Validate or sequentially load named multi-workspace profiles
+    /// Validate, capture, or sequentially load named multi-workspace profiles
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -73,6 +75,20 @@ enum ProfileCommand {
     Load {
         /// Profile name (the YAML filename without its extension)
         name: String,
+    },
+    /// Save drafts of existing workspaces from one read-only tree snapshot
+    Capture {
+        /// Generated profile name; layouts use NAME-001.yaml, NAME-002.yaml, ...
+        name: String,
+        /// Existing workspace numbers or exact non-numeric names, in profile order
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        workspaces: Vec<String>,
+        /// Capture all populated ordinary workspaces, numbers first then names
+        #[arg(long)]
+        all: bool,
+        /// Leave launch commands null instead of best-effort inference
+        #[arg(long)]
+        no_infer_commands: bool,
     },
     /// Validate a profile and every referenced layout without contacting Sway
     Check {
@@ -99,6 +115,26 @@ fn main() -> ExitCode {
         Some(CliCommand::Profile {
             command: ProfileCommand::Load { name },
         }) => load_profile(&name, cli.profiles_dir, cli.layouts_dir),
+        Some(CliCommand::Profile {
+            command:
+                ProfileCommand::Capture {
+                    name,
+                    workspaces,
+                    all,
+                    no_infer_commands,
+                },
+        }) => profile_capture::capture(
+            &name,
+            &workspaces,
+            all,
+            !no_infer_commands,
+            cli.layouts_dir,
+            cli.profiles_dir,
+        )
+        .map_err(|error| {
+            let _ = diagnostics::notify_failure("profile capture", &error);
+            format!("profile capture: {error}")
+        }),
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
         Some(CliCommand::Capture { no_infer_commands }) => capture(!no_infer_commands),
         Some(CliCommand::Menu { no_infer_commands }) => {

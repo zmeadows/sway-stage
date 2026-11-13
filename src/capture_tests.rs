@@ -1450,7 +1450,7 @@ fn command_line_limit_counts_yaml_escaping_and_indentation() {
     // A root command has two spaces of indentation; each nested child adds four more.
     for (levels, argument_length) in [(1, 102), (2, 98), (3, 94)] {
         let saved = read_recorded_snapshot(nested(levels)).unwrap();
-        let captured = capture_workspace(&saved).unwrap();
+        let captured = capture_workspace(&saved, saved.workspace_id()).unwrap();
         for extra in [0, 1] {
             let expected = vec!["app".to_owned(), "x".repeat(argument_length + extra)];
             let draft = render_draft(&captured, true, &mut |id| {
@@ -1716,4 +1716,145 @@ fn unusable_launcher_evidence_produces_a_valid_null_draft_and_unresolved_count()
         "Commands inferred: 0; unresolved: 1. Manual editing required."
     );
     assert!(!rendered.yaml.contains("environment-only-secret"));
+}
+
+/// Retain each workspace's independent history while moving keyboard focus elsewhere.
+fn inactive_tree(mut tree: Value) -> Value {
+    fn clear_focus(node: &mut Value) {
+        node["focused"] = json!(false);
+        for child in node["nodes"].as_array_mut().unwrap() {
+            clear_focus(child);
+        }
+    }
+    clear_focus(&mut tree);
+    let mut focused_workspace = node(100, "workspace", true);
+    focused_workspace["name"] = json!("other");
+    focused_workspace["num"] = json!(-1);
+    tree["nodes"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(focused_workspace);
+    tree
+}
+
+#[test]
+fn inactive_workspace_retains_nested_focus_and_independent_header_selections() {
+    let focused = mixed_native_groups();
+    let expected = capture_recorded_tree(focused.clone()).unwrap();
+    let snapshot = read_recorded_snapshot(inactive_tree(focused)).unwrap();
+    let draft = snapshot.render_workspace(10, false).unwrap();
+    assert_eq!(draft.yaml, expected);
+    assert!(draft.yaml.contains("focus: window5"));
+    assert_eq!(snapshot.workspace_id(), 100);
+}
+
+#[test]
+fn two_inactive_workspaces_resolve_their_own_focus_from_one_snapshot() {
+    let mut tree = inactive_tree(workspace_tree(
+        "tabbed",
+        vec![left_window(), right_window()],
+        21,
+    ));
+    let mut second = workspace_tree(
+        "stacked",
+        vec![
+            wayland_window(41, Some("a"), 0, 0),
+            wayland_window(42, Some("b"), 0, 0),
+        ],
+        41,
+    )["nodes"][0]["nodes"][0]
+        .clone();
+    second["id"] = json!(40);
+    second["nodes"][0]["focused"] = json!(false);
+    tree["nodes"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let snapshot = read_recorded_snapshot(tree).unwrap();
+    let original_tree = snapshot.tree.clone();
+    for (workspace_id, expected_focus, active) in [(10, "window2", Some(2)), (40, "window1", None)]
+    {
+        let draft = snapshot.render_workspace(workspace_id, false).unwrap();
+        let document: Value = serde_saphyr::from_str(&draft.yaml).unwrap();
+        assert_eq!(document["focus"], expected_focus);
+        assert_eq!(
+            document["layout"].get("active").and_then(Value::as_u64),
+            active
+        );
+    }
+    assert_eq!(snapshot.tree, original_tree);
+}
+
+#[test]
+fn inactive_split_focus_rejects_unusable_references_and_structural_leaves() {
+    for history in [
+        json!([]),
+        json!([999]),
+        json!([10]),
+        json!([21, 21]),
+        json!([21, 999]),
+    ] {
+        let mut tree = inactive_tree(workspace_tree(
+            "splith",
+            vec![left_window(), right_window()],
+            21,
+        ));
+        tree["nodes"][0]["nodes"][0]["focus"] = history;
+        let snapshot = read_recorded_snapshot(tree).unwrap();
+        assert!(
+            snapshot
+                .render_workspace(10, false)
+                .unwrap_err()
+                .contains("child-focus history")
+        );
+    }
+    let structural = group(20, "splith", 100, 100, vec![]);
+    let snapshot = read_recorded_snapshot(inactive_tree(workspace_tree(
+        "splith",
+        vec![structural],
+        20,
+    )))
+    .unwrap();
+    assert!(
+        snapshot
+            .render_workspace(10, false)
+            .unwrap_err()
+            .contains("neither a window")
+    );
+}
+
+#[test]
+fn inactive_singletons_allow_missing_history_but_reject_stale_references() {
+    for layout in ["splith", "tabbed", "stacked"] {
+        for (history, succeeds) in [
+            (json!([]), true),
+            (json!([20]), true),
+            (json!([999]), false),
+        ] {
+            let mut tree = inactive_tree(workspace_tree(layout, vec![left_window()], 20));
+            tree["nodes"][0]["nodes"][0]["focus"] = history;
+            let snapshot = read_recorded_snapshot(tree).unwrap();
+            assert_eq!(snapshot.render_workspace(10, false).is_ok(), succeeds);
+        }
+    }
+}
+
+#[test]
+fn inactive_capture_rejects_floating_and_fullscreen_and_non_workspace_ids() {
+    for field in ["floating", "fullscreen"] {
+        let mut tree = inactive_tree(workspace_tree("splith", vec![left_window()], 20));
+        if field == "floating" {
+            tree["nodes"][0]["nodes"][0]["floating_nodes"] = json!([right_window()]);
+        } else {
+            tree["nodes"][0]["nodes"][0]["nodes"][0]["fullscreen_mode"] = json!(1);
+        }
+        let snapshot = read_recorded_snapshot(tree).unwrap();
+        assert!(
+            snapshot
+                .render_workspace(10, false)
+                .unwrap_err()
+                .contains(field)
+        );
+        assert!(snapshot.render_workspace(20, false).is_err());
+    }
 }

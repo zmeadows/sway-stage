@@ -71,6 +71,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["profile", "--help"],
         vec!["profile", "check", "--help"],
         vec!["profile", "load", "--help"],
+        vec!["profile", "capture", "--help"],
         vec!["load", "--help"],
         vec!["capture", "--help"],
         vec!["menu", "--help"],
@@ -1212,3 +1213,6 @@ mod profile;
 
 #[path = "cli/profile_load.rs"]
 mod profile_load;
+
+#[path = "cli/profile_capture.rs"]
+mod profile_capture;

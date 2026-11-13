@@ -1,4 +1,4 @@
-//! Read-only capture of the focused workspace's tiled arrangement as an editable YAML draft.
+//! Read-only capture of saved workspaces as editable YAML drafts.
 //!
 //! Capture retains one complete GET_TREE response and renders only that saved state.
 //! It never sends a Sway command, launches anything, or writes a file, and it records
@@ -132,6 +132,113 @@ impl Snapshot {
         })
     }
 
+    /// Select ordinary workspace identities from this tree only. No output or traversal
+    /// order is used to determine the generated profile's order.
+    pub fn select_workspaces(
+        &self,
+        targets: &[crate::profile::WorkspaceTarget],
+        all: bool,
+    ) -> Result<Vec<(crate::profile::WorkspaceTarget, i64)>, String> {
+        use crate::profile::{MAX_WORKSPACES, WorkspaceTarget};
+
+        let mut ordinary = Vec::new();
+        let mut names = HashSet::new();
+        let mut numbers = HashSet::new();
+        let mut pending = vec![(&self.tree, None, false)];
+        while let Some((container, parent_type, internal)) = pending.pop() {
+            let internal = internal
+                || (container.node_type == NodeType::Output
+                    && container.name.as_deref() == Some("__i3"));
+            if container.node_type == NodeType::Output
+                && !internal
+                && (parent_type != Some(NodeType::Root)
+                    || container.id <= 0
+                    || container.name.as_deref().is_none_or(str::is_empty))
+            {
+                return Err("workspace snapshot: missing or inconsistent output identity".into());
+            }
+            if container.node_type == NodeType::Workspace && !internal {
+                let name = container
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .ok_or("workspace snapshot: missing workspace name")?;
+                let number = container
+                    .num
+                    .ok_or("workspace snapshot: missing workspace number")?;
+                if parent_type != Some(NodeType::Output) || container.id <= 0 || number < -1 {
+                    return Err(format!(
+                        "workspace {name:?}: inconsistent IPC identity or output ancestry"
+                    ));
+                }
+                if !names.insert(name) || (number >= 0 && !numbers.insert(number)) {
+                    return Err("workspace snapshot: ambiguous workspace numbers or names".into());
+                }
+                // Sway derives num from a leading decimal number in the actual name.
+                let numeric_prefix: String =
+                    name.chars().take_while(char::is_ascii_digit).collect();
+                let expected_number = if numeric_prefix.is_empty() {
+                    Some(-1)
+                } else {
+                    numeric_prefix.parse::<i32>().ok()
+                };
+                if expected_number != Some(number) {
+                    return Err(format!(
+                        "workspace {name:?}: inconsistent IPC number {number}"
+                    ));
+                }
+                ordinary.push(container);
+            }
+            for child in container.nodes.iter().chain(&container.floating_nodes) {
+                pending.push((child, Some(container.node_type), internal));
+            }
+        }
+
+        let mut selected = Vec::new();
+        if all {
+            for workspace in &ordinary {
+                if workspace.nodes.is_empty() && workspace.floating_nodes.is_empty() {
+                    continue;
+                }
+                let target = match workspace.num.expect("verified number") {
+                    -1 => WorkspaceTarget::Name(workspace.name.clone().expect("verified name")),
+                    number => WorkspaceTarget::Number(number as u64),
+                };
+                target
+                    .validate()
+                    .map_err(|error| format!("workspace {target}: {error}"))?;
+                selected.push((target, workspace.id));
+            }
+            selected.sort_by(|(left, _), (right, _)| match (left, right) {
+                (WorkspaceTarget::Number(left), WorkspaceTarget::Number(right)) => left.cmp(right),
+                (WorkspaceTarget::Number(_), WorkspaceTarget::Name(_)) => std::cmp::Ordering::Less,
+                (WorkspaceTarget::Name(_), WorkspaceTarget::Number(_)) => {
+                    std::cmp::Ordering::Greater
+                }
+                (WorkspaceTarget::Name(left), WorkspaceTarget::Name(right)) => left.cmp(right),
+            });
+        } else {
+            for target in targets {
+                let workspace = ordinary
+                    .iter()
+                    .find(|workspace| {
+                        target.matches(
+                            workspace.num.expect("verified number"),
+                            workspace.name.as_deref().expect("verified name"),
+                        )
+                    })
+                    .ok_or_else(|| format!("workspace {target}: not found in snapshot"))?;
+                selected.push((target.clone(), workspace.id));
+            }
+        }
+        if selected.is_empty() || selected.len() > MAX_WORKSPACES {
+            return Err(format!(
+                "capture requires 1 to {MAX_WORKSPACES} populated workspaces"
+            ));
+        }
+        Ok(selected)
+    }
+
     /// Original workspace's containing output, when Sway supplied a nonempty name.
     pub fn output_name(&self) -> Option<&str> {
         let output = self.tree.nodes.iter().find(|container| {
@@ -145,15 +252,34 @@ impl Snapshot {
 
     /// Validates and renders only saved Sway state. Process arguments remain best-effort.
     pub fn render(&self, infer_commands: bool) -> Result<RenderedDraft, String> {
-        self.render_with(infer_commands, &mut read_process_command)
+        self.render_workspace(self.target_workspace_id, infer_commands)
     }
 
+    /// Renders an existing workspace by container identity without further IPC observations.
+    pub fn render_workspace(
+        &self,
+        workspace_id: i64,
+        infer_commands: bool,
+    ) -> Result<RenderedDraft, String> {
+        self.render_workspace_with(workspace_id, infer_commands, &mut read_process_command)
+    }
+
+    #[cfg(test)]
     fn render_with(
         &self,
         infer_commands: bool,
         read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
     ) -> Result<RenderedDraft, String> {
-        let captured = capture_workspace(self)?;
+        self.render_workspace_with(self.target_workspace_id, infer_commands, read_command)
+    }
+
+    fn render_workspace_with(
+        &self,
+        workspace_id: i64,
+        infer_commands: bool,
+        read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
+    ) -> Result<RenderedDraft, String> {
+        let captured = capture_workspace(self, workspace_id)?;
         let mut infer_window_command = |container_id| {
             if !infer_commands {
                 return None;
@@ -237,10 +363,10 @@ enum Selector {
 
 /// Converts the target workspace's tiled hierarchy, refusing anything the layout format
 /// cannot represent rather than approximating it.
-fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
+fn capture_workspace(snapshot: &Snapshot, workspace_id: i64) -> Result<CapturedWorkspace, String> {
     let workspace = snapshot
         .tree
-        .find_as_ref(|node| node.id == snapshot.target_workspace_id)
+        .find_as_ref(|node| node.id == workspace_id && node.node_type == NodeType::Workspace)
         .ok_or("target workspace missing from tree")?;
     let name = workspace.name.as_deref().unwrap_or_default();
     let in_workspace = |error: String| format!("workspace {name:?}: {error}");
@@ -261,9 +387,20 @@ fn capture_workspace(snapshot: &Snapshot) -> Result<CapturedWorkspace, String> {
     let root = capture_group(workspace, 1, &mut layout_node_count).map_err(in_workspace)?;
 
     // Snapshot acquisition verified exactly one focused node and its workspace ancestry.
-    let focused = workspace
-        .find_as_ref(|node| node.focused)
-        .ok_or("no focused container in target workspace")?;
+    let focused = if workspace_id == snapshot.target_workspace_id {
+        workspace
+            .find_as_ref(|node| node.focused)
+            .ok_or("no focused container in target workspace")?
+    } else {
+        // Follow only verified direct tiled children. Snapshot validation already rejects
+        // duplicate identities, so neither stale references nor cycles can be followed.
+        let mut selected = workspace;
+        while !selected.nodes.is_empty() {
+            let child_index = selected_tiled_child(selected).map_err(in_workspace)?;
+            selected = &selected.nodes[child_index - 1];
+        }
+        selected
+    };
 
     Ok(CapturedWorkspace {
         root,
@@ -339,12 +476,22 @@ fn capture_active_child(group: &Node) -> Result<usize, String> {
         return Ok(1);
     }
 
+    selected_tiled_child(group)
+}
+
+/// Shared tab/stack selection and inactive-workspace focus descent. A singleton needs
+/// no ordering information, but any supplied references must still identify its child.
+fn selected_tiled_child(group: &Node) -> Result<usize, String> {
     let unusable_history = || {
         format!(
-            "container id={} has unusable child-focus history; cannot determine the selected tab/stack child",
+            "container id={} has unusable child-focus history; cannot determine the selected tiled child",
             group.id
         )
     };
+    if group.nodes.len() == 1 && group.focus.is_empty() {
+        return Ok(1);
+    }
+
     let selected_child_id = group.focus.first().ok_or_else(unusable_history)?;
     let selected_child_index = group
         .nodes

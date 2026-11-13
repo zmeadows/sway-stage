@@ -11,6 +11,7 @@ This is the authoritative contract for implemented behavior. Start with the
 | `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
 | `profile load NAME` | Construct layouts sequentially on the profile’s explicitly targeted empty workspaces. Success is silent. |
+| `profile capture NAME (WORKSPACE ... or --all) [--no-infer-commands]` | Save one layout draft per selected workspace and a profile referencing them. |
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
@@ -21,8 +22,8 @@ This is the authoritative contract for implemented behavior. Start with the
 Help, version, and invocation without a subcommand need no configuration or optional tools;
 no subcommand prints help and does nothing else.
 
-Global `--layouts-dir PATH` controls discovery and menu saves; standalone capture ignores
-it. Otherwise use `$XDG_CONFIG_HOME/sway-stage/layouts`, falling back to
+Global `--layouts-dir PATH` controls discovery, menu saves, and profile-capture layouts;
+standalone capture ignores it. Otherwise use `$XDG_CONFIG_HOME/sway-stage/layouts`, falling back to
 `$HOME/.config/sway-stage/layouts` when XDG_CONFIG_HOME is unset or empty. Nonempty default
 bases must be absolute. Explicit relative paths resolve from the CLI's working directory.
 
@@ -220,7 +221,7 @@ Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at
 1 MiB, no unknown fields, duplicate keys, aliases, merge keys, or custom tags, and no scalar
 coercion. Parser resource limits also apply. Errors identify the profile file and entry/field
 path, with line/column where available; invalid layout errors retain the referenced file's
-diagnostics. The unified menu also offers profile loading. Profile capture is not implemented.
+diagnostics. The unified menu also offers profile loading; profile capture is CLI-only.
 
 Run `sway-stage profile check work`, then `sway-stage profile load work`. Loading validates
 and retains every referenced configuration before contacting Sway; files are not reread
@@ -255,6 +256,63 @@ failures. Errors distinguish validation, workspace selection, and layout constru
 retain profile name, current workspace/layout, completed workspace targets/container IDs,
 and whether launches may have left partial layouts. A failed invocation attempts at most
 one fatal notification. `profile check` remains completely offline.
+
+## Capturing a profile
+
+Capture several existing workspaces without switching focus or launching applications:
+
+```sh
+sway-stage profile capture work 1 3 music "music player"
+sway-stage profile capture work --all
+sway-stage profile capture work --all --no-infer-commands
+# Optional independent directory overrides:
+sway-stage --layouts-dir ./layouts --profiles-dir ./profiles profile capture work 1 3
+```
+
+Specify at least one workspace or `--all`, exclusively. Numbers select by Sway workspace
+number: `3` captures `3:development`. Names select an exact non-numeric name with Sway
+`num = -1`; quote spaces in shell arguments. The same target limits and name restrictions
+as profile loading apply. Missing, duplicate, ambiguous, unsafe, or inconsistent identities
+fail before any files are written. Explicit selection order becomes profile order.
+
+`--all` captures populated ordinary workspaces, ordered by ascending workspace number,
+then lexicographically by exact non-numeric name. It excludes Sway's internal scratchpad
+output and skips genuinely empty workspaces. Empty structural containers are populated,
+and fail rendering. An unsupported populated ordinary name or layout fails the entire
+capture instead of silently omitting it. An empty selection or more than 256 targets fails.
+
+All workspaces come from exactly one bounded Sway tree response. No workspace is selected
+and no Sway mutation commands are sent. On the globally focused workspace, final `focus`
+retains actual keyboard focus. On inactive workspaces, capture follows verified direct-child
+focus histories to the last-focused tiled window, including nested splits, tabs, and stacks.
+Missing or unusable history fails when the window cannot be determined reliably. Capture
+does not guess the first window. The ordinary layout-capture restrictions below still apply.
+Command inference reads process metadata separately and is best-effort; disable it with
+`--no-infer-commands` to leave commands null.
+
+For `profile capture work 1 3 music`, the generated files are `profiles/work.yaml` and
+`layouts/work-001.yaml`, `layouts/work-002.yaml`, `layouts/work-003.yaml`, under the configured
+directories. The version 1 profile references those ordinal layout names in order, with
+workspace targets `1`, `3`, and `music`. It contains no output assignments. Profile names
+use the configuration-name grammar and are limited to 246 ASCII characters to leave room
+for `-NNN.yaml`. Existing filesystem component limits still apply.
+
+Layouts use the individual capture serializer and retain unresolved `command: null` or
+`match: null` placeholders. They are editable drafts: review recovered arguments, fill all
+placeholders, then run `sway-stage profile check work` before loading. Validation remains
+strict and rejects unresolved drafts. Successful capture reports the profile name, generated
+paths, and aggregate inference counts to stderr without recovered arguments. Success and
+failure preserve the existing launch log; failures also attempt a desktop notification.
+
+Publication never overwrites existing paths, including symlinks, directories, and alternate
+`.yml` filenames. Resolve collisions yourself or choose a different profile name. All YAML
+is rendered before writing; complete files are staged privately and synced before exclusive
+publication. New directories use private permissions and files are owner-only; existing
+directory permissions are retained. Layouts are published first and the profile last.
+Multi-file publication across directories is not atomic: filesystem failure can leave complete
+layouts and private staging files. Errors identify residual paths; no destructive rollback
+is attempted, and a failed layout publication never publishes the profile. Concurrent edits
+after publication and crashes are not a transactional filesystem guarantee.
 
 ## Loading, sizing, and safety
 
@@ -620,7 +678,7 @@ before loader IPC or application launches. Edit them in place and check them. Th
 
 ## Diagnostics and troubleshooting
 
-`load`, `profile load`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
+`load`, `profile load`, `profile capture`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
 notifications through `notify-send`. Sizing warnings also notify. Missing notification
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure

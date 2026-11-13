@@ -733,9 +733,74 @@ impl Harness {
                 }
                 let measurements =
                     verify_layout(second.verify(&loaded)?, &layouts[1], &accepted[1])?;
-                for note in measurements.sizing_notes {
+                for note in &measurements.sizing_notes {
                     println!("      {note}");
                 }
+
+                self.stage = format!("{name}: read-only profile capture");
+                let captured_layouts = files.subdirectory("captured-layouts")?;
+                let captured_profiles = files.subdirectory("captured-profiles")?;
+                let before_capture = snapshot(&self.sway, &mut self.events, None)?;
+                require_quiet(&before_capture.window_events, None)?;
+                foreign.verify(&before_capture)?;
+                if signature(&before_capture.tree) != signature(&loaded.tree) {
+                    return Err(Failure::Uncertain(
+                        "desktop changed before profile capture".into(),
+                    ));
+                }
+                let capture_revision = self.events.workspace_revision();
+                let mut command = Command::new(&self.binary);
+                command
+                    .arg("--layouts-dir")
+                    .arg(&captured_layouts.path)
+                    .arg("--profiles-dir")
+                    .arg(&captured_profiles.path)
+                    .args([
+                        "profile",
+                        "capture",
+                        "captured",
+                        &primary.name,
+                        second_number,
+                        "--no-infer-commands",
+                    ]);
+                self.sway.select_socket(&mut command);
+                let output = process::run(command, &self.stage, CAPTURE_TIMEOUT)?;
+                let after_capture = snapshot(&self.sway, &mut self.events, None)?;
+                require_quiet(&after_capture.window_events, None)?;
+                foreign.verify(&after_capture)?;
+                if !output.is_empty()
+                    || capture_revision != self.events.workspace_revision()
+                    || signature(&before_capture.tree) != signature(&after_capture.tree)
+                {
+                    return Err(Failure::Uncertain(
+                        "profile capture changed the observed desktop or emitted unexpected stdout"
+                            .into(),
+                    ));
+                }
+                let profile_yaml = fs::read_to_string(captured_profiles.path.join("captured.yaml"))
+                    .map_err(|error| format!("read captured profile: {error}"))?;
+                profile::verify_captured_references(&profile_yaml, &primary.name, second_number)?;
+                let first_measurements = crate::layout::verify_inactive_layout(
+                    primary_target.verify(&after_capture)?,
+                    &layouts[0],
+                    &accepted[0],
+                )?;
+                let second_measurements =
+                    verify_layout(second.verify(&after_capture)?, &layouts[1], &accepted[1])?;
+                for (index, measurements) in
+                    [first_measurements, second_measurements].iter().enumerate()
+                {
+                    let draft = fs::read_to_string(
+                        captured_layouts
+                            .path
+                            .join(format!("captured-{:03}.yaml", index + 1)),
+                    )
+                    .map_err(|error| format!("read captured layout: {error}"))?;
+                    verify_capture(&draft, &layouts[index], measurements)?;
+                }
+                println!(
+                    "      profile capture: inactive focus, hierarchy, sizing, selections, references, unchanged desktop"
+                );
             }
             println!(
                 "      workspaces {} id={} and {} id={} outputs={output:?}; second target {}",

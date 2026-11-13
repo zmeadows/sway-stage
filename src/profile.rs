@@ -1,7 +1,7 @@
 use crate::diagnostics::Diagnostics;
 use crate::observation::{self, Observer, WorkspaceSnapshot};
 use crate::{config, discovery, launch};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_saphyr::Spanned;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -10,14 +10,14 @@ use std::time::Instant;
 use swayipc::{Event, NodeType, WorkspaceChange};
 
 // Match the layout node limit: profiles are bounded plans for interactive construction.
-const MAX_WORKSPACES: usize = 256;
+pub(crate) const MAX_WORKSPACES: usize = 256;
 const MAX_WORKSPACE_NUMBER: u64 = 999_999_999;
 
 // A single quoted Sway argument preserves spaces. This allowlist deliberately excludes
 // quoting, separators, escapes, and variable syntax; it is not a general command encoder.
 const MAX_WORKSPACE_NAME_BYTES: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(
     untagged,
     expecting = "a positive YAML integer or an exact workspace name"
@@ -37,7 +37,7 @@ impl fmt::Display for WorkspaceTarget {
 }
 
 impl WorkspaceTarget {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         match self {
             Self::Number(number) => {
                 if !(1..=MAX_WORKSPACE_NUMBER).contains(number) {
@@ -94,7 +94,7 @@ impl WorkspaceTarget {
         })
     }
 
-    fn matches(&self, number: i32, name: &str) -> bool {
+    pub(crate) fn matches(&self, number: i32, name: &str) -> bool {
         match self {
             Self::Number(target) => u64::try_from(number) == Ok(*target),
             Self::Name(target) => number == -1 && name == target,
@@ -586,7 +586,7 @@ pub fn discover_names(profiles_dir: Option<PathBuf>) -> Result<Vec<String>, Stri
         .collect())
 }
 
-fn profile_directory(profiles_dir: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
+pub(crate) fn profile_directory(profiles_dir: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
     let is_explicit = profiles_dir.is_some();
     let directory = match profiles_dir {
         Some(path) => {

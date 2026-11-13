@@ -23,6 +23,11 @@ retained configurations after file removal, sequential selection/creation and co
 command failures/timeouts, conflicting identities/focus/history/occupancy, partial failure,
 completed-workspace diagnostics, and single fatal notifications. Exact command transcripts
 refuse retries, later selections, and rollback commands. They do not use the live compositor.
+Profile-capture fixtures cover one read-only GET_TREE, numeric and exact named selection,
+deterministic `--all` ordering, independent inactive focus, unresolved drafts, directory
+permissions, collisions, exclusive publication, residual-file diagnostics, and launch-log
+preservation. Offline publication tests create concurrent destination conflicts after staging
+and require complete layouts with no newly published profile after failure.
 Some CLI fixtures bind temporary Unix sockets, which restrictive sandboxes may forbid. The separate offline harness target is
 `cargo test --locked --test integration_harness`; it has no harness entry point and must
 never read `SWAYSOCK`, connect to Sway, or start processes.
@@ -138,10 +143,10 @@ independent verification, and the summary reports profile scenarios separately:
 
 | Scenario | Independent expectations |
 | --- | --- |
-| `profile-success` | Validate and load two distinct Foot layouts in profile order; check fresh IDs, workspace/output ancestry, hierarchy, window order, sizing, each target's selected focus, and final focus on the second target. |
+| `profile-success` | Validate and load two distinct Foot layouts in profile order; check fresh IDs, workspace/output ancestry, hierarchy, window order, sizing, each target's selected focus, and final focus on the second target. The first layout includes nested tabs, a singleton stack, and weighted splits. Capture both targets and verify inactive focus, hierarchy, sizing, selections, ordinal references, and unchanged desktop observations/history. |
 | `profile-occupied-refusal` | Use the still-live foreign fixture as the second entry; require exit 1 and its occupied-target diagnostic, no recorded launches, no workspace activity, and an unchanged complete observed desktop. |
 | `profile-partial-failure` | Complete the first Foot layout, then run `sleep 0` with a 500 ms matching-window timeout on the second target. Require exit 1, completed/failed workspace diagnostics, an intact first layout, an empty focused second target, and no observed rollback. |
-| `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
+| `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. Capture both the inactive named target and focused numeric target with the same independent draft/reference and preservation checks. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
 
 The named scenario reuses the primary reserved slot; no fourth workspace is required.
 It accepts exactly one expected rename event per rename and retains the existing event
@@ -150,7 +155,9 @@ window cleanup, or focus restoration; the printed disposable ID and old/new name
 what the user should inspect. It never renames an occupied workspace. The new named case
 has offline coverage and awaits user-run live acceptance.
 
-All four use private layout/profile directories, explicit directory overrides, and the pinned
+Both success cases capture with inference disabled into additional private directories, using
+only the two explicit reserved targets; the harness never runs live `--all`. All four use
+private layout/profile directories, explicit directory overrides, and the pinned
 Sway socket. Private launch records cover commands that produce no windows; ordered window
 events on either side of the single expected transition independently establish launch
 bindings. The inactive first workspace is checked through its saved child-focus path.
@@ -592,8 +599,19 @@ conditions and interference.
    an abort with all windows left in place and no focus restoration. Profiles must never move
    a workspace or assign an output. Record the Sway version and outputs tested.
 
+5. **Profile capture:** with existing disposable layouts on two reserved targets, leave
+   the second focused and run `sway-stage --layouts-dir ./capture-layouts --profiles-dir
+   ./capture-profiles profile capture work 8 10 --no-infer-commands` using unused private
+   directories and your actual target numbers. Compare both drafts' focus, nested tab/stack
+   selections, hierarchy, and sizing to the desktop without switching during capture. Check
+   `work.yaml` references `work-001` and `work-002` in that order. Repeat separately with
+   command inference enabled and a different profile name; review recovered commands.
+   Missing metadata must retain placeholders, and `profile check` must refuse them until
+   edited. Repeat an existing name: it must fail without replacing files or the launch log.
+   Use offline fixtures for `--all`; do not include unrelated real workspaces in live tests.
+
 The user has successfully run the complete extended harness, including the original three
-numeric profile scenarios, in their live Sway session. The additional manual variants above remain unverified;
+numeric profile scenarios, in their live Sway session. The new profile-capture harness steps have not yet been run live. The additional manual variants above remain unverified;
 cross-monitor and interference runs provide optional further coverage. A successful run does
 not establish broader compositor compatibility or transactional isolation.
 

@@ -59,11 +59,19 @@ pub fn layouts(
     launch_record: &str,
 ) -> [Scenario; 2] {
     let unique_id = format!("{run_id}-{}", case.name());
-    let mut pairs = standard_scenarios(&unique_id, foot, sleep).into_iter();
-    let mut first = pairs
-        .find(|scenario| scenario.name == "horizontal-pair")
-        .expect("standard horizontal-pair scenario");
-    let mut second = pairs
+    let scenarios = standard_scenarios(&unique_id, foot, sleep);
+    let first_name = if case == Case::Success {
+        "mixed-capture-reload"
+    } else {
+        "horizontal-pair"
+    };
+    let mut first = scenarios
+        .iter()
+        .find(|scenario| scenario.name == first_name)
+        .cloned()
+        .expect("standard first profile scenario");
+    let mut second = scenarios
+        .into_iter()
         .find(|scenario| scenario.name == "vertical-pair")
         .expect("standard vertical-pair scenario");
     first.name = "profile-first";
@@ -120,6 +128,30 @@ pub fn configuration(primary: &str, second: &str) -> String {
     format!(
         "version: 1\nworkspaces:\n  - workspace: {primary}\n    layout: profile-first\n  - workspace: {second}\n    layout: profile-second\n"
     )
+}
+
+/// Independent decoding of the two known profile references. Layout verification is
+/// performed separately against measured Sway state, never through production parsing.
+pub fn verify_captured_references(yaml: &str, primary: &str, second: &str) -> Result<(), String> {
+    let observed: serde_json::Value =
+        serde_saphyr::from_str(yaml).map_err(|_| "invalid captured profile YAML")?;
+    let target = |name: &str| -> serde_json::Value {
+        match name.parse::<u64>() {
+            Ok(number) => serde_json::json!(number),
+            Err(_) => serde_json::json!(name),
+        }
+    };
+    let expected = serde_json::json!({
+        "version": 1,
+        "workspaces": [
+            {"workspace": target(primary), "layout": "captured-001"},
+            {"workspace": target(second), "layout": "captured-002"},
+        ]
+    });
+    if observed != expected {
+        return Err("captured profile targets/order/references differ".into());
+    }
+    Ok(())
 }
 
 /// Existing targets keep their identity/output; missing ones may be created on any

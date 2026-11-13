@@ -77,6 +77,7 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage check NAME` | Validate without contacting Sway or launching anything. |
 | `sway-stage load NAME` | Launch a layout on the focused, empty workspace. |
 | `sway-stage profile check NAME` | Validate a profile and all referenced layouts without contacting Sway. |
+| `sway-stage profile capture NAME 1 3 music` | Save existing workspaces as layout drafts and a named profile. |
 | `sway-stage profile load NAME` | Launch layouts in order on the profile's explicitly targeted, empty workspaces. |
 | `sway-stage capture > draft.yaml` | Capture the current arrangement as an editable draft. |
 | `sway-stage menu` | Choose a layout, profile, or workspace capture through one Fuzzel menu. |
@@ -87,7 +88,15 @@ profiles; populated workspaces offer capture when supported, plus profiles. Entr
 load. Use `check NAME` or `profile check NAME` for details. `menu --no-infer-commands`
 disables command inference only for individual-workspace capture.
 
-Use `--layouts-dir PATH` to read layouts and save menu captures elsewhere.
+Use `--layouts-dir PATH` to read layouts and save captures elsewhere.
+`profile capture work 1 3 "music player"` captures existing numbered and exact named
+workspaces from one snapshot without changing focus. Use `--all` for all populated ordinary
+workspaces, numbers first then names; unsupported populated workspaces fail the capture.
+It saves `work.yaml` in the profiles directory and `work-001.yaml`, `work-002.yaml`, … in
+the layouts directory. `--profiles-dir PATH` overrides the profile destination. Existing
+files are never overwritten; a filesystem failure may leave layouts without a profile.
+Edit unresolved placeholders and run `profile check work` before loading. See the
+[profile capture reference](docs/SPECIFICATION.md#capturing-a-profile).
 Captures preserve arrangement, sizes, selectors, tab/stack selections, and focus, and attempt to
 reconstruct launch commands. Inference is best-effort; unresolved commands remain `null`.
 Inspect and edit these drafts before loading. Review inferred commands before loading or
