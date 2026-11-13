@@ -4,7 +4,7 @@
 
 `sway-stage` is a small Linux CLI that constructs declarative tiled layouts on the
 currently focused, empty Sway workspace, or sequentially on a named profile’s explicit
-numeric workspaces. Prioritize, in order:
+workspace numbers or exact non-numeric names. Prioritize, in order:
 
 1. Preserving the user's windows and workspace state.
 2. Correct behavior with understandable failures.
@@ -94,9 +94,10 @@ Do not add dependencies for stylistic reasons.
 ## Safety invariants
 
 - The ordinary loader freezes the focused workspace as its target and never selects or
-  creates a workspace. Only the profile coordinator may select/create the numeric workspaces
-  explicitly configured in a fully validated profile, sequentially in YAML order. Validate
-  and retain all referenced configurations before IPC; preflight every target read-only
+  creates a workspace. Only the profile coordinator may select/create the workspaces
+  explicitly configured by validated numeric identity or exact non-numeric name in a fully
+  validated profile, sequentially in YAML order. Validate and retain all referenced
+  configurations before IPC; preflight every target read-only
   before switching. Refuse any tiled or floating occupancy, including empty containers.
   Recheck focus, target identity/output, and occupancy before each selection, verify the
   bounded command reply and resulting state/history, then invoke the unchanged layout engine
@@ -119,7 +120,10 @@ Do not add dependencies for stylistic reasons.
 - Never close, move, resize, or reuse a preexisting window. Never issue global scratchpad
   operations. Direct mutations only at this run's accepted windows and containers whose
   descendants are all owned by the run; revalidate before each mutation. Never use broad
-  app-ID/class criteria for mutations or interpolate user strings into Sway commands.
+  app-ID/class criteria for mutations or interpolate arbitrary user strings into Sway commands.
+  The profile coordinator's sole string exception is a validated literal workspace name,
+  restricted to its bounded ASCII allowlist and checked against reserved command keywords;
+  revalidate it when building the quoted selection command.
 - Check every IPC command reply, then verify the observed hierarchy. Do not equate an
   accepted command with the intended result. Size adjustment is bounded and tolerates
   small deviations; significant deviations produce a warning, not an endless resize loop.

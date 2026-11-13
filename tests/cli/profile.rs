@@ -432,3 +432,39 @@ fn profile_check_never_connects_launches_notifies_or_changes_logs_even_on_failur
         }
     }
 }
+
+#[test]
+fn profile_check_accepts_exact_names_and_reports_invalid_target_locations_offline() {
+    let fixture = CliFixture::new();
+    fixture.file("development.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("browser.yml", SINGLE_WINDOW_YAML);
+    let arguments = [
+        "--profiles-dir",
+        ".",
+        "--layouts-dir",
+        ".",
+        "profile",
+        "check",
+        "work",
+    ];
+    fixture.file(
+        "work.yaml",
+        &PROFILE.replace("workspace: 1", "workspace: 'music player'"),
+    );
+    let output = fixture.run(&arguments, 0);
+    assert_eq!(output.stdout, b"work: valid\n");
+    assert!(output.stderr.is_empty());
+    for target in ["'1'", "'1:code'", "'next'", "'music;exit'", "[]", "false"] {
+        fixture.file(
+            "work.yaml",
+            &PROFILE.replace("workspace: 1", &format!("workspace: {target}")),
+        );
+        let output = fixture.run(&arguments, 1);
+        let error = String::from_utf8_lossy(&output.stderr);
+        for expected in ["work.yaml", "workspaces[1].workspace", "line 5", "column"] {
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(!error.contains("SWAYSOCK"), "{error}");
+    }
+    assert!(!fixture.path.join(".local/state").exists());
+}

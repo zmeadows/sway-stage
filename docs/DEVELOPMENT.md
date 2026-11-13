@@ -82,14 +82,14 @@ from another workspace, outside **all three** targets:
 All three numbers must be distinct and obey the same restrictions above. The additional
 profile target is preflighted before any desktop mutation and rechecked before each profile.
 It must be absent or completely empty; the harness never clears occupied workspaces.
-Omitting `--profile-workspace` keeps the existing two-workspace suite and reports three
+Omitting `--profile-workspace` keeps the existing two-workspace suite and reports four
 profile SKIPs. The flag also works with `--extended`.
 
 | Option | Meaning |
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
-| `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables three profile scenarios after the other scenarios, while the foreign fixture stays alive. |
+| `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables four profile scenarios after the other scenarios, while the foreign fixture stays alive. |
 | `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, unresolved-command, and two optional package-inference cases. |
 | `--appimage PATH` | Enable real AppImage inference with an existing executable; requires `--extended`. |
 | `--flatpak APP_ID` | Enable real Flatpak inference with an installed application ID; requires `--extended`. |
@@ -125,15 +125,15 @@ no layout reset or placeholder windows are used. Sway's
 updates the empty workspace directly.
 
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect twenty passes and three profile SKIPs for the standard two-workspace suite.
+commands. Expect twenty passes and four profile SKIPs for the standard two-workspace suite.
 Extended runs add eight cases, for twenty-eight total, plus the separate foreign fixture.
 With the original optional prerequisites available, an extended run without package flags
-reports twenty-six passes, two package SKIPs, and three profile SKIPs; supplying one package
+reports twenty-six passes, two package SKIPs, and four profile SKIPs; supplying one package
 enables twenty-seven possible passes, and both enable twenty-eight. Other missing optional
 prerequisites still produce explicit SKIPs.
 
-With `--profile-workspace`, add three passes (twenty-three standard, or up to thirty-one
-extended) and remove the three profile SKIPs. Expected failures count as passes only after
+With `--profile-workspace`, add four passes (twenty-four standard, or up to thirty-two
+extended) and remove the four profile SKIPs. Expected failures count as passes only after
 independent verification, and the summary reports profile scenarios separately:
 
 | Scenario | Independent expectations |
@@ -141,8 +141,16 @@ independent verification, and the summary reports profile scenarios separately:
 | `profile-success` | Validate and load two distinct Foot layouts in profile order; check fresh IDs, workspace/output ancestry, hierarchy, window order, sizing, each target's selected focus, and final focus on the second target. |
 | `profile-occupied-refusal` | Use the still-live foreign fixture as the second entry; require exit 1 and its occupied-target diagnostic, no recorded launches, no workspace activity, and an unchanged complete observed desktop. |
 | `profile-partial-failure` | Complete the first Foot layout, then run `sleep 0` with a 500 ms matching-window timeout on the second target. Require exit 1, completed/failed workspace diagnostics, an intact first layout, an empty focused second target, and no observed rollback. |
+| `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
 
-All three use private layout/profile directories, explicit directory overrides, and the pinned
+The named scenario reuses the primary reserved slot; no fourth workspace is required.
+It accepts exactly one expected rename event per rename and retains the existing event
+subscription. Any unexpected result or interruption stops the run without name restoration,
+window cleanup, or focus restoration; the printed disposable ID and old/new names identify
+what the user should inspect. It never renames an occupied workspace. The new named case
+has offline coverage and awaits user-run live acceptance.
+
+All four use private layout/profile directories, explicit directory overrides, and the pinned
 Sway socket. Private launch records cover commands that produce no windows; ordered window
 events on either side of the single expected transition independently establish launch
 bindings. The inactive first workspace is checked through its saved child-focus path.
@@ -156,7 +164,7 @@ force creation. Natural removal of an empty unfocused workspace is allowed after
 On independently verified success or expected failure, cleanup closes the second target's
 owned windows first, returns to the primary, then establishes fresh evidence before closing
 its windows. Unexpected or ambiguous outcomes leave remaining windows untouched and forbid
-restoration; diagnostics report both target numbers, last known owned IDs, and remaining
+restoration; diagnostics report both targets, last known owned IDs, and remaining
 run-specific window candidates. The short-lived timeout command has no window to close.
 
 Targets may naturally share an output or occupy different outputs. The harness checks actual
@@ -541,7 +549,7 @@ unverified; do not infer compatibility from one run.
 
 User only: use a private copy of the single profile example in the
 [specification](SPECIFICATION.md#named-profiles-version-1), pointing to trusted test layouts.
-Replace all three workspace numbers with unused disposable targets in your existing session.
+Replace the example targets with unused disposable numbers and names in your existing session.
 Use harmless applications with distinct, verified selectors; keep all targets empty and input
 idle. Build first, run `sway-stage profile check work` with your directory overrides, and use
 those same overrides for `sway-stage profile load work` in each independent run below.
@@ -549,14 +557,16 @@ The profile coordinator selects the targets itself. The optional harness profile
 above automate the basic two-target cases; these separate manual checks cover additional
 conditions and interference.
 
-1. **Normal loading:** include an existing empty numbered workspace with a descriptive name
-   and a missing target. Load from another workspace. Verify YAML order, each hierarchy,
+1. **Normal loading:** include an existing empty numbered workspace with a descriptive name,
+   an existing true named workspace (`num = -1`), and a missing named target containing
+   spaces. Load from another workspace. Verify YAML order, each hierarchy,
    sizing/final focus, and final target focus. Expect silent success and one launch log
-   showing all three completed numbers/container IDs.
+   showing all three completed targets/container IDs.
 2. **Occupied refusal:** put a window on the last target, keeping earlier targets empty.
    Record original focus and existing windows, then load. Expect exit 1 before any switch
    or application launch, unchanged windows/focus, zero completed workspaces, and one fatal
-   notification. Repeat with a floating window. Remove test windows manually between runs.
+   notification. Repeat with a floating window and an empty structural container on a named
+   target. Remove test windows manually between runs.
 3. **Partial failure:** on fresh empty targets, make a private copy of the second layout
    launch one valid window followed by an executable that does not exist. Offline check
    should pass. Load and verify the first layout remains complete, the second retains its
@@ -566,14 +576,14 @@ conditions and interference.
    focus during construction; it must stop further work. Inspect and close test windows
    yourself before another attempt.
 4. **Multi-monitor placement:** with two outputs, use your existing Sway workspace rules to
-   place empty targets on different outputs. Verify selection reaches the numbered workspace
-   on its existing output, and missing targets follow Sway's normal placement rules. In separate
+   place empty targets on different outputs. Verify selection reaches each numbered or named
+   workspace on its existing output, and missing targets follow Sway's normal placement rules. In separate
    runs move a target to another output during construction, including away and back; expect
    an abort with all windows left in place and no focus restoration. Profiles must never move
    a workspace or assign an output. Record the Sway version and outputs tested.
 
-The user has successfully run the complete extended harness, including all three profile
-scenarios, in their live Sway session. The additional manual variants above remain unverified;
+The user has successfully run the complete extended harness, including the original three
+numeric profile scenarios, in their live Sway session. The additional manual variants above remain unverified;
 cross-monitor and interference runs provide optional further coverage. A successful run does
 not establish broader compositor compatibility or transactional isolation.
 

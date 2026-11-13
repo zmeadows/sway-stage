@@ -10,7 +10,7 @@ This is the authoritative contract for implemented behavior. Start with the
 | --- | --- |
 | `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
-| `profile load NAME` | Construct layouts sequentially on the profile’s numbered empty workspaces. Success is silent. |
+| `profile load NAME` | Construct layouts sequentially on the profile’s explicitly targeted empty workspaces. Success is silent. |
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
@@ -185,17 +185,29 @@ version: 1
 workspaces:
   - workspace: 1
     layout: development
-  - workspace: 2
-    layout: browser
-  - workspace: 3
+  - workspace: music
     layout: monitoring
+  - workspace: "music player"
+    layout: browser
 ```
 
 `version` must be the unquoted integer `1`. `workspaces` is a required sequence of 1 to
 256 mappings, each with exactly the required `workspace` and `layout` fields. Workspace
-numbers must be unique unquoted positive integers from `1` to `999999999`. Entry order is
-preserved, even when workspace numbers are out of numerical order. Different workspaces
-may reference the same layout.
+targets must be unique. Unquoted positive integers from `1` to `999999999` select by
+numeric identity, including existing descriptive names such as `1:code`. YAML strings
+select by exact, case-sensitive name and require Sway's observed workspace number to be
+`-1`. Quoted numeric strings (`"1"`) and numeric-prefixed names (`"1:code"`) are rejected
+as ambiguous; use the integer `1` for a numbered workspace. Booleans, null, floats,
+negative numbers, sequences, and mappings are invalid targets. Entry order is preserved,
+even when numbers are out of numerical order; layouts may be referenced repeatedly.
+
+Names contain 1 to 128 ASCII bytes, begin with a letter, and permit only letters, digits,
+internal spaces, underscores, hyphens, periods, colons, and plus signs. Leading/trailing
+spaces are invalid. Names equal to `number`, `next`, `prev`, `next_on_output`,
+`prev_on_output`, `current`, `back_and_forth`, `output`, or `gaps` are reserved,
+case-insensitively. Quotes, escapes, command separators, variable references, controls,
+and other syntax are rejected. These constraints also apply to quoted YAML strings;
+quoting a reserved or unsafe name does not make it valid.
 
 Each `layout` is a name following the existing layout naming and discovery rules, resolved
 in the layouts directory independently of the profile file's location. Every referenced
@@ -211,15 +223,17 @@ diagnostics. Profile capture and menu integration are not implemented.
 
 Run `sway-stage profile check work`, then `sway-stage profile load work`. Loading validates
 and retains every referenced configuration before contacting Sway; files are not reread
-during construction. It preflights **all** numbered targets before the first workspace
+during construction. It preflights **all** configured targets before the first workspace
 selection. Every existing target must have no tiled or floating children, including empty
 structural containers. Missing targets are eligible for creation when selected; preflight
-never creates them. Ambiguous numbers, inconsistent observations, or occupancy refuse the
-entire profile before switching or launching.
+never creates them. Duplicate workspace names, ambiguous numbers, inconsistent observations,
+or occupancy refuse the entire profile before switching or launching.
 
 Entries execute in YAML order. Before each selection, loading rechecks focus, target identity,
-output, and emptiness, then selects the explicit number with auto-back-and-forth disabled.
-Existing names such as `1: development` match by numeric identity. Each successful selection
+output, and emptiness, then selects the validated number or literal name with
+auto-back-and-forth disabled. Existing names such as `1: development` match by numeric
+identity only when the configured target is an integer. Distinct named workspaces remain
+distinct even though they all report `num = -1`. Each successful selection
 requires observed focus, identity, emptiness, and event history to agree before the ordinary
 layout loader starts. Only the coordinator selects workspaces; each individual construction
 retains all loader ownership, matching, hierarchy, focus, and containing-output safeguards.
@@ -237,7 +251,7 @@ cannot guarantee isolation from concurrent desktop activity.
 
 One diagnostics session and `last-run.log` cover the whole invocation, including validation
 failures. Errors distinguish validation, workspace selection, and layout construction, and
-retain profile name, current workspace/layout, completed workspace numbers/container IDs,
+retain profile name, current workspace/layout, completed workspace targets/container IDs,
 and whether launches may have left partial layouts. A failed invocation attempts at most
 one fatal notification. `profile check` remains completely offline.
 
@@ -250,7 +264,7 @@ arrangements are outside the layout format.
 
 The following safeguards apply to each layout construction. Standalone and menu loading
 retain their focused-workspace behavior; only profile coordination may select the profile’s
-explicit workspace numbers:
+explicit validated workspace numbers or names:
 
 1. Validate the complete file before launching applications or mutating Sway. Standalone
    Load validates before contacting Sway; menu takes its read-only snapshot first. Select the

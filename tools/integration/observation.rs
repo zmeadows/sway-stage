@@ -106,12 +106,13 @@ impl Events {
         &mut self,
         swaymsg: &Swaymsg,
         expected_switch: Option<&ExpectedSwitch>,
+        expected_rename: Option<&WorkspaceIdentity>,
     ) -> Result<(Vec<WindowEvent>, Option<usize>), String> {
         if !self.focus_history_trusted {
             return Err("event history is no longer trusted; refusing another fence".into());
         }
 
-        let result = self.read_through_fence(swaymsg, expected_switch);
+        let result = self.read_through_fence(swaymsg, expected_switch, expected_rename);
         if result.is_err() {
             self.focus_history_trusted = false;
         }
@@ -122,6 +123,7 @@ impl Events {
         &mut self,
         swaymsg: &Swaymsg,
         expected_switch: Option<&ExpectedSwitch>,
+        expected_rename: Option<&WorkspaceIdentity>,
     ) -> Result<(Vec<WindowEvent>, Option<usize>), String> {
         // The tick request counts against the same deadline as the events before it.
         let deadline = Instant::now() + IPC_TIMEOUT;
@@ -130,6 +132,7 @@ impl Events {
 
         let mut window_events = Vec::new();
         let mut switch_window_index = None;
+        let mut observed_rename = false;
         for _ in 0..MAX_FENCE_EVENTS {
             let workspace_event = match self.subscription.next_event(deadline)? {
                 Event::Tick(tick) => {
@@ -137,6 +140,9 @@ impl Events {
                     if tick.payload == token && !tick.first {
                         if expected_switch.is_some() && switch_window_index.is_none() {
                             return Err("workspace switch produced no expected focus event".into());
+                        }
+                        if expected_rename.is_some() && !observed_rename {
+                            return Err("workspace rename produced no expected event".into());
                         }
                         return Ok((window_events, switch_window_index));
                     }
@@ -150,6 +156,20 @@ impl Events {
             };
             if workspace_event.change != WorkspaceChange::Urgent {
                 self.workspace_revision += 1;
+            }
+            if let Some(renamed) = expected_rename {
+                if workspace_event.change == WorkspaceChange::Rename && !observed_rename {
+                    accept_disposable_rename(
+                        &workspace_event,
+                        renamed,
+                        &mut self.current_workspace,
+                    )?;
+                    observed_rename = true;
+                    continue;
+                }
+                if workspace_event.change != WorkspaceChange::Urgent {
+                    return Err("unexpected workspace activity during disposable rename".into());
+                }
             }
             apply_workspace_event(
                 &workspace_event,
@@ -319,7 +339,7 @@ pub fn snapshot(
     events: &mut Events,
     expected_switch: Option<&ExpectedSwitch>,
 ) -> Result<Snapshot, String> {
-    synchronized_snapshot(swaymsg, events, expected_switch).map(|(observed, _)| observed)
+    synchronized_snapshot(swaymsg, events, expected_switch, None).map(|(observed, _)| observed)
 }
 
 /// Profile loads have one switch. Retain its position among window events so launches
@@ -330,19 +350,55 @@ pub fn snapshot_with_switch(
     expected_switch: &ExpectedSwitch,
 ) -> Result<(Snapshot, usize), String> {
     let (observed, switch_window_index) =
-        synchronized_snapshot(swaymsg, events, Some(expected_switch))?;
+        synchronized_snapshot(swaymsg, events, Some(expected_switch), None)?;
     let switch_window_index = switch_window_index.ok_or("missing profile transition boundary")?;
     Ok((observed, switch_window_index))
+}
+
+/// Only the success path's explicit disposable rename may accept this event. Ordinary
+/// snapshots still reject every rename; no history is discarded or resubscribed.
+pub fn snapshot_after_rename(
+    swaymsg: &Swaymsg,
+    events: &mut Events,
+    renamed: &WorkspaceIdentity,
+) -> Result<Snapshot, String> {
+    synchronized_snapshot(swaymsg, events, None, Some(renamed)).map(|(observed, _)| observed)
+}
+
+fn accept_disposable_rename(
+    event: &WorkspaceEvent,
+    renamed: &WorkspaceIdentity,
+    focused: &mut Option<WorkspaceIdentity>,
+) -> Result<(), String> {
+    let expected_number = renamed.name.parse::<i32>().unwrap_or(-1);
+    if event.change != WorkspaceChange::Rename
+        || !focused
+            .as_ref()
+            .is_some_and(|workspace| workspace.id == renamed.id)
+        || !event.current.as_ref().is_some_and(|node| {
+            node.node_type == Some(NodeType::Workspace)
+                && node.id == renamed.id
+                && node.name.as_ref() == Some(&renamed.name)
+                && node.num == Some(expected_number)
+        })
+        || event.old.is_some()
+    {
+        return Err("disposable rename event has an unexpected identity".into());
+    }
+    *focused = Some(renamed.clone());
+    Ok(())
 }
 
 fn synchronized_snapshot(
     swaymsg: &Swaymsg,
     events: &mut Events,
     expected_switch: Option<&ExpectedSwitch>,
+    expected_rename: Option<&WorkspaceIdentity>,
 ) -> Result<(Snapshot, Option<usize>), String> {
     let workspaces = swaymsg.get_workspaces()?;
     let tree = swaymsg.get_tree()?;
-    let (window_events, switch_window_index) = events.fence(swaymsg, expected_switch)?;
+    let (window_events, switch_window_index) =
+        events.fence(swaymsg, expected_switch, expected_rename)?;
 
     let focused_workspace_id = validate_snapshot(&tree, &workspaces, events.current_workspace())
         .map_err(|error| events.distrust_focus_history(error))?;
@@ -422,6 +478,9 @@ fn validate_snapshot(
         let tree_name = tree_workspaces
             .get(&workspace.id)
             .and_then(|node| node.name.as_deref());
+        if tree_workspaces.get(&workspace.id).and_then(|node| node.num) != Some(workspace.num) {
+            return Err("workspace query and raw tree numbers disagree".into());
+        }
         if tree_name != Some(workspace.name.as_str()) {
             return Err("workspace query and raw tree names disagree".into());
         }

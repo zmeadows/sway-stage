@@ -65,7 +65,7 @@ pub struct Arguments {
         help = "Second empty disposable workspace for the owned foreign-window fixture")]
     foreign_workspace: String,
     #[arg(long, value_parser = workspace_number,
-        help = "Third empty disposable workspace; enables three multi-workspace profile scenarios")]
+        help = "Third empty disposable workspace; enables four multi-workspace profile scenarios")]
     profile_workspace: Option<String>,
     #[arg(
         long,
@@ -441,7 +441,12 @@ impl Harness {
         self.current_scenario = None;
         if let Some(second) = self.arguments.profile_workspace.clone() {
             for case in profile::CASES {
-                if let Err(failure) = self.run_profile(case, &second, &directory) {
+                let result = if case == profile::Case::NamedSuccess {
+                    self.run_named_profile(&second, &directory)
+                } else {
+                    self.run_profile(case, &second, &directory)
+                };
+                if let Err(failure) = result {
                     self.events
                         .distrust_focus_history("profile scenario failed; retained windows");
                     return Err(failure);
@@ -464,6 +469,54 @@ impl Harness {
         Ok(())
     }
 
+    fn run_named_profile(
+        &mut self,
+        second: &str,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), Failure> {
+        let original_name = self
+            .disposable
+            .as_ref()
+            .expect("primary selected")
+            .name
+            .clone();
+        let named = format!("stage-{} music", self.run_id);
+        self.rename_empty_primary(&named)?;
+        self.run_profile(profile::Case::NamedSuccess, second, directory)?;
+        // Name restoration is an explicit verified success phase, never a failure handler.
+        self.rename_empty_primary(&original_name)?;
+        self.passed += 1;
+        self.profile_passed += 1;
+        println!(
+            "PASS  profile-named-success (independent verification; cleanup and original name verified)"
+        );
+        Ok(())
+    }
+
+    fn rename_empty_primary(&mut self, destination: &str) -> Result<(), Failure> {
+        self.stage = "profile named target: guarded disposable rename".into();
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        let primary = self.disposable.as_ref().expect("primary selected");
+        profile::verify_rename_preparation(&before, primary, destination)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let renamed = WorkspaceIdentity {
+            id: primary.id,
+            name: destination.into(),
+        };
+        println!(
+            "      renaming disposable id={} {:?} to {:?}; failure retains its current name",
+            primary.id, primary.name, destination
+        );
+        interruption_check()?;
+        self.sway.rename_disposable(&primary.name, destination)?;
+        let after =
+            crate::observation::snapshot_after_rename(&self.sway, &mut self.events, &renamed)?;
+        profile::verify_rename_result(&before, &after, &renamed)?;
+        foreign.verify(&after)?;
+        self.disposable = Some(renamed);
+        Ok(())
+    }
+
     fn run_profile(
         &mut self,
         case: profile::Case,
@@ -477,7 +530,14 @@ impl Harness {
             second_number.to_owned()
         };
         self.profile_progress = vec![
-            (self.arguments.workspace.clone(), AcceptedWindows::new()),
+            (
+                self.disposable
+                    .as_ref()
+                    .expect("primary selected")
+                    .name
+                    .clone(),
+                AcceptedWindows::new(),
+            ),
             (destination.clone(), AcceptedWindows::new()),
         ];
         self.stage = format!("{name}: preparation");
@@ -505,7 +565,10 @@ impl Harness {
         }
         profiles_directory.write(
             name,
-            &profile::configuration(&self.arguments.workspace, &destination),
+            &profile::configuration(
+                &self.disposable.as_ref().expect("primary selected").name,
+                &destination,
+            ),
         )?;
         let profile_command = |operation: &str| {
             let mut command = Command::new(&self.binary);
@@ -523,7 +586,7 @@ impl Harness {
             return Err(Failure::Uncertain("unexpected profile check output".into()));
         }
         let mut command = profile_command("load");
-        if case != profile::Case::Success {
+        if matches!(case, profile::Case::Occupied | profile::Case::Partial) {
             files.suppress_notification(&mut command, &env::var_os("PATH").unwrap_or_default())?;
         }
 
@@ -721,7 +784,7 @@ impl Harness {
 
             self.stage = format!("{name}: return to primary and refresh cleanup evidence");
             interruption_check()?;
-            self.sway.switch_disposable(&primary.name)?;
+            self.sway.restore_workspace(&primary.name)?;
             let transition = ExpectedSwitch {
                 from_id: second.workspace.id,
                 destination_name: primary.name.clone(),
@@ -766,9 +829,11 @@ impl Harness {
             require_empty(cleaned.focused_workspace())?;
         }
         self.profile_progress.clear();
-        self.passed += 1;
-        self.profile_passed += 1;
-        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        if case != profile::Case::NamedSuccess {
+            self.passed += 1;
+            self.profile_passed += 1;
+            println!("PASS  {name} (independent verification; success-path cleanup only)");
+        }
         Ok(())
     }
 

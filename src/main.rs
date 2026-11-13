@@ -69,7 +69,7 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum ProfileCommand {
-    /// Construct layouts in order on the profile's explicitly numbered empty workspaces
+    /// Construct layouts in order on the profile's explicitly targeted empty workspaces
     Load {
         /// Profile name (the YAML filename without its extension)
         name: String,

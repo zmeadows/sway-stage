@@ -7,7 +7,7 @@ applies relative sizes, selects your final focus, and exits. Use it for arrangem
 such as a browser beside a column of terminals, without scripting window placement.
 
 Ordinary `load` constructs one layout on the **currently focused, empty workspace**.
-Named profiles sequentially construct layouts across multiple explicitly numbered, empty
+Named profiles sequentially construct layouts across multiple explicitly targeted, empty
 Sway workspaces; see the [profile reference and example](docs/SPECIFICATION.md#named-profiles-version-1).
 Applications are launched fresh; existing windows are never rearranged. Unexpected conditions
 cause a conservative stop, leaving any applications already started in place.
@@ -78,7 +78,7 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage check NAME` | Validate without contacting Sway or launching anything. |
 | `sway-stage load NAME` | Launch a layout on the focused, empty workspace. |
 | `sway-stage profile check NAME` | Validate a profile and all referenced layouts without contacting Sway. |
-| `sway-stage profile load NAME` | Launch layouts in order on the profile's explicitly numbered, empty workspaces. |
+| `sway-stage profile load NAME` | Launch layouts in order on the profile's explicitly targeted, empty workspaces. |
 | `sway-stage capture > draft.yaml` | Capture the current arrangement as an editable draft. |
 | `sway-stage menu` | Load a layout or save a named capture through Fuzzel. |
 

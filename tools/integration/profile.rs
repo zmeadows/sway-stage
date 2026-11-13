@@ -9,11 +9,17 @@ use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
 use crate::preservation::output_ancestry;
 use crate::scenarios::{Scenario, foreign_fixture_scenario, standard_scenarios};
 
-pub const CASES: [Case; 3] = [Case::Success, Case::Occupied, Case::Partial];
+pub const CASES: [Case; 4] = [
+    Case::Success,
+    Case::Occupied,
+    Case::Partial,
+    Case::NamedSuccess,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Case {
     Success,
+    NamedSuccess,
     Occupied,
     Partial,
 }
@@ -22,6 +28,7 @@ impl Case {
     pub fn name(self) -> &'static str {
         match self {
             Self::Success => "profile-success",
+            Self::NamedSuccess => "profile-named-success",
             Self::Occupied => "profile-occupied-refusal",
             Self::Partial => "profile-partial-failure",
         }
@@ -105,6 +112,11 @@ fn wrap_launches(
 }
 
 pub fn configuration(primary: &str, second: &str) -> String {
+    let primary = if primary.bytes().all(|byte| byte.is_ascii_digit()) {
+        primary.to_owned()
+    } else {
+        serde_json::to_string(primary).expect("string serialization")
+    };
     format!(
         "version: 1\nworkspaces:\n  - workspace: {primary}\n    layout: profile-first\n  - workspace: {second}\n    layout: profile-second\n"
     )
@@ -115,24 +127,33 @@ pub fn configuration(primary: &str, second: &str) -> String {
 pub struct Target {
     pub workspace: WorkspaceIdentity,
     output: Vec<(i64, Option<String>)>,
+    number: i32,
 }
 
 impl Target {
-    pub fn record(observed: &Snapshot, number: &str) -> Result<Option<Self>, Failure> {
+    pub fn record(observed: &Snapshot, target_name: &str) -> Result<Option<Self>, Failure> {
         let candidates: Vec<_> = observed
             .workspaces
             .iter()
-            .filter(|workspace| workspace.num.to_string() == number || workspace.name == number)
+            .filter(|workspace| {
+                workspace.num.to_string() == target_name || workspace.name == target_name
+            })
             .collect();
         match candidates.as_slice() {
             [] => Ok(None),
-            [workspace] if workspace.name == number => Ok(Some(Self {
-                workspace: WorkspaceIdentity {
-                    id: workspace.id,
-                    name: workspace.name.clone(),
-                },
-                output: output_ancestry(&observed.tree, workspace.id)?,
-            })),
+            [workspace]
+                if workspace.name == target_name
+                    && workspace.num == target_name.parse::<i32>().unwrap_or(-1) =>
+            {
+                Ok(Some(Self {
+                    workspace: WorkspaceIdentity {
+                        id: workspace.id,
+                        name: workspace.name.clone(),
+                    },
+                    output: output_ancestry(&observed.tree, workspace.id)?,
+                    number: workspace.num,
+                }))
+            }
             _ => Err(Failure::Uncertain(
                 "ambiguous or renamed profile workspace".into(),
             )),
@@ -144,7 +165,9 @@ impl Target {
             .into_iter()
             .map(|placed| placed.node)
             .find(|node| {
-                node.id == self.workspace.id && node.name.as_ref() == Some(&self.workspace.name)
+                node.id == self.workspace.id
+                    && node.name.as_ref() == Some(&self.workspace.name)
+                    && node.num == Some(self.number)
             })
             .ok_or_else(|| {
                 Failure::Uncertain("profile target identity changed/disappeared".into())
@@ -211,6 +234,77 @@ pub fn bind_ordered_launches(
         bind_launches(second_events, &layouts[1].layout, &before_second)?
     };
     Ok([first, second])
+}
+
+/// A rename borrows the focused primary slot, never a fourth workspace. Refuse name
+/// collisions (including a numbered alias) and any loss of identity or empty state.
+pub fn verify_rename_preparation(
+    observed: &Snapshot,
+    primary: &WorkspaceIdentity,
+    destination: &str,
+) -> Result<(), Failure> {
+    observed.validate()?;
+    crate::ipc::validate_restoration_name(destination)?;
+    require_quiet(&observed.window_events, None)?;
+    let workspace = observed.focused_workspace();
+    let expected_number = primary.name.parse::<i32>().unwrap_or(-1);
+    let destination_number = destination.parse::<i32>().ok();
+    if workspace.id != primary.id
+        || workspace.name.as_ref() != Some(&primary.name)
+        || workspace.num != Some(expected_number)
+        || !workspace.nodes.is_empty()
+        || !workspace.floating_nodes.is_empty()
+        || observed.workspaces.iter().any(|workspace| {
+            workspace.name == destination || Some(workspace.num) == destination_number
+        })
+    {
+        return Err(Failure::Uncertain(
+            "disposable rename requires the exact empty focused primary and an unused destination"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn verify_rename_result(
+    before: &Snapshot,
+    after: &Snapshot,
+    renamed: &WorkspaceIdentity,
+) -> Result<(), Failure> {
+    after.validate()?;
+    require_quiet(&after.window_events, None)?;
+    let workspace = after.focused_workspace();
+    if workspace.id != renamed.id
+        || workspace.name.as_ref() != Some(&renamed.name)
+        || workspace.num != Some(renamed.name.parse::<i32>().unwrap_or(-1))
+        || crate::layout::signature(before.focused_workspace())
+            != crate::layout::signature(workspace)
+        || output_ancestry(&before.tree, renamed.id)? != output_ancestry(&after.tree, renamed.id)?
+    {
+        return Err(Failure::Uncertain(
+            "disposable rename changed identity, number, output, focus, or empty structure".into(),
+        ));
+    }
+    // Renaming can reorder output children. Compare workspace identities independently.
+    let other_workspaces = |snapshot: &Snapshot| {
+        snapshot
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.id != renamed.id)
+            .map(|workspace| {
+                (
+                    workspace.id,
+                    (workspace.name.clone(), workspace.num, workspace.focused),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    if other_workspaces(before) != other_workspaces(after) {
+        return Err(Failure::Uncertain(
+            "another workspace changed during disposable rename".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

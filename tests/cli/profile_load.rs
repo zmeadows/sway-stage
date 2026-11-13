@@ -493,36 +493,52 @@ fn preflight_refuses_occupied_later_targets_and_insufficient_observations() {
 
 #[test]
 fn selection_rejection_malformed_replies_and_timeout_never_retry() {
-    for (reply, expected) in [
-        (
-            Some(json!([{"success": false, "error": "selection denied"}])),
-            "selection denied",
-        ),
-        (Some(json!([])), "expected exactly one successful reply"),
-        (
-            Some(json!([{"success": true}, {"success": true}])),
-            "expected exactly one successful reply",
-        ),
-        (
-            Some(json!([{"error": "missing success"}])),
-            "command IPC decode",
-        ),
-        (None, "command deadline/channel failure"),
-    ] {
-        let fixture = fixture();
-        let initial = tree();
-        let mut select = command("workspace --no-auto-back-and-forth number 3".into());
-        if let Step::Command { replies, .. } = &mut select {
-            *replies = reply;
+    for named in [false, true] {
+        for (reply, expected) in [
+            (
+                Some(json!([{"success": false, "error": "selection denied"}])),
+                "selection denied",
+            ),
+            (Some(json!([])), "expected exactly one successful reply"),
+            (
+                Some(json!([{"success": true}, {"success": true}])),
+                "expected exactly one successful reply",
+            ),
+            (
+                Some(json!([{"error": "missing success"}])),
+                "command IPC decode",
+            ),
+            (None, "command deadline/channel failure"),
+        ] {
+            let fixture = fixture();
+            if named {
+                let profile = fs::read_to_string(fixture.path.join("work.yaml")).unwrap();
+                fixture.file(
+                    "work.yaml",
+                    &profile.replace("workspace: 3", "workspace: 'music player'"),
+                );
+            }
+            let initial = tree();
+            let mut select = command("workspace --no-auto-back-and-forth number 3".into());
+            if let Step::Command { replies, .. } = &mut select {
+                *replies = reply;
+            }
+            let output = run(
+                &fixture,
+                if named {
+                    named_steps(
+                        vec![snapshot(&initial), snapshot(&initial), select],
+                        &[(3, "music player")],
+                    )
+                } else {
+                    vec![snapshot(&initial), snapshot(&initial), select]
+                },
+                false,
+            );
+            assert_failure(&fixture, &output, expected, 0);
+            assert!(String::from_utf8_lossy(&output.stderr).contains("workspace selection"));
+            assert!(!fixture.path.join("launches").exists());
         }
-        let output = run(
-            &fixture,
-            vec![snapshot(&initial), snapshot(&initial), select],
-            false,
-        );
-        assert_failure(&fixture, &output, expected, 0);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("workspace selection"));
-        assert!(!fixture.path.join("launches").exists());
     }
 }
 
@@ -621,44 +637,65 @@ fn occupancy_identity_and_history_changes_stop_selection_without_launches() {
 
 #[test]
 fn failure_on_second_layout_retains_first_and_partial_windows_without_selecting_third() {
-    let fixture = fixture();
-    fixture.file("second.yaml", &format!("version: 1\ncwd: '{}'\nlayout: {{id: t, command: ['./app', second], match: {{app_id: profile-test}}}}\n", fixture.path.display()));
-    let initial = tree();
-    let selected = focus_workspace(&initial, 3);
-    let mut steps = vec![snapshot(&initial)];
-    steps.extend(selection_steps(&initial, &selected, 3, 90, false));
-    let (construction, first_done) = construction_steps(&selected, 3, 20);
-    steps.extend(construction);
-    let mut second_selected = first_done.clone();
-    second_selected["nodes"][0]["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .push(workspace(1, false));
-    second_selected = focus_workspace(&second_selected, 1);
-    steps.extend(selection_steps(&first_done, &second_selected, 1, 3, true));
-    let (mut second_construction, _) = construction_steps(&second_selected, 1, 21);
-    // Mapping a second unexpected window fails after the second application launches.
-    if let Step::Snapshot { tree, .. } = &mut second_construction[2] {
-        tree["nodes"][0]["nodes"][2]["nodes"]
+    for named in [false, true] {
+        let fixture = fixture();
+        if named {
+            let profile = fs::read_to_string(fixture.path.join("work.yaml")).unwrap();
+            fixture.file(
+                "work.yaml",
+                &profile.replace("workspace: 1", "workspace: 'music player'"),
+            );
+        }
+        fixture.file("second.yaml", &format!("version: 1\ncwd: '{}'\nlayout: {{id: t, command: ['./app', second], match: {{app_id: profile-test}}}}\n", fixture.path.display()));
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+        let (construction, first_done) = construction_steps(&selected, 3, 20);
+        steps.extend(construction);
+        let mut second_selected = first_done.clone();
+        second_selected["nodes"][0]["nodes"]
             .as_array_mut()
             .unwrap()
-            .push(window(22, false));
+            .push(workspace(1, false));
+        second_selected = focus_workspace(&second_selected, 1);
+        steps.extend(selection_steps(&first_done, &second_selected, 1, 3, true));
+        let (mut second_construction, _) = construction_steps(&second_selected, 1, 21);
+        // Mapping a second unexpected window fails after the second application launches.
+        if let Step::Snapshot { tree, .. } = &mut second_construction[2] {
+            tree["nodes"][0]["nodes"][2]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(window(22, false));
+        }
+        second_construction.truncate(3);
+        steps.extend(second_construction);
+        let steps = if named {
+            named_steps(steps, &[(1, "music player")])
+        } else {
+            steps
+        };
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "layout construction", 1);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(if named {
+                "workspace \"music player\", layout \"second\""
+            } else {
+                "workspace 1, layout \"second\""
+            }),
+            "{error}"
+        );
+        assert!(error.contains("[(3, 103)]"), "{error}");
+        assert!(
+            error.contains("application launches may have left partial layouts"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\nsecond\n"
+        );
     }
-    second_construction.truncate(3);
-    steps.extend(second_construction);
-    let output = run(&fixture, steps, false);
-    assert_failure(&fixture, &output, "layout construction", 1);
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("workspace 1, layout \"second\""), "{error}");
-    assert!(error.contains("[(3, 103)]"), "{error}");
-    assert!(
-        error.contains("application launches may have left partial layouts"),
-        "{error}"
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.path.join("launches")).unwrap(),
-        "first\nsecond\n"
-    );
 }
 
 #[test]
@@ -700,22 +737,36 @@ fn inconsistent_workspace_and_tree_replies_fail_read_only_preflight() {
 
 #[test]
 fn coordinator_history_across_a_completed_load_prevents_the_next_switch() {
-    let fixture = fixture();
-    let initial = tree();
-    let selected = focus_workspace(&initial, 3);
-    let mut steps = vec![snapshot(&initial)];
-    steps.extend(selection_steps(&initial, &selected, 3, 90, false));
-    let (mut construction, _) = construction_steps(&selected, 3, 20);
-    if let Step::Snapshot { events, .. } = construction.last_mut().unwrap() {
-        events.extend([focus_event(90, 3), focus_event(3, 90)]);
+    for named in [false, true] {
+        let fixture = fixture();
+        if named {
+            let profile = fs::read_to_string(fixture.path.join("work.yaml")).unwrap();
+            fixture.file(
+                "work.yaml",
+                &profile.replace("workspace: 3", "workspace: 'music'"),
+            );
+        }
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+        let (mut construction, _) = construction_steps(&selected, 3, 20);
+        if let Step::Snapshot { events, .. } = construction.last_mut().unwrap() {
+            events.extend([focus_event(90, 3), focus_event(3, 90)]);
+        }
+        steps.extend(construction);
+        let steps = if named {
+            named_steps(steps, &[(3, "music")])
+        } else {
+            steps
+        };
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "unexpected workspace change", 1);
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\n"
+        );
     }
-    steps.extend(construction);
-    let output = run(&fixture, steps, false);
-    assert_failure(&fixture, &output, "unexpected workspace change", 1);
-    assert_eq!(
-        fs::read_to_string(fixture.path.join("launches")).unwrap(),
-        "first\n"
-    );
 }
 
 #[test]
@@ -815,4 +866,298 @@ fn selecting_the_already_focused_target_does_not_require_a_focus_change() {
     steps.extend(construction);
     let output = run(&fixture, steps, false);
     assert!(output.status.success(), "{output:?}");
+}
+
+// Retain the existing numeric transcript builders, then translate only workspace nodes
+// and selection commands. Window/container IDs remain independent of workspace numbers.
+fn name_workspace_nodes(value: &mut Value, number: i64, name: &str) {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("type").is_some_and(|kind| kind == "workspace")
+                && fields.get("num").is_some_and(|num| num == number)
+            {
+                fields.insert("num".into(), json!(-1));
+                fields.insert("name".into(), json!(name));
+            }
+            for child in fields.values_mut() {
+                name_workspace_nodes(child, number, name);
+            }
+        }
+        Value::Array(children) => {
+            for child in children {
+                name_workspace_nodes(child, number, name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn named_steps(mut steps: Vec<Step>, targets: &[(i64, &str)]) -> Vec<Step> {
+    for step in &mut steps {
+        for &(number, name) in targets {
+            match step {
+                Step::Snapshot { tree, events, .. } => {
+                    name_workspace_nodes(tree, number, name);
+                    for (_, event) in events {
+                        name_workspace_nodes(event, number, name);
+                    }
+                }
+                Step::Command {
+                    command, events, ..
+                } => {
+                    if *command == format!("workspace --no-auto-back-and-forth number {number}") {
+                        *command = format!("workspace --no-auto-back-and-forth \"{name}\"");
+                    }
+                    for (_, event) in events {
+                        name_workspace_nodes(event, number, name);
+                    }
+                }
+            }
+        }
+    }
+    steps
+}
+
+#[test]
+fn exact_named_targets_existing_missing_and_already_focused() {
+    for scenario in ["existing", "missing", "focused", "mixed", "named-only"] {
+        let fixture = fixture();
+        let multiple = matches!(scenario, "mixed" | "named-only");
+        fixture.file("work.yaml", if multiple {
+            "version: 1\nworkspaces: [{workspace: 'music player', layout: first}, {workspace: 1, layout: second}]\n"
+        } else {
+            "version: 1\nworkspaces: [{workspace: 'music player', layout: first}]\n"
+        });
+        if scenario == "named-only" {
+            fixture.file("work.yaml", "version: 1\nworkspaces: [{workspace: 'music player', layout: first}, {workspace: monitoring, layout: second}]\n");
+        }
+        let mut initial = tree();
+        // Unrelated named workspaces also have num=-1 and must never be selected.
+        initial["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(workspace(7, false));
+        if scenario == "focused" {
+            initial = focus_workspace(&initial, 3);
+        } else if scenario == "missing" {
+            initial["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+        }
+        let mut selected = initial.clone();
+        if scenario == "missing" {
+            selected["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(3, false));
+        }
+        selected = focus_workspace(&selected, 3);
+        let mut selection = selection_steps(&initial, &selected, 3, 90, scenario == "missing");
+        if scenario == "focused"
+            && let Step::Command { events, .. } = &mut selection[1]
+        {
+            events.clear();
+        }
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection);
+        let (construction, first_done) = construction_steps(&selected, 3, 20);
+        steps.extend(construction);
+        if multiple {
+            let mut second_selected = first_done.clone();
+            second_selected["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(1, false));
+            second_selected = focus_workspace(&second_selected, 1);
+            steps.extend(selection_steps(&first_done, &second_selected, 1, 3, true));
+            steps.extend(construction_steps(&second_selected, 1, 21).0);
+        }
+        let mut targets = vec![(3, "music player"), (7, "unrelated")];
+        if scenario == "named-only" {
+            targets.push((1, "monitoring"));
+        }
+        let output = run(&fixture, named_steps(steps, &targets), true);
+        assert!(output.status.success(), "{scenario}: {output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            if multiple {
+                "first\nsecond\n"
+            } else {
+                "first\n"
+            }
+        );
+    }
+}
+
+#[test]
+fn named_later_target_preflight_is_read_only() {
+    for scenario in [
+        "window",
+        "structural",
+        "floating",
+        "duplicate-name",
+        "inconsistent-number",
+    ] {
+        let fixture = fixture();
+        fixture.file("work.yaml", "version: 1\nworkspaces: [{workspace: 3, layout: first}, {workspace: music, layout: second}]\n");
+        let mut initial = tree();
+        let mut later = workspace(1, false);
+        later["name"] = json!("music");
+        later["num"] = json!(-1);
+        let expected = match scenario {
+            "window" | "structural" => {
+                later["nodes"] = json!([if scenario == "window" {
+                    window(800, false)
+                } else {
+                    sway_node(800, "con", 100, vec![])
+                }]);
+                "must be completely empty"
+            }
+            "floating" => {
+                later["floating_nodes"] = json!([sway_node(800, "floating_con", 100, vec![])]);
+                "must be completely empty"
+            }
+            "duplicate-name" => {
+                initial["nodes"][0]["nodes"][1]["name"] = json!("music");
+                "ambiguous workspace"
+            }
+            _ => {
+                later["num"] = json!(1);
+                "inconsistent number/name"
+            }
+        };
+        initial["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(later);
+        let output = run(&fixture, vec![snapshot(&initial)], false);
+        assert_failure(&fixture, &output, expected, 0);
+        assert!(!fixture.path.join("launches").exists());
+    }
+}
+
+#[test]
+fn named_selection_rejects_bad_history_and_changed_identity() {
+    for scenario in [
+        "rename",
+        "missing-focus",
+        "bad-current-name",
+        "bad-old-name",
+        "bad-number",
+        "missing-current",
+        "away-back",
+        "moved-output",
+        "wrong-id",
+        "wrong-name",
+        "wrong-number",
+        "missing-init",
+        "bad-init-name",
+        "bad-empty-name",
+    ] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: music, layout: first}]\n",
+        );
+        let mut initial = tree();
+        let create = matches!(scenario, "missing-init" | "bad-init-name");
+        if create {
+            initial["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+        }
+        let mut after = initial.clone();
+        if create {
+            after["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(3, false));
+        }
+        after = focus_workspace(&after, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &after, 3, 90, create));
+        let mut steps = named_steps(steps, &[(3, "music")]);
+        if let Step::Command { events, .. } = &mut steps[2] {
+            match scenario {
+                "rename" => events.push((
+                    WORKSPACE_EVENT,
+                    json!({"change": "rename", "current": workspace(3, true), "old": null}),
+                )),
+                "missing-focus" => events.clear(),
+                "bad-current-name" => events[0].1["current"]["name"] = json!("other"),
+                "bad-old-name" => events[0].1["old"]["name"] = json!("other"),
+                "bad-number" => events[0].1["current"]["num"] = json!(3),
+                "missing-current" => events[0].1["current"] = Value::Null,
+                "away-back" => events.extend([focus_event(90, 3), focus_event(3, 90)]),
+                "missing-init" => {
+                    events.remove(0);
+                }
+                "bad-init-name" => events[0].1["current"]["name"] = json!("other"),
+                "bad-empty-name" => events.push((
+                    WORKSPACE_EVENT,
+                    json!({"change": "empty", "current": workspace(90, false), "old": null}),
+                )),
+                _ => {}
+            }
+        }
+        if let Step::Snapshot { tree, .. } = &mut steps[3] {
+            match scenario {
+                "moved-output" => tree["nodes"][0]["id"] = json!(44),
+                "wrong-id" => tree["nodes"][0]["nodes"][1]["id"] = json!(444),
+                "wrong-name" => tree["nodes"][0]["nodes"][1]["name"] = json!("other"),
+                "wrong-number" => tree["nodes"][0]["nodes"][1]["num"] = json!(3),
+                _ => {}
+            }
+        }
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "workspace selection", 0);
+        assert!(!fixture.path.join("launches").exists());
+    }
+}
+
+#[test]
+fn named_selection_checks_identity_of_the_empty_previous_workspace_event() {
+    for scenario in ["name", "number", "old"] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: music, layout: first}]\n",
+        );
+        let mut initial = tree();
+        initial["nodes"][0]["nodes"][0]["nodes"] = json!([]);
+        initial["nodes"][0]["nodes"][0]["focused"] = json!(true);
+        let mut selected = focus_workspace(&initial, 3);
+        selected["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let mut selection = selection_steps(&initial, &selected, 3, 90, false);
+        let mut destroyed = workspace(90, false);
+        let old = match scenario {
+            "name" => {
+                destroyed["name"] = json!("other");
+                Value::Null
+            }
+            "number" => {
+                destroyed["num"] = json!(-1);
+                Value::Null
+            }
+            _ => workspace(3, false),
+        };
+        if let Step::Command { events, .. } = &mut selection[1] {
+            events.push((
+                WORKSPACE_EVENT,
+                json!({"change": "empty", "current": destroyed, "old": old}),
+            ));
+        }
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection);
+        let output = run(&fixture, named_steps(steps, &[(3, "music")]), false);
+        assert_failure(&fixture, &output, "unexpected workspace change", 0);
+        assert!(!fixture.path.join("launches").exists());
+    }
 }

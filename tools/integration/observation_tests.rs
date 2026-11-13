@@ -575,3 +575,52 @@ fn profile_switch_records_the_window_event_boundary_once() {
     );
     assert_eq!(boundary, Some(5));
 }
+
+#[test]
+fn disposable_rename_accepts_only_exact_focused_identity_and_true_workspace_number() {
+    let original = WorkspaceIdentity {
+        id: TARGET_WORKSPACE_ID,
+        name: "9".into(),
+    };
+    let renamed = WorkspaceIdentity {
+        id: TARGET_WORKSPACE_ID,
+        name: "stage-test music".into(),
+    };
+    let event_value = json!({"change": "rename", "old": null, "current": {
+        "type": "workspace", "id": TARGET_WORKSPACE_ID, "name": "stage-test music", "num": -1
+    }});
+    let mut focused = Some(original.clone());
+    let event = serde_json::from_value(event_value.clone()).unwrap();
+    accept_disposable_rename(&event, &renamed, &mut focused).unwrap();
+    assert_eq!(focused, Some(renamed.clone()));
+    for scenario in [
+        "id",
+        "name",
+        "num",
+        "missing-num",
+        "type",
+        "old",
+        "change",
+        "unfocused",
+    ] {
+        let mut value = event_value.clone();
+        let mut focused = Some(original.clone());
+        match scenario {
+            "id" => value["current"]["id"] = json!(80),
+            "name" => value["current"]["name"] = json!("other"),
+            "num" => value["current"]["num"] = json!(9),
+            "missing-num" => {
+                value["current"].as_object_mut().unwrap().remove("num");
+            }
+            "type" => value["current"]["type"] = json!("con"),
+            "old" => value["old"] = value["current"].clone(),
+            "change" => value["change"] = json!("focus"),
+            _ => focused = None,
+        }
+        let event = serde_json::from_value(value).unwrap();
+        assert!(
+            accept_disposable_rename(&event, &renamed, &mut focused).is_err(),
+            "{scenario}"
+        );
+    }
+}

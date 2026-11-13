@@ -4,6 +4,7 @@ use crate::{config, discovery, launch};
 use serde::Deserialize;
 use serde_saphyr::Spanned;
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use swayipc::{Event, NodeType, WorkspaceChange};
@@ -11,6 +12,95 @@ use swayipc::{Event, NodeType, WorkspaceChange};
 // Match the layout node limit: profiles are bounded plans for interactive construction.
 const MAX_WORKSPACES: usize = 256;
 const MAX_WORKSPACE_NUMBER: u64 = 999_999_999;
+
+// A single quoted Sway argument preserves spaces. This allowlist deliberately excludes
+// quoting, separators, escapes, and variable syntax; it is not a general command encoder.
+const MAX_WORKSPACE_NAME_BYTES: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a positive YAML integer or an exact workspace name"
+)]
+pub enum WorkspaceTarget {
+    Number(u64),
+    Name(String),
+}
+
+impl fmt::Display for WorkspaceTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(number) => write!(formatter, "{number}"),
+            Self::Name(name) => write!(formatter, "{name:?}"),
+        }
+    }
+}
+
+impl WorkspaceTarget {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Number(number) => {
+                if !(1..=MAX_WORKSPACE_NUMBER).contains(number) {
+                    return Err(format!(
+                        "expected a workspace number from 1 to {MAX_WORKSPACE_NUMBER}"
+                    ));
+                }
+            }
+            Self::Name(name) => {
+                if name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+                    return Err("numeric strings and numeric-prefixed workspace names are ambiguous; use an unquoted integer for a numbered workspace".into());
+                }
+
+                if name.len() > MAX_WORKSPACE_NAME_BYTES
+                    || !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                    || name.ends_with(' ')
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b" _-.:+".contains(&byte))
+                {
+                    return Err(format!(
+                        "expected a workspace name of 1 to {MAX_WORKSPACE_NAME_BYTES} ASCII bytes, beginning with a letter, with no trailing space; use letters, digits, spaces, _ - . : +"
+                    ));
+                }
+                // Sway strips quotes before cmd_workspace interprets keywords. output and
+                // gaps are recognized even before the --no-auto-back-and-forth flag.
+                // See sway/commands.c and sway/commands/workspace.c in Sway 1.11.
+                if [
+                    "number",
+                    "next",
+                    "prev",
+                    "next_on_output",
+                    "prev_on_output",
+                    "current",
+                    "back_and_forth",
+                    "output",
+                    "gaps",
+                ]
+                .iter()
+                .any(|keyword| name.eq_ignore_ascii_case(keyword))
+                {
+                    return Err(format!("reserved workspace command keyword {name:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn selection_command(&self) -> Result<String, String> {
+        self.validate()?;
+        Ok(match self {
+            Self::Number(number) => format!("workspace --no-auto-back-and-forth number {number}"),
+            Self::Name(name) => format!("workspace --no-auto-back-and-forth \"{name}\""),
+        })
+    }
+
+    fn matches(&self, number: i32, name: &str) -> bool {
+        match self {
+            Self::Number(target) => u64::try_from(number) == Ok(*target),
+            Self::Name(target) => number == -1 && name == target,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,8 +113,7 @@ pub struct Profile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayout {
-    #[serde(deserialize_with = "config::unquoted_integer")]
-    pub workspace: u64,
+    pub workspace: WorkspaceTarget,
     pub layout: String,
 }
 
@@ -35,7 +124,7 @@ pub struct PreparedProfile {
 
 #[derive(Debug)]
 pub struct PreparedWorkspace {
-    pub workspace: u64,
+    pub workspace: WorkspaceTarget,
     pub layout_name: String,
     pub layout_path: PathBuf,
     pub config: config::Config,
@@ -77,7 +166,7 @@ pub fn read_named(
         let config = config::read(layout_path)
             .map_err(|error| format!("{context}: invalid layout {layout_name:?}: {error}"))?;
         workspaces.push(PreparedWorkspace {
-            workspace: entry.value.workspace,
+            workspace: entry.value.workspace.clone(),
             layout_name: layout_name.clone(),
             layout_path: layout_path.clone(),
             config,
@@ -101,25 +190,25 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         Instant::now() + launch::IPC_TIMEOUT,
     )?;
     let expected_focus = validate_workspace_snapshot(&initial)?;
-    validate_workspace_history(&initial, expected_focus, None)?;
+    validate_workspace_history(&initial, &expected_focus, None)?;
     require_quiet_windows(&initial)?;
 
     // Examine every target before selecting even the first one. Missing workspaces
     // remain absent until their own entry is selected.
     for entry in &prepared.workspaces {
-        diagnostics.profile_workspace(entry.workspace, &entry.layout_name, &[]);
-        empty_target(&initial, entry.workspace)?;
+        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &[]);
+        empty_target(&initial, &entry.workspace)?;
     }
 
     let mut previous_snapshot = initial;
     let mut completed = Vec::new();
     for entry in &prepared.workspaces {
-        diagnostics.profile_workspace(entry.workspace, &entry.layout_name, &completed);
+        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &completed);
         diagnostics.stage("workspace selection");
         let selected = select_workspace(
             &mut observer,
             &socket_path,
-            entry.workspace,
+            &entry.workspace,
             &previous_snapshot,
             diagnostics,
         )
@@ -134,8 +223,8 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         ));
         launch::load(&entry.config, Some(selected.id), diagnostics)
             .map_err(|error| format!("layout construction: {error}"))?;
-        completed.push((entry.workspace, selected.id));
-        diagnostics.profile_workspace(entry.workspace, &entry.layout_name, &completed);
+        completed.push((entry.workspace.clone(), selected.id));
+        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &completed);
 
         // The coordinator stayed subscribed during construction. Check that history,
         // including the gap before the loader subscribed, before another switch.
@@ -145,7 +234,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
             Instant::now() + launch::IPC_TIMEOUT,
         )?;
         let observed_focus = validate_workspace_snapshot(&finished)?;
-        validate_workspace_history(&finished, selected, None)?;
+        validate_workspace_history(&finished, &selected, None)?;
         if observed_focus != selected {
             return Err(
                 "workspace completion: focused workspace identity or output changed".into(),
@@ -162,31 +251,31 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
 fn select_workspace(
     observer: &mut Observer,
     socket_path: &Path,
-    number: u64,
+    target: &WorkspaceTarget,
     previous_snapshot: &WorkspaceSnapshot,
     diagnostics: &mut Diagnostics,
 ) -> Result<WorkspaceIdentity, String> {
     let expected_focus = validate_workspace_snapshot(previous_snapshot)?;
-    let expected_target = empty_target(previous_snapshot, number)?;
+    let expected_target = empty_target(previous_snapshot, target)?;
     let before = observer.workspace_snapshot(
         observation::connect(socket_path)?,
         Instant::now() + launch::IPC_TIMEOUT,
     )?;
     let observed_focus = validate_workspace_snapshot(&before)?;
-    validate_workspace_history(&before, expected_focus, None)?;
+    validate_workspace_history(&before, &expected_focus, None)?;
     require_quiet_windows(&before)?;
     if observed_focus != expected_focus {
         return Err("unexpected focused workspace or containing output before selection".into());
     }
 
-    let target_before = empty_target(&before, number)?;
+    let target_before = empty_target(&before, target)?;
     if target_before != expected_target {
         return Err(format!(
-            "workspace {number} identity or output changed since previous observation"
+            "workspace {target} identity or output changed since previous observation"
         ));
     }
 
-    let command = format!("workspace --no-auto-back-and-forth number {number}");
+    let command = target.selection_command()?;
     diagnostics.record(&command);
     let replies = launch::run_command(
         observation::connect(socket_path)?,
@@ -204,14 +293,16 @@ fn select_workspace(
         Instant::now() + launch::IPC_TIMEOUT,
     )?;
     let selected = validate_workspace_snapshot(&after)?;
-    if selected.number != number as i32 {
+    if !target.matches(selected.number, &selected.name) {
         return Err(format!(
-            "selected workspace number {} instead of {}",
-            selected.number, number
+            "selected workspace number {} name {:?} instead of {}",
+            selected.number, selected.name, target
         ));
     }
-    if empty_target(&after, number)? != Some(selected)
-        || target_before.is_some_and(|target| target != selected)
+    if empty_target(&after, target)?.as_ref() != Some(&selected)
+        || target_before
+            .as_ref()
+            .is_some_and(|target| target != &selected)
     {
         return Err(
             "selected workspace identity or output differs from the verified target".into(),
@@ -222,20 +313,21 @@ fn select_workspace(
         .find_as_ref(|node| node.id == expected_focus.id)
         .ok_or("previous workspace missing before selection")?;
     let transition = WorkspaceTransition {
-        selected,
+        selected: &selected,
         allow_creation: target_before.is_none(),
         allow_previous_destruction: previous_workspace.nodes.is_empty()
             && previous_workspace.floating_nodes.is_empty(),
     };
-    validate_workspace_history(&after, expected_focus, Some(transition))?;
+    validate_workspace_history(&after, &expected_focus, Some(transition))?;
     require_quiet_windows(&after)?;
     Ok(selected)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceIdentity {
     id: i64,
     number: i32,
+    name: String,
     output_id: i64,
 }
 
@@ -250,12 +342,17 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
 
     let mut workspace_ids = HashSet::new();
     let mut workspace_numbers = HashSet::new();
+    let mut workspace_names = HashSet::new();
     let mut focused = None;
     for workspace in &snapshot.workspaces {
         if !workspace_ids.insert(workspace.id)
+            || !workspace_names.insert(&workspace.name)
+            || workspace.num < -1
             || (workspace.num >= 0 && !workspace_numbers.insert(workspace.num))
         {
-            return Err("workspace snapshot: ambiguous workspace identities or numbers".into());
+            return Err(
+                "workspace snapshot: ambiguous workspace identities or numbers/names".into(),
+            );
         }
         let node = tree
             .find_as_ref(|node| node.id == workspace.id)
@@ -286,6 +383,7 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
             focused = Some(WorkspaceIdentity {
                 id: workspace.id,
                 number: workspace.num,
+                name: workspace.name.clone(),
                 output_id: output.id,
             });
         }
@@ -303,22 +401,26 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
 
 fn empty_target(
     snapshot: &WorkspaceSnapshot,
-    number: u64,
+    target: &WorkspaceTarget,
 ) -> Result<Option<WorkspaceIdentity>, String> {
-    let Some(workspace) = snapshot
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.num == number as i32)
-    else {
+    let Some(workspace) = snapshot.workspaces.iter().find(|workspace| match target {
+        WorkspaceTarget::Number(number) => u64::try_from(workspace.num) == Ok(*number),
+        WorkspaceTarget::Name(name) => workspace.name == *name,
+    }) else {
         return Ok(None);
     };
+    if !target.matches(workspace.num, &workspace.name) {
+        return Err(format!(
+            "workspace {target} has an inconsistent number/name identity"
+        ));
+    }
     let node = snapshot
         .tree
         .find_as_ref(|node| node.id == workspace.id)
         .ok_or("target workspace missing from tree")?;
     if !node.nodes.is_empty() || !node.floating_nodes.is_empty() {
         return Err(format!(
-            "workspace {number} id={} must be completely empty, including tiled/floating containers",
+            "workspace {target} id={} must be completely empty, including tiled/floating containers",
             node.id
         ));
     }
@@ -331,6 +433,7 @@ fn empty_target(
     Ok(Some(WorkspaceIdentity {
         id: workspace.id,
         number: workspace.num,
+        name: workspace.name.clone(),
         output_id: output.id,
     }))
 }
@@ -353,8 +456,8 @@ fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), String> {
     Ok(())
 }
 
-struct WorkspaceTransition {
-    selected: WorkspaceIdentity,
+struct WorkspaceTransition<'a> {
+    selected: &'a WorkspaceIdentity,
     allow_creation: bool,
     allow_previous_destruction: bool,
 }
@@ -363,8 +466,8 @@ struct WorkspaceTransition {
 /// rename, and unexpected workspace creation/destruction invalidate coordination.
 fn validate_workspace_history(
     snapshot: &WorkspaceSnapshot,
-    expected: WorkspaceIdentity,
-    transition: Option<WorkspaceTransition>,
+    expected: &WorkspaceIdentity,
+    transition: Option<WorkspaceTransition<'_>>,
 ) -> Result<(), String> {
     let mut observed_focus_change = false;
     let mut observed_creation = false;
@@ -411,28 +514,29 @@ fn validate_workspace_history(
             WorkspaceChange::Focus
                 if !observed_focus_change
                     && target.id != expected.id
-                    && current.id == target.id
-                    && current.num == Some(target.number)
-                    && event.old.as_ref().is_some_and(|old| {
-                        old.id == expected.id && old.num == Some(expected.number)
-                    }) =>
+                    && event_matches_workspace(current, target)
+                    && event
+                        .old
+                        .as_ref()
+                        .is_some_and(|old| event_matches_workspace(old, expected)) =>
             {
                 observed_focus_change = true;
             }
             WorkspaceChange::Init
                 if transition.allow_creation
                     && !observed_creation
+                    && event.old.is_none()
                     && !observed_focus_change
-                    && current.id == target.id
-                    && current.num == Some(target.number) =>
+                    && event_matches_workspace(current, target) =>
             {
                 observed_creation = true;
             }
             WorkspaceChange::Empty
                 if transition.allow_previous_destruction
                     && !observed_previous_destruction
+                    && event.old.is_none()
                     && target.id != expected.id
-                    && current.id == expected.id =>
+                    && event_matches_workspace(current, expected) =>
             {
                 observed_previous_destruction = true;
             }
@@ -456,6 +560,12 @@ fn validate_workspace_history(
         }
     }
     Ok(())
+}
+
+fn event_matches_workspace(node: &swayipc::Node, workspace: &WorkspaceIdentity) -> bool {
+    node.id == workspace.id
+        && node.num == Some(workspace.number)
+        && node.name.as_deref() == Some(workspace.name.as_str())
 }
 
 fn find_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -535,7 +645,7 @@ fn parse(input: &str) -> Result<Profile, String> {
         ));
     }
 
-    let mut workspace_numbers = HashSet::new();
+    let mut workspace_targets = HashSet::new();
     for (entry_index, entry) in profile.workspaces.iter().enumerate() {
         let location = entry.referenced;
         let fail = |field: &str, message: &str| {
@@ -546,17 +656,18 @@ fn parse(input: &str) -> Result<Profile, String> {
             )
         };
 
-        let workspace_number = entry.value.workspace;
-        if !(1..=MAX_WORKSPACE_NUMBER).contains(&workspace_number) {
+        let target = &entry.value.workspace;
+        target
+            .validate()
+            .map_err(|error| fail("workspace", &error))?;
+        if !workspace_targets.insert(target) {
+            let kind = match target {
+                WorkspaceTarget::Number(_) => "number",
+                WorkspaceTarget::Name(_) => "name",
+            };
             return Err(fail(
                 "workspace",
-                &format!("expected a workspace number from 1 to {MAX_WORKSPACE_NUMBER}"),
-            ));
-        }
-        if !workspace_numbers.insert(workspace_number) {
-            return Err(fail(
-                "workspace",
-                &format!("duplicate workspace number {workspace_number}"),
+                &format!("duplicate workspace {kind} {target}"),
             ));
         }
         if !discovery::valid_name(&entry.value.layout) {
@@ -592,15 +703,132 @@ mod tests {
         let entries: Vec<_> = profile
             .workspaces
             .iter()
-            .map(|entry| (entry.value.workspace, entry.value.layout.as_str()))
+            .map(|entry| (entry.value.workspace.clone(), entry.value.layout.as_str()))
             .collect();
-        assert_eq!(entries, [(3, "development"), (1, "browser")]);
+        assert_eq!(
+            entries,
+            [
+                (WorkspaceTarget::Number(3), "development"),
+                (WorkspaceTarget::Number(1), "browser")
+            ]
+        );
         parse(&PROFILE.replace("browser", "development")).unwrap();
         parse("version: 1\nworkspaces: [{workspace: 999999999, layout: '123'}]").unwrap();
     }
 
     #[test]
-    fn requires_unquoted_version_one_and_workspace_integers() {
+    fn names_preserve_types_order_and_repeated_layouts() {
+        let input = PROFILE
+            .replace("workspace: 3", "workspace: 'music player'")
+            .replace("workspace: 1", "workspace: music")
+            .replace("browser", "development");
+        let profile = parse(&input).unwrap();
+        assert_eq!(
+            profile.workspaces[0].value.workspace,
+            WorkspaceTarget::Name("music player".into())
+        );
+        assert_eq!(
+            profile.workspaces[1].value.workspace,
+            WorkspaceTarget::Name("music".into())
+        );
+        parse(&PROFILE.replace("workspace: 1", "workspace: music")).unwrap();
+        for name in [
+            "a",
+            "Music_1-foo.bar:baz+qux",
+            &"a".repeat(MAX_WORKSPACE_NAME_BYTES),
+        ] {
+            parse(&PROFILE.replace("workspace: 3", &format!("workspace: '{name}'"))).unwrap();
+        }
+        let error =
+            parse(&input.replace("workspace: music", "workspace: 'music player'")).unwrap_err();
+        for expected in [
+            "duplicate workspace name",
+            "workspaces[1].workspace",
+            "line 5",
+            "column 5",
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_ambiguous_reserved_and_unsafe_names_with_locations() {
+        for name in [
+            "1",
+            "1:code",
+            "",
+            " music",
+            "music ",
+            "music;exit",
+            "music,exit",
+            "music\\escape",
+            "music\"quote",
+            "music'quote",
+            "$music",
+            "music\nexit",
+            "music\texit",
+            "music[foo]",
+            "é",
+            "_music",
+            "--next",
+            "music/other",
+            "number",
+            "NEXT",
+            "prev",
+            "Next_On_Output",
+            "prev_on_output",
+            "current",
+            "back_and_forth",
+            "output",
+            "GAPS",
+            &"a".repeat(MAX_WORKSPACE_NAME_BYTES + 1),
+        ] {
+            // JSON strings are also YAML double-quoted scalars, including escaped controls.
+            let scalar = serde_json::to_string(name).unwrap();
+            let error = parse(&PROFILE.replace("workspace: 3", &format!("workspace: {scalar}")))
+                .unwrap_err();
+            for expected in ["workspaces[0].workspace", "line", "column"] {
+                assert!(error.contains(expected), "{name:?}: {error}");
+            }
+        }
+        for scalar in [
+            "false",
+            "~",
+            "[]",
+            "{}",
+            "[music]",
+            "{name: music}",
+            ".inf",
+            ".nan",
+        ] {
+            rejects(
+                &PROFILE.replace("workspace: 3", &format!("workspace: {scalar}")),
+                "workspaces[0].workspace",
+            );
+        }
+    }
+
+    #[test]
+    fn selection_commands_are_literal_and_revalidate_the_target() {
+        assert_eq!(
+            WorkspaceTarget::Number(3).selection_command().unwrap(),
+            "workspace --no-auto-back-and-forth number 3"
+        );
+        assert_eq!(
+            WorkspaceTarget::Name("music player".into())
+                .selection_command()
+                .unwrap(),
+            "workspace --no-auto-back-and-forth \"music player\""
+        );
+        assert!(
+            WorkspaceTarget::Name("music; exit".into())
+                .selection_command()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_versions_and_workspace_scalars() {
         for version in ["0", "2", "999999999", "'1'", "1.0", "true", "null", "-1"] {
             rejects(
                 &PROFILE.replace("version: 1", &format!("version: {version}")),
@@ -781,8 +1009,8 @@ mod tests {
         )
         .unwrap();
         let prepared = read().unwrap();
-        assert_eq!(prepared.workspaces[0].workspace, 3);
-        assert_eq!(prepared.workspaces[1].workspace, 1);
+        assert_eq!(prepared.workspaces[0].workspace, WorkspaceTarget::Number(3));
+        assert_eq!(prepared.workspaces[1].workspace, WorkspaceTarget::Number(1));
         assert_eq!(prepared.workspaces[1].layout_name, "browser");
         assert_eq!(
             prepared.workspaces[1].layout_path,

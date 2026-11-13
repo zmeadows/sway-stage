@@ -73,6 +73,15 @@ impl Swaymsg {
         self.command(&restoration_command(name)?)
     }
 
+    /// Lifecycle has just fenced and independently verified the empty disposable ID.
+    pub fn rename_disposable(&self, old_name: &str, new_name: &str) -> Result<(), String> {
+        validate_restoration_name(old_name)?;
+        validate_restoration_name(new_name)?;
+        self.command(&format!(
+            "rename workspace \"{old_name}\" to \"{new_name}\""
+        ))
+    }
+
     /// The caller must have just revalidated this window's ownership and hierarchy.
     pub fn close_owned_window(&self, container_id: i64) -> Result<(), String> {
         self.command(&close_command(container_id)?)
@@ -311,6 +320,7 @@ pub struct TreeNode {
     pub node_type: NodeType,
     pub name: Option<String>,
     pub layout: Layout,
+    pub num: Option<i32>,
     pub focused: bool,
     /// Direct children in seat focus-history order, distinct from global focus.
     pub focus: Vec<i64>,
@@ -485,6 +495,9 @@ pub enum WorkspaceChange {
 /// The identity fields of a workspace in a workspace event.
 #[derive(Debug, Deserialize)]
 pub struct EventWorkspace {
+    #[serde(rename = "type")]
+    pub node_type: Option<NodeType>,
+    pub num: Option<i32>,
     pub id: i64,
     pub name: Option<String>,
 }

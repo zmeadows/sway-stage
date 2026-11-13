@@ -69,9 +69,20 @@ impl Diagnostics {
         diagnostics
     }
 
-    pub fn profile_workspace(&mut self, number: u64, layout: &str, completed: &[(u64, i64)]) {
+    pub fn profile_workspace(
+        &mut self,
+        target: &crate::profile::WorkspaceTarget,
+        layout: &str,
+        completed: &[(crate::profile::WorkspaceTarget, i64)],
+    ) {
+        let completed_targets = completed
+            .iter()
+            .map(|(target, id)| format!("({target}, {id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
         self.profile_context = Some(format!(
-            "workspace {number}, layout {layout:?}; completed {} workspaces {completed:?}",
+            "workspace {target}, layout {layout:?}; completed {} workspaces [{completed_targets}]",
             completed.len()
         ));
         self.record("profile progress");
