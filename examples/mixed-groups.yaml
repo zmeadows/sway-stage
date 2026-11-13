@@ -7,6 +7,7 @@ layout:
   group: splith
   children:
     - group: tabbed
+      active: 2
       weight: 3 # The whole tabbed group gets 3/5 of the width.
       # Direct children of tabbed and stacked groups must omit weight.
       children:

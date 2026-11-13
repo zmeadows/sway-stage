@@ -33,7 +33,7 @@ enum CliCommand {
     Load {
         /// Layout name (the YAML filename without its extension)
         name: String,
-        /// Default child directory; relative paths resolve from the invoking directory
+        /// Override layout cwd; window cwd still wins. Relative paths use the invoking directory
         #[arg(long, value_name = "PATH")]
         cwd: Option<PathBuf>,
     },

@@ -1,27 +1,12 @@
 # Release roadmap
 
-Loading and capture support all four native group layouts. Stage 4 capture/offline
-serialization and Stage 5 independent manual-harness coverage are implemented; live
-native-group acceptance remains outstanding. Behavior is defined in the
-[specification](SPECIFICATION.md); verification procedures are in
+Loading and capture support all four native group layouts, including active selections.
+Behavior is defined in the [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
-- **Native groups, manual verification.** Guarded construction, recursive split sizing,
-  and postorder configured tab/stack selection with final global focus are implemented.
-  Manually verify inactive selection retention and explicit focus precedence, plus
-  root and nested groups, singleton ancestry, and sibling insertion against the installed
-  Sway version. Offline tree/event fixtures verify reactions, not the compositor's actual
-  construction behavior.
-- **Native groups, harness acceptance.** Run the twenty-scenario standard suite,
-  including nine native-group additions and four capture/reload cases. The independent
-  harness checks exact mixed hierarchy, singleton preservation, split proportions,
-  per-container child-focus history, final global focus, captured selections and weights,
-  and conservative success-only cleanup transitions. Verify these source-backed expectations
-  against the installed Sway version. The `initially-tabbed` and `initially-stacked` cases establish and
-  verify empty native workspace layouts before loading the existing mixed hierarchy. Offline
-  fixtures do not establish compositor reconstruction or cleanup behavior; record manual
-  results before marking this acceptance complete.
-
+- **Native groups, visual verification.** Check tab/stack header order and singleton
+  headers against the installed Sway version, following the developer guide's separate
+  visual acceptance procedure.
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release
   metadata for public distribution.

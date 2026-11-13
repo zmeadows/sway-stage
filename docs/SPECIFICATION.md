@@ -78,9 +78,9 @@ A window node has the following fields:
 
 | Key | Contract |
 | --- | --- |
-| `id` | Required unique, nonempty identifier matching the layout-name grammar. |
+| `id` | Required unique layout-local window name, used by `focus`; matches the layout-name grammar. |
 | `command` | Required nonempty string sequence: nonempty executable first, then literal arguments. |
-| `match` | Required mapping with exactly one nonempty string: `app_id` or `class`. |
+| `match` | Required Sway window selector with exactly one nonempty string: Wayland `app_id` or Xwayland `class`. |
 | `cwd` | Optional working directory overriding the layout default. |
 | `env` | Optional string-to-string map of child environment overrides; default empty. |
 
@@ -118,15 +118,19 @@ Explicit `null`, empty paths, and paths containing NUL are invalid. Both levels 
 validated independently before loader IPC or launches, even when an override would hide
 one of them. Groups do not accept `cwd`; groups and windows do not accept `cwd_select`.
 
-`load NAME --cwd PATH` overrides the layout default with any valid directory, including
-one outside the configured root. CLI-relative paths resolve from the invoking process's
+`load NAME --cwd PATH` overrides the layout default, while explicit window-level `cwd`
+values still take precedence. It accepts any valid directory, including one outside the
+configured root. CLI-relative paths resolve from the invoking process's
 working directory: `--cwd .` uses that directory and `--cwd ../another-project` uses its
 sibling. Absolute paths and literal leading `~/` paths are also supported. The override is
 validated before connecting to Sway or launching applications. This option belongs only
 to `load`, and does not bypass validation of configured paths.
 
-For each child, precedence is window `cwd`, then CLI `--cwd` or the menu-selected
-directory, then layout `cwd`, then the launcher's existing working directory. The parent process's directory never changes.
+For each window, precedence is window `cwd`, then CLI `--cwd` or the menu-selected
+directory, then layout `cwd`, then the launcher's existing working directory.
+The parent process's directory never changes. See the
+[working-directory example](../examples/working-directory.yaml), whose `home` window keeps
+its own `cwd` even when `--cwd` or the menu changes the project terminals' directory.
 `cwd_select` accepts only booleans (explicit `null` is invalid). A valid layout `cwd` may
 be used with `cwd_select` omitted or `false`. With `cwd_select: true`, direct loading
 still uses the configured root normally unless `--cwd` overrides it. Only `menu` offers

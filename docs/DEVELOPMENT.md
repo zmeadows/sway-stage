@@ -142,9 +142,11 @@ filters the default seat's focus stack to direct children. The same ordering dri
 [`seat_get_active_tiling_child`](https://github.com/swaywm/sway/blob/master/sway/input/seat.c)
 and the [rendered inactive selection](https://github.com/swaywm/sway/blob/master/sway/desktop/transaction.c).
 This supports checking inactive and nested groups without focusing them. The harness requires
-that history and checks every header group, including singletons. Capture preserves the
-history in the desktop, but its YAML records only global focus; replay checks first-child
-defaults again. Missing or contrary history fails; no rectangle/visibility approximation is used.
+that history and checks every header group, including singletons. Capture records selected
+children as `active` when they are not first, including in nested and inactive groups,
+alongside global `focus`. Replay verifies these selections with explicit global focus taking
+precedence along its ancestry. Missing or contrary history in multi-child groups fails
+capture; no rectangle/visibility approximation is used.
 Only one seat is supported. These upstream source semantics do not establish compatibility
 with an installed release; record `sway --version` with manual results.
 
@@ -156,7 +158,7 @@ from Sway's explicit container-flattening operation. After each individually ver
 close, exact surviving header nesting/identity must agree before any next close. Unexpected
 flattening, retained empty groups, reparenting, or foreign-window changes stop cleanup and
 leave the remaining windows. Offline fixtures establish the verifier's reaction, not actual
-Sway transitions. Singleton construction and cleanup still need live acceptance.
+Sway transitions.
 
 For native-group manual acceptance:
 
@@ -167,14 +169,13 @@ For native-group manual acceptance:
    remaining windows manually before another run. Do not rerun into a partially populated target.
 3. On a separate disposable workspace, visually check tab/stack header order and singleton
    headers with a trusted local native-group layout. Confirm default first-child selection,
-   explicit global focus along nested ancestors, and first selections in unrelated inactive
-   groups. Capture from a delayed command on another workspace and compare the draft; fill
-   only its null commands, check it, then load on another empty target. Do not interact with
-   windows during the harness itself: it deliberately treats interference as failure.
+   configured non-first selections in nested and inactive groups, and explicit global focus
+   taking precedence along its ancestry. Capture from a delayed command on another workspace
+   and compare the draft; fill only its null commands, check it, then load on another empty
+   target. Do not interact with windows during the harness itself: it deliberately treats
+   interference as failure.
 4. Run `--extended` separately for existing optional coverage. Repeat the interference/interrupt
    procedures below as separate runs; a standard pass alone does not establish those guards live.
-
-No native-group live run has been performed as part of Stage 5 implementation.
 
 The fifth extended case, `desktop-launcher-roundtrip`, creates a uniquely named `.desktop`
 file under a private `XDG_DATA_HOME/applications` inside the harness's temporary directory,

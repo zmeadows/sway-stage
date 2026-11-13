@@ -45,9 +45,15 @@ layout:
 ```
 
 With [Foot](https://codeberg.org/dnkl/foot) installed, this opens two terminals side by
-side at a 2:1 width ratio, then focuses the right one. Split children can contain further
-horizontal or vertical splits; see the [nested example](examples/four-windows.yaml).
+side at a 2:1 width ratio, then focuses the right one. Each `id` is an arbitrary layout-local name
+used by `focus`; `match` identifies the actual Sway window by Wayland app ID or Xwayland class.
 Commands are literal argument lists, without shell expansion. Only load layouts you trust.
+
+Split children can contain further horizontal or vertical splits; see the
+[nested example](examples/four-windows.yaml). Tabbed and stacked groups use `active` to
+select a direct child (one-based, first by default). Default focus follows these selections;
+explicit `focus` takes precedence. See the [mixed-groups example](examples/mixed-groups.yaml)
+and [selection reference](docs/SPECIFICATION.md#yaml-format-version-1).
 
 Validate it, then add a keybinding to `~/.config/sway/config` and reload your Sway config:
 
@@ -77,7 +83,7 @@ incomplete layouts `[invalid]`. Invalid layouts cannot launch; run `sway-stage c
 for detailed validation errors. Validation does not guarantee applications will launch.
 
 Use `--layouts-dir PATH` to read layouts and save menu captures elsewhere.
-Captures preserve arrangement, sizes, selectors, and focus, and automatically attempt to
+Captures preserve arrangement, sizes, selectors, tab/stack selections, and focus, and attempt to
 reconstruct launch commands. Inference is best-effort; unresolved commands remain `null`.
 Inspect and edit these drafts before loading. Review inferred commands before loading or
 sharing: arguments may contain secrets or private paths and may not reproduce the application.
