@@ -625,11 +625,14 @@ fn validate_image_mount(
         }
         let root = decode_mount_path(mount_fields[3])?;
         let mountpoint = decode_mount_path(mount_fields[4])?;
-        if !root.is_absolute() || !mountpoint.is_absolute() {
+        if !mountpoint.is_absolute() {
             return Err("mount evidence contains a relative path".into());
         }
 
         if mountpoint == appdir {
+            if !root.is_absolute() {
+                return Err("mount evidence contains a relative path".into());
+            }
             let filesystem_type = filesystem_fields[0];
             if !(filesystem_type.starts_with("fuse.")
                 || ["squashfs", "iso9660"].contains(&filesystem_type))

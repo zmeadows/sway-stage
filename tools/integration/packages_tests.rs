@@ -286,6 +286,7 @@ fn appimage_revalidation_ignores_unrelated_mount_changes() {
         "40 20 0:60 / /media/disk rw - ext4 /dev/sdb rw\n",
         "41 20 0:61 / /tmp/.mount_Other rw - fuse.AppImage Other rw\n",
         "42 31 0:62 / /tmp/.mount_App/share rw - tmpfs tmpfs rw\n",
+        "1171 28 0:4 net:[4026533801] /run/docker/netns/a1caeff65d8d rw shared:599 - nsfs nsfs rw\n",
     ] {
         assert!(evidence(&format!("{unrelated}{image_mount}\n")).unwrap() == original);
     }
@@ -302,6 +303,7 @@ fn appimage_revalidation_ignores_unrelated_mount_changes() {
     }
     for invalid in [
         String::new(),
+        image_mount.replace(" / /tmp", " relative /tmp"),
         image_mount.replace("/tmp/.mount_App", "/tmp/.mount_Other"),
         format!("{image_mount}\n{image_mount}"),
         format!("{image_mount}\n50 31 0:55 / /tmp/.mount_App/usr rw - tmpfs tmpfs rw"),
