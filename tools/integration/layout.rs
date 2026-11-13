@@ -256,6 +256,25 @@ pub fn verify_layout(
     scenario: &Scenario,
     accepted: &AcceptedWindows,
 ) -> Result<LayoutMeasurements, Failure> {
+    verify_layout_focus(workspace, scenario, accepted, true)
+}
+
+/// An inactive profile target retains its selected leaf in Sway's child-focus stacks.
+/// Check those stacks directly; never focus the workspace merely to inspect it.
+pub fn verify_inactive_layout(
+    workspace: &TreeNode,
+    scenario: &Scenario,
+    accepted: &AcceptedWindows,
+) -> Result<LayoutMeasurements, Failure> {
+    verify_layout_focus(workspace, scenario, accepted, false)
+}
+
+fn verify_layout_focus(
+    workspace: &TreeNode,
+    scenario: &Scenario,
+    accepted: &AcceptedWindows,
+    globally_focused: bool,
+) -> Result<LayoutMeasurements, Failure> {
     // Validate every container, including wrappers the comparison below steps through.
     shape(workspace)?;
 
@@ -307,12 +326,35 @@ pub fn verify_layout(
         .filter(|placed| placed.node.focused)
         .map(|placed| placed.node.id)
         .collect();
-    if observed_focused_container_ids != [expected_focus_window_id] {
+    let expected_global_focus = if globally_focused {
+        vec![expected_focus_window_id]
+    } else {
+        Vec::new()
+    };
+    if observed_focused_container_ids != expected_global_focus {
         return Err(Failure::Uncertain(format!(
             "final focus differs: expected {} id={expected_focus_window_id}, observed {}",
             scenario.expected_focus,
             outline(workspace)
         )));
+    }
+
+    if !globally_focused {
+        let mut selected = workspace;
+        while !is_window(selected) {
+            selected = selected
+                .nodes
+                .iter()
+                .find(|child| Some(&child.id) == selected.focus.first())
+                .ok_or_else(|| {
+                    Failure::Uncertain("inactive workspace lacks selected-child history".into())
+                })?;
+        }
+        if selected.id != expected_focus_window_id {
+            return Err(Failure::Uncertain(
+                "inactive workspace selected focus differs".into(),
+            ));
+        }
     }
 
     let mut measurements = LayoutMeasurements {

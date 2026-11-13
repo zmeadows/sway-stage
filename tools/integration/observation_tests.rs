@@ -296,7 +296,7 @@ fn focus_event(old: &WorkspaceIdentity, current: &WorkspaceIdentity) -> Workspac
 struct FenceState {
     current_workspace: Option<WorkspaceIdentity>,
     expected_switch: Option<ExpectedSwitch>,
-    switched: bool,
+    switch_window_index: Option<usize>,
 }
 
 impl FenceState {
@@ -308,7 +308,7 @@ impl FenceState {
         Self {
             current_workspace,
             expected_switch,
-            switched: false,
+            switch_window_index: None,
         }
     }
 
@@ -316,7 +316,8 @@ impl FenceState {
         apply_workspace_event(
             workspace_event,
             self.expected_switch.as_ref(),
-            &mut self.switched,
+            &mut self.switch_window_index,
+            0,
             &mut self.current_workspace,
         )
     }
@@ -330,14 +331,14 @@ impl FenceState {
     /// Requires a rejection that leaves the fence's state unchanged.
     fn assert_rejects(&mut self, workspace_event: &WorkspaceEvent, expected_error: &str) {
         let workspace_before = self.current_workspace.clone();
-        let switched_before = self.switched;
+        let boundary_before = self.switch_window_index;
 
         let Err(error) = self.apply(workspace_event) else {
             panic!("accepted {workspace_event:?}");
         };
         assert_contains(&error, expected_error);
         assert_eq!(self.current_workspace, workspace_before);
-        assert_eq!(self.switched, switched_before);
+        assert_eq!(self.switch_window_index, boundary_before);
     }
 }
 
@@ -351,7 +352,7 @@ fn refocusing_the_established_workspace_is_accepted() {
     fence.assert_accepts(&workspace_event("focus", None, Some(&original)));
 
     assert_eq!(fence.current_workspace, Some(original));
-    assert!(!fence.switched);
+    assert_eq!(fence.switch_window_index, None);
 }
 
 #[test]
@@ -363,11 +364,11 @@ fn expected_switch_is_accepted_and_establishes_its_destination() {
     // Creating the destination is not the switch.
     fence.assert_accepts(&workspace_event("init", None, Some(&target)));
 
-    assert!(!fence.switched);
+    assert_eq!(fence.switch_window_index, None);
     assert_eq!(fence.current_workspace, Some(original.clone()));
 
     fence.assert_accepts(&focus_event(&original, &target));
-    assert!(fence.switched);
+    assert_eq!(fence.switch_window_index, Some(0));
     assert_eq!(fence.current_workspace, Some(target.clone()));
 
     // Later events in the same fence are judged against the destination.
@@ -393,7 +394,7 @@ fn restoration_switch_ignores_the_emptied_disposable_workspace() {
     // Once focus has left it, the empty disposable workspace's destruction is unrelated.
     fence.assert_accepts(&workspace_event("empty", None, Some(&target)));
 
-    assert!(fence.switched);
+    assert_eq!(fence.switch_window_index, Some(0));
     assert_eq!(fence.current_workspace, Some(original));
 }
 
@@ -432,7 +433,7 @@ fn unrelated_workspace_events_are_ignored() {
             let mut fence = FenceState::new(current_workspace.clone(), None);
             fence.assert_accepts(unrelated_event);
             assert_eq!(fence.current_workspace, current_workspace);
-            assert!(!fence.switched);
+            assert_eq!(fence.switch_window_index, None);
         }
     }
 }
@@ -526,4 +527,51 @@ fn destroying_or_restructuring_workspaces_is_rejected() {
         let mut fence = FenceState::new(Some(original.clone()), None);
         fence.assert_rejects(workspace_change, expected_error);
     }
+}
+
+#[test]
+fn profile_switch_records_the_window_event_boundary_once() {
+    let original = original_identity();
+    let target = target_identity();
+    let mut current = Some(original.clone());
+    let mut boundary = None;
+    let expected = switch_to_target();
+    apply_workspace_event(
+        &workspace_event("init", None, Some(&target)),
+        Some(&expected),
+        &mut boundary,
+        3,
+        &mut current,
+    )
+    .unwrap();
+    assert_eq!(boundary, None);
+    apply_workspace_event(
+        &focus_event(&original, &target),
+        Some(&expected),
+        &mut boundary,
+        5,
+        &mut current,
+    )
+    .unwrap();
+    assert_eq!(boundary, Some(5));
+    apply_workspace_event(
+        &focus_event(&target, &target),
+        Some(&expected),
+        &mut boundary,
+        9,
+        &mut current,
+    )
+    .unwrap();
+    assert_eq!(boundary, Some(5));
+    assert!(
+        apply_workspace_event(
+            &focus_event(&target, &original),
+            Some(&expected),
+            &mut boundary,
+            10,
+            &mut current
+        )
+        .is_err()
+    );
+    assert_eq!(boundary, Some(5));
 }

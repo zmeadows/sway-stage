@@ -175,7 +175,7 @@ fn record_windows(
 }
 
 /// Frozen containing output identities; never choose an output or mutate one.
-fn output_ancestry(
+pub fn output_ancestry(
     tree: &TreeNode,
     workspace_id: i64,
 ) -> Result<Vec<(i64, Option<String>)>, Failure> {

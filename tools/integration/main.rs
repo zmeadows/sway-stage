@@ -11,6 +11,7 @@ mod ownership;
 mod packages;
 mod preservation;
 mod process;
+mod profile;
 mod scenarios;
 
 use std::process::ExitCode;

@@ -1803,3 +1803,205 @@ fn initial_layout_failure_leaves_no_launch_or_cleanup_evidence() {
         }
     }
 }
+
+#[test]
+fn optional_profile_workspace_uses_the_same_preflight_rules_before_mutation() {
+    let base = [
+        "integration",
+        "--workspace",
+        "8",
+        "--foreign-workspace",
+        "9",
+    ];
+    assert!(
+        Arguments::try_parse_from(base)
+            .unwrap()
+            .profile_workspace
+            .is_none()
+    );
+    let mut arguments = base.to_vec();
+    arguments.extend(["--profile-workspace", "10"]);
+    assert_eq!(
+        Arguments::try_parse_from(arguments)
+            .unwrap()
+            .profile_workspace
+            .as_deref(),
+        Some("10")
+    );
+    for invalid in ["0", "01", "10: named", "1000000000", "10;kill"] {
+        let mut arguments = base.to_vec();
+        arguments.extend(["--profile-workspace", invalid]);
+        assert!(Arguments::try_parse_from(arguments).is_err());
+    }
+    // Eligibility is independent of which flag designates the candidate number.
+    assert!(preflight_eligibility(&starting_snapshot(), "1").is_err());
+    assert!(preflight_eligibility(&starting_snapshot(), "9").is_ok());
+}
+
+#[test]
+fn profile_refusal_requires_specific_diagnostics_and_an_unchanged_desktop() {
+    let before = recorded_snapshot(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    let diagnostic = format!(
+        "sway-stage: profile load: workspace 1, layout \"profile-second\"; completed 0 workspaces []; workspace preflight: profile: workspace 1 id={OTHER_WORKSPACE_ID} must be completely empty, including tiled/floating containers; no applications launched"
+    );
+    let valid = refused_output(1, &diagnostic);
+    verify_profile_refusal(&valid, &before, &before, "1", OTHER_WORKSPACE_ID, false).unwrap();
+    assert!(
+        verify_profile_refusal(&valid, &before, &before, "1", OTHER_WORKSPACE_ID, true).is_err()
+    );
+    for bad in [
+        refused_output(0, &diagnostic),
+        refused_output(1, "unrelated error"),
+        refused_output(1, &diagnostic.replace("completed 0", "completed 1")),
+        refused_output(1, &diagnostic.replace("workspace preflight", "selection")),
+    ] {
+        assert!(
+            verify_profile_refusal(&bad, &before, &before, "1", OTHER_WORKSPACE_ID, false).is_err()
+        );
+    }
+    let mut changed = recorded_snapshot(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    changed.tree.nodes[1].nodes[0].nodes[0].rect.width += 1;
+    assert!(
+        verify_profile_refusal(&valid, &before, &changed, "1", OTHER_WORKSPACE_ID, false).is_err()
+    );
+    let mut changed = recorded_snapshot(
+        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
+        "9",
+        TARGET_WORKSPACE_ID,
+    );
+    changed
+        .window_events
+        .push(window_event("move", PREEXISTING_WINDOW_ID, None));
+    assert!(
+        verify_profile_refusal(&valid, &before, &changed, "1", OTHER_WORKSPACE_ID, false).is_err()
+    );
+}
+
+#[test]
+fn partial_profile_diagnostics_require_the_completed_and_failed_workspace() {
+    let primary = target_identity();
+    let diagnostic = format!(
+        "profile load: workspace 10, layout \"profile-second\"; completed 1 workspaces [(9, {})]; wait: window timeout: elapsed=500ms; stopped without cleanup or relaunch",
+        primary.id
+    );
+    verify_profile_partial_failure(&refused_output(1, &diagnostic), &primary, "10").unwrap();
+    for bad in [
+        refused_output(0, &diagnostic),
+        refused_output(1, &diagnostic.replace("workspace 10", "workspace 8")),
+        refused_output(1, &diagnostic.replace("completed 1", "completed 0")),
+        refused_output(1, &diagnostic.replace("window timeout:", "spawn failed:")),
+        refused_output(
+            1,
+            &diagnostic.replace("stopped without cleanup or relaunch", ""),
+        ),
+    ] {
+        assert!(verify_profile_partial_failure(&bad, &primary, "10").is_err());
+    }
+}
+
+#[test]
+fn profile_launch_record_distinguishes_refusal_order_and_no_window_launches() {
+    let test_id = format!("{RUN_ID}-{}-profile-launches", std::process::id());
+    let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
+    let layouts_directory = directory.subdirectory("layouts").unwrap();
+    let profiles_directory = directory.subdirectory("profiles").unwrap();
+    let layouts = profile::layouts(
+        profile::Case::Partial,
+        RUN_ID,
+        "/foot",
+        "/sleep",
+        "/script",
+        "/record",
+    );
+    layouts_directory
+        .write("profile-first", &configuration_yaml(&layouts[0]))
+        .unwrap();
+    profiles_directory
+        .write("partial", &profile::configuration("9", "10"))
+        .unwrap();
+    assert!(layouts_directory.path.join("profile-first.yaml").is_file());
+    assert!(profiles_directory.path.join("partial.yaml").is_file());
+    assert_eq!(
+        fs::metadata(&profiles_directory.path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    let record = directory.path.join("launches");
+    verify_profile_launch_record(&record, &layouts, profile::Case::Occupied).unwrap();
+    assert!(verify_profile_launch_record(&record, &layouts, profile::Case::Partial).is_err());
+    // The short-lived command must be recorded too, despite producing no new-window event.
+    let expected = "profile-first-window1\nprofile-first-window2\nprofile-second-window1\n";
+    fs::write(&record, expected).unwrap();
+    verify_profile_launch_record(&record, &layouts, profile::Case::Partial).unwrap();
+    assert!(verify_profile_launch_record(&record, &layouts, profile::Case::Occupied).is_err());
+    for incorrect in [
+        "profile-first-window1\nprofile-first-window2\n",
+        "profile-second-window1\nprofile-first-window1\nprofile-first-window2\n",
+        "profile-first-window1\nprofile-first-window1\nprofile-second-window1\n",
+    ] {
+        fs::write(&record, incorrect).unwrap();
+        assert!(verify_profile_launch_record(&record, &layouts, profile::Case::Partial).is_err());
+    }
+}
+
+#[test]
+fn returning_to_a_profile_target_requires_fresh_cleanup_evidence() {
+    let scenario = standard_scenario("horizontal-pair");
+    let primary = target_identity();
+    let second = WorkspaceIdentity {
+        id: 100,
+        name: "10".into(),
+    };
+    let before = loaded_pair_snapshot(&scenario);
+    let preexisting = container_ids(&starting_snapshot().tree);
+    let accepted = accepted_windows(&[(20, "window1"), (21, "window2")]);
+    let foreign = ForeignWindows::record(&before, primary.id).unwrap();
+    let mut context = CleanupContext {
+        package: None,
+        target: &second,
+        layout: &scenario.layout,
+        preexisting_ids: &preexisting,
+        foreign: &foreign,
+    };
+    let baseline = signature(before.focused_workspace());
+    assert!(prepare_close(&before, &context, &accepted, &baseline, 20, true).is_err());
+    context.target = &primary;
+    prepare_close(&before, &context, &accepted, &baseline, 20, true).unwrap();
+    assert!(prepare_close(&before, &context, &accepted, &baseline, 20, false).is_err());
+    let focus = vec![window_event("focus", 21, None)];
+    require_return_focus(&focus, &accepted).unwrap();
+    assert!(
+        require_return_focus(
+            &[window_event("focus", PREEXISTING_WINDOW_ID, None)],
+            &accepted
+        )
+        .is_err()
+    );
+    assert!(require_return_focus(&[window_event("close", 21, None)], &accepted).is_err());
+    let mut returned = loaded_pair_snapshot(&scenario);
+    returned.window_events = focus;
+    assert!(prepare_close(&returned, &context, &accepted, &baseline, 20, true).is_err());
+    // Only the next clean fence may authorize a close; switch events themselves cannot.
+    returned.window_events.clear();
+    prepare_close(
+        &returned,
+        &context,
+        &accepted,
+        &signature(returned.focused_workspace()),
+        20,
+        true,
+    )
+    .unwrap();
+}

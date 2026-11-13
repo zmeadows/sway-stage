@@ -858,3 +858,47 @@ fn cleanup_shape_retains_singleton_headers_and_reaps_only_empty_ancestors() {
     assert_eq!(after_third, shape_of(expected));
     assert_eq!(remove_from_shape(after_third, 23), None);
 }
+
+#[test]
+fn inactive_profile_layout_requires_the_saved_focus_path_and_full_layout() {
+    let scenario = standard_scenario("horizontal-pair");
+    let accepted = accepted_windows(&[(20, "window1"), (21, "window2")]);
+    let make_tree = || {
+        let mut tree = horizontal_pair_desktop(&scenario, (600, 400), 6);
+        node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = json!([21, 20]);
+        tree
+    };
+    let tree = parse_tree(make_tree());
+    let workspace = find(&tree, TARGET_WORKSPACE_ID);
+    verify_inactive_layout(workspace, &scenario, &accepted).unwrap();
+    assert!(verify_layout(workspace, &scenario, &accepted).is_err());
+
+    for changed_evidence in [
+        "missing-history",
+        "wrong-selection",
+        "global-focus",
+        "geometry",
+        "order",
+    ] {
+        let mut changed = make_tree();
+        match changed_evidence {
+            "missing-history" => node_mut(&mut changed, TARGET_WORKSPACE_ID)["focus"] = json!([]),
+            "wrong-selection" => {
+                node_mut(&mut changed, TARGET_WORKSPACE_ID)["focus"] = json!([20, 21])
+            }
+            "global-focus" => set_focus(&mut changed, 21),
+            "geometry" => node_mut(&mut changed, 20)["rect"]["width"] = json!(100),
+            "order" => node_mut(&mut changed, TARGET_WORKSPACE_ID)["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 1),
+            _ => unreachable!(),
+        }
+        let changed = parse_tree(changed);
+        assert!(
+            verify_inactive_layout(find(&changed, TARGET_WORKSPACE_ID), &scenario, &accepted)
+                .is_err(),
+            "{changed_evidence}"
+        );
+    }
+}

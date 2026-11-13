@@ -39,12 +39,12 @@ use crate::ownership::{
 };
 use crate::packages::{self, Launch, Ownership, Package};
 use crate::preservation::ForeignWindows;
-use crate::process;
 use crate::scenarios::{
     ConfiguredNode, DesktopLauncher, Extension, OptionalApplications, Scenario, configuration_yaml,
     configure_desktop_launcher, configure_process_execution, desktop_launcher_replay,
     extended_scenarios, foreign_fixture_scenario, prepare_extended, standard_scenarios,
 };
+use crate::{process, profile};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -56,7 +56,7 @@ const ORIGINAL_GONE: &str =
 
 #[derive(Debug, Parser)]
 #[command(
-    about = "Manual load/capture checks on two disposable workspaces in the existing Sway session"
+    about = "Manual layout/profile checks on two or three disposable workspaces in the existing Sway session"
 )]
 pub struct Arguments {
     #[arg(long, required = true, value_parser = workspace_number)]
@@ -64,6 +64,9 @@ pub struct Arguments {
     #[arg(long, required = true, value_parser = workspace_number,
         help = "Second empty disposable workspace for the owned foreign-window fixture")]
     foreign_workspace: String,
+    #[arg(long, value_parser = workspace_number,
+        help = "Third empty disposable workspace; enables three multi-workspace profile scenarios")]
+    profile_workspace: Option<String>,
     #[arg(
         long,
         help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, desktop launcher replay, unresolved capture, and optional package inference"
@@ -158,6 +161,8 @@ struct Harness {
     current_scenario: Option<ScenarioProgress>,
     fixture: Option<ForeignFixture>,
     refusal_verified: bool,
+    profile_passed: usize,
+    profile_progress: Vec<(String, AcceptedWindows)>,
     stage: String,
     passed: usize,
     skipped: usize,
@@ -195,6 +200,11 @@ pub fn run(arguments: Arguments) -> bool {
             );
         }
         if harness.switch_attempted {
+            for (workspace, accepted) in &harness.profile_progress {
+                eprintln!(
+                    "  Profile workspace {workspace}: last known owned IDs {accepted:?}; remaining windows retained on failure (some verified closes may already have completed)."
+                );
+            }
             report_remaining(
                 &harness.sway,
                 &harness.run_id,
@@ -237,8 +247,12 @@ pub fn run(arguments: Arguments) -> bool {
     );
     println!(
         "{} successful scenarios with foreign-window preservation; {} expected occupied-workspace refusal verified.",
-        harness.passed,
+        harness.passed - harness.profile_passed,
         usize::from(harness.refusal_verified)
+    );
+    println!(
+        "{} profile scenarios verified (including expected failures).",
+        harness.profile_passed
     );
     for profile in harness.retained_profiles {
         println!(
@@ -293,6 +307,8 @@ impl Harness {
             current_scenario: None,
             fixture: None,
             refusal_verified: false,
+            profile_passed: 0,
+            profile_progress: Vec::new(),
             stage: "preflight".into(),
             passed: 0,
             skipped: 0,
@@ -312,6 +328,14 @@ impl Harness {
             &mut self.events,
             &self.arguments.foreign_workspace,
         )?;
+        if let Some(second) = &self.arguments.profile_workspace {
+            profile::workspace_eligibility(
+                &self.arguments.workspace,
+                &self.arguments.foreign_workspace,
+                second,
+            )?;
+            preflight(&self.sway, &mut self.events, second)?;
+        }
         self.original = Some(initial.original);
 
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
@@ -414,6 +438,22 @@ impl Harness {
             }
         }
 
+        self.current_scenario = None;
+        if let Some(second) = self.arguments.profile_workspace.clone() {
+            for case in profile::CASES {
+                if let Err(failure) = self.run_profile(case, &second, &directory) {
+                    self.events
+                        .distrust_focus_history("profile scenario failed; retained windows");
+                    return Err(failure);
+                }
+            }
+        } else {
+            self.skipped += profile::CASES.len();
+            for case in profile::CASES {
+                println!("SKIP  {} --profile-workspace not supplied", case.name());
+            }
+        }
+
         self.finish_fixture()?;
         self.stage = "final restoration".into();
         let restoration = self.restore()?;
@@ -421,6 +461,314 @@ impl Harness {
         if restoration != RESTORED {
             return Err(Failure::Check(restoration.to_owned()));
         }
+        Ok(())
+    }
+
+    fn run_profile(
+        &mut self,
+        case: profile::Case,
+        second_number: &str,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), Failure> {
+        let name = case.name();
+        let destination = if case == profile::Case::Occupied {
+            self.arguments.foreign_workspace.clone()
+        } else {
+            second_number.to_owned()
+        };
+        self.profile_progress = vec![
+            (self.arguments.workspace.clone(), AcceptedWindows::new()),
+            (destination.clone(), AcceptedWindows::new()),
+        ];
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let profiles_directory = files.subdirectory("profiles")?;
+        let script_path = files.path.join("record-launch.sh");
+        let record_path = files.path.join("launches");
+        fs::write(&script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write profile launch recorder: {error}"))?;
+        let layouts = profile::layouts(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            script_path
+                .to_str()
+                .ok_or_else(|| "profile script path is not UTF-8".to_owned())?,
+            record_path
+                .to_str()
+                .ok_or_else(|| "profile record path is not UTF-8".to_owned())?,
+        );
+        for layout in &layouts {
+            layouts_directory.write(layout.name, &configuration_yaml(layout))?;
+        }
+        profiles_directory.write(
+            name,
+            &profile::configuration(&self.arguments.workspace, &destination),
+        )?;
+        let profile_command = |operation: &str| {
+            let mut command = Command::new(&self.binary);
+            command
+                .arg("--layouts-dir")
+                .arg(&layouts_directory.path)
+                .arg("--profiles-dir")
+                .arg(&profiles_directory.path)
+                .args(["profile", operation, name]);
+            self.sway.select_socket(&mut command);
+            command
+        };
+        let checked = process::run(profile_command("check"), &self.stage, IPC_TIMEOUT)?;
+        if checked != format!("{name}: valid\n") {
+            return Err(Failure::Uncertain("unexpected profile check output".into()));
+        }
+        let mut command = profile_command("load");
+        if case != profile::Case::Success {
+            files.suppress_notification(&mut command, &env::var_os("PATH").unwrap_or_default())?;
+        }
+
+        self.stage = format!("{name}: fresh workspace baselines");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let primary = self
+            .disposable
+            .as_ref()
+            .expect("primary selected before scenarios");
+        let primary_target = profile::Target::record(&before, &primary.name)?
+            .ok_or_else(|| Failure::Uncertain("primary profile workspace disappeared".into()))?;
+        if before.focused_workspace_id != primary.id || primary_target.workspace != *primary {
+            return Err(Failure::Uncertain(
+                "profile requires the original primary target focused".into(),
+            ));
+        }
+        require_empty(before.focused_workspace())?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        verify_fixture_state(
+            &before,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        fixture.foreign.verify(&before)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let second_before = if case == profile::Case::Occupied {
+            None
+        } else {
+            preflight_eligibility(&before, second_number)?;
+            profile::Target::record(&before, second_number)?
+        };
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        let workspace_revision = self.events.workspace_revision();
+
+        self.stage = format!("{name}: profile load");
+        interruption_check()?;
+        let timeout = load_timeout(&layouts[0]) + load_timeout(&layouts[1]);
+        let completed =
+            process::run_with_status(command, &self.stage, timeout).map_err(Failure::Uncertain)?;
+        interruption_check()?;
+        let (loaded, switch_index) = if case == profile::Case::Occupied {
+            (snapshot(&self.sway, &mut self.events, None)?, None)
+        } else {
+            let transition = ExpectedSwitch {
+                from_id: primary.id,
+                destination_name: second_number.into(),
+            };
+            let (observed, switch_index) = crate::observation::snapshot_with_switch(
+                &self.sway,
+                &mut self.events,
+                &transition,
+            )?;
+            (observed, Some(switch_index))
+        };
+        self.stage = format!("{name}: independent verification");
+        foreign.verify(&loaded)?;
+        verify_fixture_state(
+            &loaded,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        primary_target.verify(&loaded)?;
+        verify_profile_launch_record(&record_path, &layouts, case)?;
+        if case == profile::Case::Occupied {
+            verify_profile_refusal(
+                &completed,
+                &before,
+                &loaded,
+                &destination,
+                fixture.workspace.id,
+                workspace_revision != self.events.workspace_revision(),
+            )?;
+        } else {
+            let partial = case == profile::Case::Partial;
+            let accepted = profile::bind_ordered_launches(
+                &loaded.window_events,
+                switch_index.expect("profile switch observed"),
+                &layouts,
+                &preexisting,
+                partial,
+            )?;
+            let second = profile::Target::record(&loaded, second_number)?
+                .ok_or_else(|| Failure::Uncertain("second profile target missing".into()))?;
+            if let Some(expected) = &second_before {
+                expected.verify(&loaded)?;
+            } else if preexisting.contains(&second.workspace.id) {
+                return Err(Failure::Uncertain(
+                    "created workspace reused a preexisting ID".into(),
+                ));
+            }
+            // A created target must belong to an output that existed before loading.
+            let output = crate::preservation::output_ancestry(&loaded.tree, second.workspace.id)?;
+            for (output_id, output_name) in &output {
+                if !walk(&before.tree).iter().any(|placed| {
+                    placed.node.node_type == crate::ipc::NodeType::Output
+                        && placed.node.id == *output_id
+                        && placed.node.name == *output_name
+                }) {
+                    return Err(Failure::Uncertain(
+                        "profile target has an unexpected containing output".into(),
+                    ));
+                }
+            }
+            if loaded.focused_workspace_id != second.workspace.id {
+                return Err(Failure::Uncertain(
+                    "profile did not leave the second workspace focused".into(),
+                ));
+            }
+            for (target_index, (layout, (target, owned))) in layouts
+                .iter()
+                .zip([(&primary_target, &accepted[0]), (&second, &accepted[1])])
+                .enumerate()
+            {
+                verify_ownership(
+                    &loaded.tree,
+                    target.workspace.id,
+                    &layout.layout,
+                    &preexisting,
+                    owned,
+                )?;
+                self.profile_progress[target_index].1 = owned.clone();
+            }
+            let measurements = crate::layout::verify_inactive_layout(
+                primary_target.verify(&loaded)?,
+                &layouts[0],
+                &accepted[0],
+            )?;
+            for note in measurements.sizing_notes {
+                println!("      {note}");
+            }
+            if partial {
+                require_empty(second.verify(&loaded)?)?;
+                verify_profile_partial_failure(&completed, primary, second_number)?;
+            } else {
+                if !completed.status.success() || !completed.stdout.trim().is_empty() {
+                    return Err(Failure::Uncertain(format!(
+                        "profile success failed: {}: {}",
+                        completed.status, completed.stderr
+                    )));
+                }
+                let measurements =
+                    verify_layout(second.verify(&loaded)?, &layouts[1], &accepted[1])?;
+                for note in measurements.sizing_notes {
+                    println!("      {note}");
+                }
+            }
+            println!(
+                "      workspaces {} id={} and {} id={} outputs={output:?}; second target {}",
+                primary.name,
+                primary.id,
+                second_number,
+                second.workspace.id,
+                if second_before.is_some() {
+                    "identity preserved"
+                } else {
+                    "created"
+                }
+            );
+
+            // Only an independently verified expected outcome enters cleanup. Freeze the
+            // first layout as foreign state while cleaning the focused second target.
+            self.stage = format!("{name}: verified second-target cleanup");
+            let second_foreign = ForeignWindows::record(&loaded, second.workspace.id)?;
+            if !partial {
+                let context = CleanupContext {
+                    package: None,
+                    target: &second.workspace,
+                    layout: &layouts[1].layout,
+                    preexisting_ids: &preexisting,
+                    foreign: &second_foreign,
+                };
+                cleanup(
+                    &self.sway,
+                    &mut self.events,
+                    &context,
+                    &accepted[1],
+                    signature(loaded.focused_workspace()),
+                )?;
+            }
+            let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+            require_quiet(&cleaned.window_events, None)?;
+            second_foreign.verify(&cleaned)?;
+            foreign.verify(&cleaned)?;
+            second.verify(&cleaned)?;
+            require_empty(cleaned.focused_workspace())?;
+            crate::layout::verify_inactive_layout(
+                primary_target.verify(&cleaned)?,
+                &layouts[0],
+                &accepted[0],
+            )?;
+
+            self.stage = format!("{name}: return to primary and refresh cleanup evidence");
+            interruption_check()?;
+            self.sway.switch_disposable(&primary.name)?;
+            let transition = ExpectedSwitch {
+                from_id: second.workspace.id,
+                destination_name: primary.name.clone(),
+            };
+            let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+            require_return_focus(&returned.window_events, &accepted[0])?;
+            profile::require_preserved_layout(
+                primary_target.verify(&cleaned)?,
+                primary_target.verify(&returned)?,
+            )?;
+            foreign.verify(&returned)?;
+            verify_ownership(
+                &returned.tree,
+                primary.id,
+                &layouts[0].layout,
+                &preexisting,
+                &accepted[0],
+            )?;
+            verify_layout(returned.focused_workspace(), &layouts[0], &accepted[0])?;
+            // The empty second workspace may already be gone. Never require its stale ID
+            // or reuse the second workspace's cleanup baseline for the primary workspace.
+            let primary_foreign = ForeignWindows::record(&returned, primary.id)?;
+            let context = CleanupContext {
+                package: None,
+                target: primary,
+                layout: &layouts[0].layout,
+                preexisting_ids: &preexisting,
+                foreign: &primary_foreign,
+            };
+            self.stage = format!("{name}: verified primary cleanup");
+            cleanup(
+                &self.sway,
+                &mut self.events,
+                &context,
+                &accepted[0],
+                signature(returned.focused_workspace()),
+            )?;
+            let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+            primary_target.verify(&cleaned)?;
+            foreign.verify(&cleaned)?;
+            require_quiet(&cleaned.window_events, None)?;
+            require_empty(cleaned.focused_workspace())?;
+        }
+        self.profile_progress.clear();
+        self.passed += 1;
+        self.profile_passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
         Ok(())
     }
 
@@ -1318,6 +1666,34 @@ fn verify_refusal(
             "occupied refusal has no occupied baseline".into(),
         ));
     }
+    verify_unchanged_desktop(before, after, workspace_activity)?;
+    let occupied_diagnostic = output.stderr.lines().any(|line| {
+        line.starts_with("sway-stage: prelaunch workspace=")
+            && line.contains(&format!(
+                "workspace={}: layout ",
+                before.focused_workspace_id
+            ))
+            && line.contains(
+                ": target workspace must be completely empty, including tiled/floating containers;",
+            )
+    });
+    if output.status.code() != Some(1) || !occupied_diagnostic || !output.stdout.trim().is_empty() {
+        return Err(Failure::Uncertain(format!(
+            "expected occupied-workspace prelaunch refusal (exit 1), got {}: {}",
+            output.status,
+            output.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_unchanged_desktop(
+    before: &Snapshot,
+    after: &Snapshot,
+    workspace_activity: bool,
+) -> Result<(), Failure> {
+    before.validate()?;
+    after.validate()?;
     require_quiet(&after.window_events, None)?;
     let before_workspaces: BTreeMap<_, _> = before
         .workspaces
@@ -1351,22 +1727,105 @@ fn verify_refusal(
             "occupied refusal changed desktop state or workspace event history".into(),
         ));
     }
-    let occupied_diagnostic = output.stderr.lines().any(|line| {
-        line.starts_with("sway-stage: prelaunch workspace=")
-            && line.contains(&format!(
-                "workspace={}: layout ",
-                before.focused_workspace_id
-            ))
-            && line.contains(
-                ": target workspace must be completely empty, including tiled/floating containers;",
-            )
-    });
-    if output.status.code() != Some(1) || !occupied_diagnostic || !output.stdout.trim().is_empty() {
+    Ok(())
+}
+
+fn verify_profile_refusal(
+    output: &process::CompletedProcess,
+    before: &Snapshot,
+    after: &Snapshot,
+    occupied_number: &str,
+    occupied_id: i64,
+    workspace_activity: bool,
+) -> Result<(), Failure> {
+    verify_unchanged_desktop(before, after, workspace_activity)?;
+    let diagnostic =
+        format!("workspace {occupied_number} id={occupied_id} must be completely empty");
+    if output.status.code() != Some(1)
+        || !output.stdout.trim().is_empty()
+        || !output.stderr.contains("workspace preflight")
+        || !output.stderr.contains(&diagnostic)
+        || !output.stderr.contains("completed 0 workspaces []")
+        || !output.stderr.contains("no applications launched")
+    {
         return Err(Failure::Uncertain(format!(
-            "expected occupied-workspace prelaunch refusal (exit 1), got {}: {}",
-            output.status,
-            output.stderr.trim()
+            "expected occupied profile refusal: {}: {}",
+            output.status, output.stderr
         )));
+    }
+    Ok(())
+}
+
+fn verify_profile_partial_failure(
+    output: &process::CompletedProcess,
+    primary: &WorkspaceIdentity,
+    second_number: &str,
+) -> Result<(), Failure> {
+    if output.status.code() != Some(1)
+        || !output.stdout.trim().is_empty()
+        || !output.stderr.contains(&format!(
+            "workspace {second_number}, layout \"profile-second\""
+        ))
+        || !output.stderr.contains(&format!(
+            "completed 1 workspaces [({}, {})]",
+            primary.name, primary.id
+        ))
+        || !output.stderr.contains("window timeout:")
+        || !output
+            .stderr
+            .contains("stopped without cleanup or relaunch")
+    {
+        return Err(Failure::Uncertain(format!(
+            "expected second-workspace timeout with completed primary: {}: {}",
+            output.status, output.stderr
+        )));
+    }
+    Ok(())
+}
+
+fn verify_profile_launch_record(
+    path: &Path,
+    layouts: &[Scenario; 2],
+    case: profile::Case,
+) -> Result<(), Failure> {
+    let observed = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(Failure::Uncertain(format!("read launch record: {error}"))),
+    };
+    let expected = if case == profile::Case::Occupied {
+        String::new()
+    } else {
+        layouts
+            .iter()
+            .flat_map(|scenario| {
+                scenario
+                    .layout
+                    .leaves()
+                    .into_iter()
+                    .map(|leaf| format!("{}-{}\n", scenario.name, leaf.layout_id))
+            })
+            .collect::<String>()
+    };
+    if observed != expected {
+        return Err(Failure::Uncertain(format!(
+            "profile launch order/count differs: expected {expected:?}, observed {observed:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_return_focus(
+    events: &[crate::ipc::WindowEvent],
+    accepted: &AcceptedWindows,
+) -> Result<(), Failure> {
+    for event in events {
+        if event.change == crate::ipc::WindowChange::Focus
+            && accepted.contains_key(&event.container.id)
+        {
+            continue;
+        }
+        require_quiet(std::slice::from_ref(event), None)?;
     }
     Ok(())
 }
@@ -1926,6 +2385,18 @@ impl TemporaryConfigurations {
         })
     }
 
+    fn subdirectory(&self, name: &str) -> Result<Self, String> {
+        let path = self.path.join(name);
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|error| format!("create private profile directory: {error}"))?;
+        Ok(Self {
+            path,
+            retain: Cell::new(false),
+        })
+    }
+
     /// Only our private launcher is hidden, only while this bounded inference runs.
     /// Restoration is ordinary control flow and is attempted even on capture failure or
     /// interruption. A restoration failure retains the files and forbids desktop cleanup.
@@ -1994,6 +2465,16 @@ impl TemporaryConfigurations {
     /// Only the intentionally refused load intercepts notify-send. Keep its exit status,
     /// stderr, bounded execution, and desktop verification unchanged.
     fn refusal_command(&self, binary: &Path, search_path: &OsStr) -> Result<Command, String> {
+        let mut command = configured_command(binary, &self.path, "load", "single-window");
+        self.suppress_notification(&mut command, search_path)?;
+        Ok(command)
+    }
+
+    fn suppress_notification(
+        &self,
+        command: &mut Command,
+        search_path: &OsStr,
+    ) -> Result<(), String> {
         let notification_bin = self.path.join("refusal-notification-bin");
         let child_search_path = env::join_paths(
             std::iter::once(notification_bin.clone()).chain(env::split_paths(search_path)),
@@ -2013,9 +2494,8 @@ impl TemporaryConfigurations {
         stub.write_all(b"#!/bin/sh\nexit 0\n")
             .map_err(|error| format!("write refusal notify-send stub: {error}"))?;
 
-        let mut command = configured_command(binary, &self.path, "load", "single-window");
         command.env("PATH", child_search_path);
-        Ok(command)
+        Ok(())
     }
 
     fn write(&self, name: &str, contents: &str) -> Result<(), String> {
