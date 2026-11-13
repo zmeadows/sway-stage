@@ -44,6 +44,8 @@ required. Only one Sway seat is supported by the harness.
 ## Integration harness
 
 Prerequisites: `swaymsg`, Foot, and `sleep` on `PATH`, plus the two release executables.
+Profile scenarios also use `/bin/sh` to record launches before executing each configured
+command with its original argument boundaries.
 From the repository root, build (agents may perform these build steps):
 
 ```sh
@@ -67,10 +69,27 @@ Run manually, one invocation at a time:
 ./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended
 ```
 
+To include multi-workspace profiles, reserve a third disposable workspace and launch
+from another workspace, outside **all three** targets:
+
+```sh
+./target/release/examples/integration \
+  --workspace 8 \
+  --foreign-workspace 9 \
+  --profile-workspace 10
+```
+
+All three numbers must be distinct and obey the same restrictions above. The additional
+profile target is preflighted before any desktop mutation and rechecked before each profile.
+It must be absent or completely empty; the harness never clears occupied workspaces.
+Omitting `--profile-workspace` keeps the existing two-workspace suite and reports three
+profile SKIPs. The flag also works with `--extended`.
+
 | Option | Meaning |
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
+| `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables three profile scenarios after the other scenarios, while the foreign fixture stays alive. |
 | `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, unresolved-command, and two optional package-inference cases. |
 | `--appimage PATH` | Enable real AppImage inference with an existing executable; requires `--extended`. |
 | `--flatpak APP_ID` | Enable real Flatpak inference with an installed application ID; requires `--extended`. |
@@ -106,11 +125,47 @@ no layout reset or placeholder windows are used. Sway's
 updates the empty workspace directly; installed-version behavior still needs live acceptance.
 
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect twenty passes for the standard suite. Extended runs add eight cases,
-for twenty-eight total, plus the separate foreign fixture. With the original optional prerequisites
-available, an extended run without package flags reports twenty-six passes and two package
-SKIPs; supplying one package enables twenty-seven possible passes, and both enable twenty-eight.
-Other missing optional prerequisites still produce explicit SKIPs.
+commands. Expect twenty passes and three profile SKIPs for the standard two-workspace suite.
+Extended runs add eight cases, for twenty-eight total, plus the separate foreign fixture.
+With the original optional prerequisites available, an extended run without package flags
+reports twenty-six passes, two package SKIPs, and three profile SKIPs; supplying one package
+enables twenty-seven possible passes, and both enable twenty-eight. Other missing optional
+prerequisites still produce explicit SKIPs.
+
+With `--profile-workspace`, add three passes (twenty-three standard, or up to thirty-one
+extended) and remove the three profile SKIPs. Expected failures count as passes only after
+independent verification, and the summary reports profile scenarios separately:
+
+| Scenario | Independent expectations |
+| --- | --- |
+| `profile-success` | Validate and load two distinct Foot layouts in profile order; check fresh IDs, workspace/output ancestry, hierarchy, window order, sizing, each target's selected focus, and final focus on the second target. |
+| `profile-occupied-refusal` | Use the still-live foreign fixture as the second entry; require exit 1 and its occupied-target diagnostic, no recorded launches, no workspace activity, and an unchanged complete observed desktop. |
+| `profile-partial-failure` | Complete the first Foot layout, then run `sleep 0` with a 500 ms matching-window timeout on the second target. Require exit 1, completed/failed workspace diagnostics, an intact first layout, an empty focused second target, and no observed rollback. |
+
+All three use private layout/profile directories, explicit directory overrides, and the pinned
+Sway socket. Private launch records cover commands that produce no windows; ordered window
+events on either side of the single expected transition independently establish launch
+bindings. The inactive first workspace is checked through its saved child-focus path.
+The foreign fixture and unrelated windows retain their usual preservation checks. Intentional
+profile errors use a private no-op notification stub on the child PATH, like the ordinary
+occupied refusal; stderr and exit status remain checked.
+
+If the second target is absent at scenario start, the profile must create it. If it already
+exists empty, its identity/output must survive. The harness never destroys a workspace to
+force creation. Natural removal of an empty unfocused workspace is allowed after cleanup.
+On independently verified success or expected failure, cleanup closes the second target's
+owned windows first, returns to the primary, then establishes fresh evidence before closing
+its windows. Unexpected or ambiguous outcomes leave remaining windows untouched and forbid
+restoration; diagnostics report both target numbers, last known owned IDs, and remaining
+run-specific window candidates. The short-lived timeout command has no window to close.
+
+Targets may naturally share an output or occupy different outputs. The harness checks actual
+placement and rejects migration, without assigning or rearranging outputs. Explicit
+cross-output coverage requires the user's existing Sway workspace rules; it is not guaranteed
+by the harness. Record outputs and Sway version with live results. The event/snapshot limits
+described below still apply; an unchanged tree cannot prove that an unobservable no-op IPC
+command was never attempted.
+
 The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
 run-specific environment override; verified window cleanup must also observe its exit.
@@ -490,7 +545,9 @@ Replace all three workspace numbers with unused disposable targets in your exist
 Use harmless applications with distinct, verified selectors; keep all targets empty and input
 idle. Build first, run `sway-stage profile check work` with your directory overrides, and use
 those same overrides for `sway-stage profile load work` in each independent run below.
-The profile coordinator selects the targets itself; do not run the live harness for these checks.
+The profile coordinator selects the targets itself. The optional harness profile scenarios
+above automate the basic two-target cases; these separate manual checks cover additional
+conditions and interference.
 
 1. **Normal loading:** include an existing empty numbered workspace with a descriptive name
    and a missing target. Load from another workspace. Verify YAML order, each hierarchy,
@@ -515,8 +572,9 @@ The profile coordinator selects the targets itself; do not run the live harness 
    an abort with all windows left in place and no focus restoration. Profiles must never move
    a workspace or assign an output. Record the Sway version and outputs tested.
 
-These manual profile and hardware checks remain outstanding; offline fixtures do not establish
-live compositor compatibility or transactional isolation.
+Live acceptance of the harness profile scenarios and these additional profile/hardware checks
+remains outstanding; offline fixtures do not establish live compositor compatibility or
+transactional isolation.
 
 ## Maintainer notes
 
