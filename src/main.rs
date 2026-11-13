@@ -48,7 +48,7 @@ enum CliCommand {
         /// Layout name (the YAML filename without its extension)
         name: String,
     },
-    /// Validate named multi-workspace profiles offline
+    /// Validate or sequentially load named multi-workspace profiles
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -69,6 +69,11 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum ProfileCommand {
+    /// Construct layouts in order on the profile's explicitly numbered empty workspaces
+    Load {
+        /// Profile name (the YAML filename without its extension)
+        name: String,
+    },
     /// Validate a profile and every referenced layout without contacting Sway
     Check {
         /// Profile name (the YAML filename without its extension)
@@ -91,6 +96,9 @@ fn main() -> ExitCode {
             command: ProfileCommand::Check { name },
         }) => check_profile(&name, cli.profiles_dir, cli.layouts_dir)
             .map_err(|error| format!("profile check: {error}")),
+        Some(CliCommand::Profile {
+            command: ProfileCommand::Load { name },
+        }) => load_profile(&name, cli.profiles_dir, cli.layouts_dir),
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
         Some(CliCommand::Capture { no_infer_commands }) => capture(!no_infer_commands),
         Some(CliCommand::Menu { no_infer_commands }) => menu(cli.layouts_dir, !no_infer_commands),
@@ -141,6 +149,19 @@ fn check_profile(
     writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
 }
 
+fn load_profile(
+    name: &str,
+    profiles_dir: Option<PathBuf>,
+    layouts_dir: Option<PathBuf>,
+) -> Result<(), String> {
+    let mut diagnostics = Diagnostics::start("profile load");
+    diagnostics.stage(format!("profile {name:?}: validation"));
+    diagnostics.record(&format!("profile {name:?}; completed 0 workspaces []"));
+    let result = profile::read_named(name, profiles_dir, layouts_dir)
+        .and_then(|prepared| profile::load(&prepared, &mut diagnostics));
+    result.map_err(|error| diagnostics.report_failure(format!("profile {name:?}: {error}")))
+}
+
 fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("load {name:?}: validation"));
@@ -154,8 +175,8 @@ fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Resul
     .map_err(|error| diagnostics.report_failure(error))
 }
 
-/// Validates and constructs a named layout under launch diagnostics. This is the single
-/// loading path: menu calls it only after Fuzzel has exited with a valid selection.
+/// Standalone and menu loading share named-layout validation and cwd overrides.
+/// Menu calls only after Fuzzel has exited with a valid selection.
 fn load_named_layout(
     name: &str,
     layout_result: Result<(PathBuf, config::Config), String>,

@@ -21,6 +21,7 @@ pub struct Diagnostics {
     log_path: Option<PathBuf>,
     started_at: Instant,
     current_stage: String,
+    profile_context: Option<String>,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
     application_spawned: bool,
     /// Set only when returning a window timeout, for its concise notification.
@@ -37,13 +38,14 @@ impl Diagnostics {
             log_path: Some(log_path),
             started_at: Instant::now(),
             current_stage: "test".into(),
+            profile_context: None,
             application_spawned: false,
             timeout_process_status: None,
         }
     }
 
     /// Replaces the last-run log. Call only for an invocation that loads a selected layout:
-    /// `load`, or `menu` once a layout is selected.
+    /// `load`, `profile load`, or `menu` once a layout is selected.
     pub fn start(operation: &'static str) -> Self {
         let mut diagnostics = Self {
             operation,
@@ -51,6 +53,7 @@ impl Diagnostics {
             log_path: None,
             started_at: Instant::now(),
             current_stage: "validation".into(),
+            profile_context: None,
             application_spawned: false,
             timeout_process_status: None,
         };
@@ -66,6 +69,14 @@ impl Diagnostics {
         diagnostics
     }
 
+    pub fn profile_workspace(&mut self, number: u64, layout: &str, completed: &[(u64, i64)]) {
+        self.profile_context = Some(format!(
+            "workspace {number}, layout {layout:?}; completed {} workspaces {completed:?}",
+            completed.len()
+        ));
+        self.record("profile progress");
+    }
+
     pub fn stage(&mut self, stage: impl Into<String>) {
         self.current_stage = stage.into();
         self.record("begin");
@@ -77,11 +88,15 @@ impl Diagnostics {
             .unwrap_or_default();
         // Escape line breaks/control characters in external text to preserve log records.
         let line = format!(
-            "{}.{:03} +{}ms [{}] {}\n",
+            "{}.{:03} +{}ms [{}] {}{}\n",
             timestamp.as_secs(),
             timestamp.subsec_millis(),
             self.started_at.elapsed().as_millis(),
             self.current_stage.escape_debug(),
+            self.profile_context
+                .as_ref()
+                .map(|context| format!("{}: ", context.escape_debug()))
+                .unwrap_or_default(),
             message.escape_debug(),
         );
 
@@ -120,12 +135,26 @@ impl Diagnostics {
     /// Logs and notifies a fatal error, returning the primary message for stderr.
     pub fn report_failure(&mut self, error: String) -> String {
         let mut message = format!("{}: {error}", self.current_stage);
-        // Validation, connection, prelaunch and failed-spawn errors leave nothing behind.
+        if self.operation == "profile load" {
+            message = format!(
+                "profile load: {}; {message}",
+                self.profile_context
+                    .as_deref()
+                    .unwrap_or("completed 0 workspaces []")
+            );
+        }
+        // Advice follows launches across the whole session, including earlier profile entries.
         if self.application_spawned {
+            if self.operation == "profile load" {
+                message.push_str("; application launches may have left partial layouts");
+            }
             message
                 .push_str("; stopped without cleanup or relaunch; inspect windows before retrying");
         }
 
+        if self.operation == "profile load" && !self.application_spawned {
+            message.push_str("; no applications launched");
+        }
         self.record(&message);
 
         if let Some(log_path) = &self.log_path {
@@ -237,7 +266,13 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
         }
     }
 
-    let summary = if stage.ends_with(": validation") {
+    let summary = if operation == "profile load" {
+        if stage.ends_with(": validation") {
+            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
+        } else {
+            "Profile loading stopped. Completed and partial layouts remain in place; see terminal output for workspace progress."
+        }
+    } else if stage.ends_with(": validation") {
         "Unable to read or validate the selected layout. Check its configuration."
     } else if cause.starts_with("window timeout: ") {
         "The expected window was not ready in time. Check its launch command or window selector."
@@ -434,6 +469,7 @@ mod tests {
                     log_path: None,
                     started_at: Instant::now(),
                     current_stage: "wait".into(),
+                    profile_context: None,
                     application_spawned: true,
                     timeout_process_status: None,
                 };
@@ -577,6 +613,7 @@ mod tests {
             log_path: Some(PathBuf::from("/dev/full")),
             started_at: Instant::now(),
             current_stage: "wait".into(),
+            profile_context: None,
             application_spawned: true,
             timeout_process_status: None,
         };

@@ -20,7 +20,7 @@ use swayipc::{
     CommandType, Event, Floating, Node, NodeLayout, NodeType, ScratchpadState, WindowChange,
 };
 
-const IPC_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_NEW_WINDOW_HISTORY: usize = 256;
 const MAX_COMMAND_REPLY_BYTES: usize = 1024 * 1024;
@@ -1030,7 +1030,7 @@ fn verify_group_selections(
 
 /// A disposable command connection is cancelled on expiry; never retry a command
 /// whose reply was lost because Sway may already have executed it.
-fn run_command(
+pub(crate) fn run_command(
     socket: UnixStream,
     command: String,
     deadline: Instant,

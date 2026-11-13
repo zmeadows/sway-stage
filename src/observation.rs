@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use swayipc::{
-    Connection, Event, EventType, Floating, Node, NodeLayout, NodeType, ScratchpadState,
+    Connection, Event, EventType, Floating, Node, NodeLayout, NodeType, ScratchpadState, Workspace,
     WorkspaceChange,
 };
 
@@ -43,6 +43,14 @@ pub struct Snapshot {
     pub target_workspace_id: i64,
     pub tree: Node,
     /// Ordered history through the tick sent after the queries; not an atomic tree/event view.
+    pub events: Vec<Event>,
+}
+
+/// Unfrozen observations for the profile coordinator. The coordinator validates event
+/// history against its explicit transition; individual loads use `Snapshot` instead.
+pub struct WorkspaceSnapshot {
+    pub workspaces: Vec<Workspace>,
+    pub tree: Node,
     pub events: Vec<Event>,
 }
 
@@ -243,20 +251,11 @@ impl Observer {
         }
     }
 
-    /// Each snapshot uses a separate, disposable query connection. The temporary query
-    /// thread makes even a stalled/fragmented reply subject to the same monotonic deadline.
-    pub fn snapshot(&mut self, socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
-        self.snapshot_for_workspace(socket, deadline, None)
-    }
-
-    /// Constrains initial target selection to a saved pre-menu workspace, when supplied.
-    /// The comparison and event fence belong to the same observation used by construction.
-    pub fn snapshot_for_workspace(
+    fn query_workspace_tree(
         &mut self,
         socket: UnixStream,
         deadline: Instant,
-        expected_workspace_id: Option<i64>,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<(Vec<Workspace>, Node, String), String> {
         self.check_health()?;
 
         let shutdown_socket = socket
@@ -309,6 +308,62 @@ impl Observer {
             Ok(Err(error)) => return self.fail(error),
             Err(error) => return self.fail(format!("snapshot deadline/channel failure: {error}")),
         };
+
+        Ok((workspaces, tree, fence_token))
+    }
+
+    /// Does not freeze focus or output and must only be used by the profile coordinator.
+    /// Its raw history must be checked before acting on the returned observations.
+    pub fn workspace_snapshot(
+        &mut self,
+        socket: UnixStream,
+        deadline: Instant,
+    ) -> Result<WorkspaceSnapshot, String> {
+        let (workspaces, tree, fence_token) = self.query_workspace_tree(socket, deadline)?;
+        let mut events = Vec::new();
+        loop {
+            match self.receive(deadline)? {
+                Some(Message::Event(Event::Tick(tick)))
+                    if !tick.first && tick.payload == fence_token =>
+                {
+                    break;
+                }
+                Some(Message::Event(Event::Tick(_))) => {}
+                Some(Message::Event(event)) => {
+                    if events.len() == EVENT_QUEUE_CAPACITY {
+                        return self.fail("snapshot event history limit exceeded".into());
+                    }
+                    events.push(event);
+                }
+                Some(Message::Subscribed) => {
+                    return self.fail("duplicate subscription acknowledgement".into());
+                }
+                None => return self.fail("snapshot: event fence deadline expired".into()),
+            }
+        }
+
+        Ok(WorkspaceSnapshot {
+            workspaces,
+            tree,
+            events,
+        })
+    }
+
+    /// Each snapshot uses a separate, disposable query connection. The temporary query
+    /// thread makes even a stalled/fragmented reply subject to the same monotonic deadline.
+    pub fn snapshot(&mut self, socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
+        self.snapshot_for_workspace(socket, deadline, None)
+    }
+
+    /// Constrains initial target selection to a saved pre-menu workspace, when supplied.
+    /// The comparison and event fence belong to the same observation used by construction.
+    pub fn snapshot_for_workspace(
+        &mut self,
+        socket: UnixStream,
+        deadline: Instant,
+        expected_workspace_id: Option<i64>,
+    ) -> Result<Snapshot, String> {
+        let (workspaces, tree, fence_token) = self.query_workspace_tree(socket, deadline)?;
 
         let mut focused_workspaces = workspaces.iter().filter(|workspace| workspace.focused);
         let target_workspace_id = match (focused_workspaces.next(), focused_workspaces.next()) {

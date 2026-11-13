@@ -70,6 +70,7 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["check", "--help"],
         vec!["profile", "--help"],
         vec!["profile", "check", "--help"],
+        vec!["profile", "load", "--help"],
         vec!["load", "--help"],
         vec!["capture", "--help"],
         vec!["menu", "--help"],
@@ -89,7 +90,8 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec!["check"],
         vec!["profile"],
         vec!["profile", "check"],
-        vec!["profile", "load", "work"],
+        vec!["profile", "load"],
+        vec!["profile", "load", "work", "--cwd", "."],
         vec!["profile", "check", "work", "--cwd", "."],
         vec!["--profiles-dir", "", "profile", "check", "work"],
         vec!["load"],
@@ -1207,3 +1209,6 @@ fn load_directory_override_is_validated_before_ipc_and_belongs_only_to_load() {
 
 #[path = "cli/profile.rs"]
 mod profile;
+
+#[path = "cli/profile_load.rs"]
+mod profile_load;
