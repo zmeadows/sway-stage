@@ -679,6 +679,13 @@ fn repeated_name_retries_save_the_original_snapshot() {
     };
     let mut tree = capture_tree();
     tree["nodes"][0]["nodes"][0]["nodes"][0]["pid"] = json!(process_id);
+    let workspace = &mut tree["nodes"][0]["nodes"][0];
+    let mut first = workspace["nodes"][0].clone();
+    first["id"] = json!(21);
+    first["focused"] = json!(false);
+    workspace["nodes"].as_array_mut().unwrap().insert(0, first);
+    workspace["layout"] = json!("tabbed");
+    workspace["focus"] = json!([20, 21]);
 
     // The fake compositor accepts exactly one GET_TREE and closes after the snapshot.
     let output = run_with_recorded_snapshot(&fixture, &mut menu_command, tree);
@@ -688,6 +695,8 @@ fn repeated_name_retries_save_the_original_snapshot() {
     assert!(ready, "test process did not publish launcher metadata");
     assert!(output.status.success(), "{output:?}");
     let saved = fs::read_to_string(layouts.join("accepted.yaml")).unwrap();
+    assert!(saved.contains("active: 2"), "{saved}");
+    assert!(saved.contains("focus: window2"), "{saved}");
     assert!(saved.contains("app_id: editor"), "{saved}");
     assert!(
         !saved.lines().any(|line| line.trim() == "command: null"),
@@ -1514,6 +1523,7 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
         ("parent focus", "focus a window"),
         ("unsupported layout", "unsupported layout"),
         ("geometry", "unusable geometry"),
+        ("tab selection", "child-focus history"),
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -1535,12 +1545,16 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
                 workspace["focused"] = json!(true);
             }
             "unsupported layout" => workspace["layout"] = json!("none"),
-            "geometry" => {
+            "geometry" | "tab selection" => {
                 let mut second = workspace["nodes"][0].clone();
                 second["id"] = json!(21);
                 second["focused"] = json!(false);
                 second["rect"]["width"] = json!(0);
                 workspace["nodes"].as_array_mut().unwrap().push(second);
+                if arrangement == "tab selection" {
+                    workspace["layout"] = json!("tabbed");
+                    workspace["focus"] = json!([]);
+                }
             }
             _ => unreachable!(),
         }
@@ -1555,6 +1569,15 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
             "{output:?}"
         );
         assert!(!fixture.path.join("arguments").exists());
+        assert!(output.stdout.is_empty());
+        assert!(!fixture.path.join("unused.yaml").exists());
+        assert!(!fs::read_dir(&fixture.path).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
         assert_preload_notification(
             &fixture,
             "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus.",

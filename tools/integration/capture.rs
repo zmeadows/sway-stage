@@ -168,6 +168,7 @@ fn apply_captured_weights(
             weight: group_weight,
             children,
             layout,
+            ..
         } => {
             *group_weight = weight;
             for child in children {

@@ -12,12 +12,12 @@ native-group acceptance remains outstanding. Behavior is defined in the
   root and nested groups, singleton ancestry, and sibling insertion against the installed
   Sway version. Offline tree/event fixtures verify reactions, not the compositor's actual
   construction behavior.
-- **Native groups, harness acceptance.** Run the nineteen-scenario standard suite,
-  including eight native-group additions and two capture/reload cases. The independent
+- **Native groups, harness acceptance.** Run the twenty-scenario standard suite,
+  including nine native-group additions and four capture/reload cases. The independent
   harness checks exact mixed hierarchy, singleton preservation, split proportions,
-  per-container child-focus history, final global focus, capture weights, and conservative
-  success-only cleanup transitions. Verify these source-backed expectations against the
-  installed Sway version. The `initially-tabbed` and `initially-stacked` cases establish and
+  per-container child-focus history, final global focus, captured selections and weights,
+  and conservative success-only cleanup transitions. Verify these source-backed expectations
+  against the installed Sway version. The `initially-tabbed` and `initially-stacked` cases establish and
   verify empty native workspace layouts before loading the existing mixed hierarchy. Offline
   fixtures do not establish compositor reconstruction or cleanup behavior; record manual
   results before marking this acceptance complete.

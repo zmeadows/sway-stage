@@ -98,6 +98,8 @@ pub enum ConfiguredNode {
     Window(ConfiguredWindow),
     Group {
         layout: GroupLayout,
+        /// One-based selection for tabbed/stacked groups; splits leave this at one.
+        active: usize,
         /// Used only when this group is a child of a split.
         weight: u32,
         children: Vec<ConfiguredNode>,
@@ -143,6 +145,25 @@ pub enum DesktopLaunchMethod {
 }
 
 impl ConfiguredNode {
+    /// Global focus takes precedence only in groups containing that configured window.
+    pub fn selected_child_index(&self, focus: Option<&str>) -> usize {
+        let Self::Group {
+            active, children, ..
+        } = self
+        else {
+            return 0;
+        };
+        children
+            .iter()
+            .position(|child| {
+                child
+                    .leaves()
+                    .iter()
+                    .any(|leaf| Some(leaf.layout_id.as_str()) == focus)
+            })
+            .unwrap_or(*active - 1)
+    }
+
     pub fn weight(&self) -> u32 {
         match self {
             ConfiguredNode::Window(window) => window.weight,
@@ -194,6 +215,18 @@ pub struct Scenario {
     pub extension: Option<Extension>,
     /// Set by `prepare_extended` when an optional application or subsystem is unavailable.
     pub skip: Option<String>,
+}
+
+impl Scenario {
+    pub fn captures_and_reloads(&self) -> bool {
+        matches!(
+            self.name,
+            "capture-reload-roundtrip"
+                | "mixed-capture-reload"
+                | "independent-native-groups"
+                | "outside-focus-capture-reload"
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,19 +373,21 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
                 Horizontal,
                 1,
                 vec![
-                    group(
+                    group_with_active(
                         Tabbed,
                         3,
-                        vec![
-                            window(1, 1),
-                            group(Stacked, 1, vec![window(2, 1), window(3, 1)]),
-                        ],
-                    ),
-                    group(
-                        Stacked,
                         2,
                         vec![
-                            group(Tabbed, 1, vec![window(4, 1), window(5, 1)]),
+                            window(1, 1),
+                            group_with_active(Stacked, 1, 2, vec![window(2, 1), window(3, 1)]),
+                        ],
+                    ),
+                    group_with_active(
+                        Stacked,
+                        2,
+                        2,
+                        vec![
+                            group_with_active(Tabbed, 1, 2, vec![window(4, 1), window(5, 1)]),
                             window(6, 1),
                         ],
                     ),
@@ -417,6 +452,24 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
         scenarios.push(scenario);
     }
+
+    let mut outside_focus = scenarios
+        .iter()
+        .find(|scenario| scenario.name == "mixed-capture-reload")
+        .expect("standard scenarios include mixed capture/reload")
+        .clone();
+    outside_focus.name = "outside-focus-capture-reload";
+    outside_focus.expected_focus = "window4";
+    outside_focus.configured_focus = Some("window4");
+    let ConfiguredNode::Group { children, .. } = &mut outside_focus.layout else {
+        unreachable!("mixed capture has a split root")
+    };
+    let ConfiguredNode::Group { active, .. } = &mut children[0] else {
+        unreachable!("mixed capture starts with a tabbed group")
+    };
+    *active = 2;
+    use_unique_foot_windows(&mut outside_focus, run_id, foot, sleep);
+    scenarios.push(outside_focus);
     scenarios
 }
 
@@ -544,8 +597,18 @@ fn window(number: u32, weight: u32) -> ConfiguredNode {
 }
 
 fn group(layout: GroupLayout, weight: u32, children: Vec<ConfiguredNode>) -> ConfiguredNode {
+    group_with_active(layout, weight, 1, children)
+}
+
+fn group_with_active(
+    layout: GroupLayout,
+    weight: u32,
+    active: usize,
+    children: Vec<ConfiguredNode>,
+) -> ConfiguredNode {
     ConfiguredNode::Group {
         layout,
+        active,
         weight,
         children,
     }
@@ -993,13 +1056,22 @@ pub fn expected_draft(
     scenario: &Scenario,
     measured_shares: &BTreeMap<Vec<usize>, f64>,
 ) -> Result<String, String> {
-    render_yaml(scenario, &Rendering::Draft(measured_shares))
+    render_yaml(
+        scenario,
+        &Rendering::Draft {
+            measured_shares,
+            focus: scenario.expected_focus,
+        },
+    )
 }
 
 enum Rendering<'a> {
     Configuration,
     Diagnostic,
-    Draft(&'a BTreeMap<Vec<usize>, f64>),
+    Draft {
+        measured_shares: &'a BTreeMap<Vec<usize>, f64>,
+        focus: &'a str,
+    },
 }
 
 /// One fixed layout of sway-stage's format; capture's serializer uses the same field
@@ -1014,7 +1086,7 @@ fn render_yaml(scenario: &Scenario, rendering: &Rendering) -> Result<String, Str
     if let Some(focus) = focus {
         lines.push(format!("focus: {focus}"));
     }
-    if !matches!(rendering, Rendering::Draft(_)) {
+    if !matches!(rendering, Rendering::Draft { .. }) {
         lines.push(format!("window_timeout_ms: {}", scenario.window_timeout_ms));
     }
     lines.push("layout:".to_owned());
@@ -1054,7 +1126,9 @@ fn emit_node(
     if weighted {
         let weight = match rendering {
             Rendering::Configuration | Rendering::Diagnostic => node.weight().to_string(),
-            Rendering::Draft(measured_shares) => measured_shares
+            Rendering::Draft {
+                measured_shares, ..
+            } => measured_shares
                 .get(path.as_slice())
                 .ok_or_else(|| format!("no measured share for {}", describe_path(path)))?
                 .to_string(),
@@ -1066,7 +1140,7 @@ fn emit_node(
         ConfiguredNode::Window(window) => {
             let command = match rendering {
                 Rendering::Configuration => json_sequence(&window.command),
-                Rendering::Diagnostic | Rendering::Draft(_) => "null".to_owned(),
+                Rendering::Diagnostic | Rendering::Draft { .. } => "null".to_owned(),
             };
             fields.push(format!("command: {command}"));
             fields.push("match:".to_owned());
@@ -1084,7 +1158,16 @@ fn emit_node(
                 fields.push(format!("env: {}", json_mapping(&window.env)));
             }
         }
-        ConfiguredNode::Group { .. } => fields.push("children:".to_owned()),
+        ConfiguredNode::Group { layout, active, .. } => {
+            let selected_child = match rendering {
+                Rendering::Draft { focus, .. } => node.selected_child_index(Some(focus)) + 1,
+                _ => *active,
+            };
+            if !layout.is_split() && selected_child > 1 {
+                fields.push(format!("active: {selected_child}"));
+            }
+            fields.push("children:".to_owned());
+        }
     }
 
     for (field_index, field) in fields.iter().enumerate() {

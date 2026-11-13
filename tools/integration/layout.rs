@@ -324,6 +324,7 @@ pub fn verify_layout(
         workspace,
         &mut Vec::new(),
         &container_ids,
+        scenario.expected_focus,
         &mut measurements,
     );
 
@@ -349,6 +350,7 @@ fn compare_node(
     observed: &TreeNode,
     path: &mut Vec<usize>,
     container_ids: &HashMap<&str, i64>,
+    expected_focus: &str,
     measurements: &mut LayoutMeasurements,
 ) -> Result<(), Failure> {
     let mut observed = observed;
@@ -394,12 +396,10 @@ fn compare_node(
         measure_split(configured_children, observed, path, measurements)?;
     } else {
         // IPC focus lists direct children in seat focus-stack order, including inactive
-        // groups. Global focus wins on its ancestry; all other groups select child zero.
-        let selected_child = observed
-            .nodes
-            .iter()
-            .find(|child| walk(child).iter().any(|placed| placed.node.focused))
-            .unwrap_or(&observed.nodes[0]);
+        // groups. Derive precedence from the independent expected window, so observed
+        // focus cannot conceal a wrong selection in an inactive group.
+        let selected_child_index = configured.selected_child_index(Some(expected_focus));
+        let selected_child = &observed.nodes[selected_child_index];
         if observed.focus.first() != Some(&selected_child.id) {
             return Err(Failure::Uncertain(format!(
                 "{location}: selected child differs: expected id={}, child-focus history={:?}",
@@ -416,6 +416,7 @@ fn compare_node(
             observed_child,
             path,
             container_ids,
+            expected_focus,
             measurements,
         )?;
         path.pop();

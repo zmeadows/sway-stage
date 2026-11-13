@@ -266,9 +266,12 @@ Launch commands are inferred automatically on a best-effort basis; unresolved co
 `command: null`. `--no-infer-commands` disables inference and leaves all commands null.
 Workspace names, outputs, titles, container IDs, PIDs, cwd, and environment are not serialized.
 
-Capture records only global focus, not independently selected tabs in inactive groups.
-Reloading uses the first-child defaults described above, then applies global focus along
-its ancestry. Capture does not query additional snapshots or infer inactive selections.
+Capture also preserves selected children of tabbed and stacked groups, including inactive
+and nested groups, using each group's focus history from the same single Sway snapshot.
+It emits the one-based `active` index only when the selected child is not the first.
+Singleton groups need no selection history. For multi-child groups, missing, invalid, or
+contradictory selection history fails capture rather than guessing. Global window focus
+is recorded independently in `focus`.
 
 Inferred commands use compact flow sequences such as `command: [foot, --app-id=term]`
 when the YAML-escaped line, including indentation, fits within 120 characters. Longer

@@ -49,11 +49,26 @@ fn group(
 
 /// A tree whose focused workspace (id 10) holds `children`, with only `focused_container_id` focused.
 fn workspace_tree(layout: &str, children: Vec<Value>, focused_container_id: i64) -> Value {
-    fn focus_only(value: &mut Value, focused_container_id: i64) {
+    fn focus_only(value: &mut Value, focused_container_id: i64) -> bool {
         value["focused"] = json!(value["id"] == focused_container_id);
+        let mut focused_child_id = None;
         for child in value["nodes"].as_array_mut().unwrap() {
-            focus_only(child, focused_container_id);
+            if focus_only(child, focused_container_id) {
+                focused_child_id = Some(child["id"].clone());
+            }
         }
+        let mut child_history: Vec<Value> = value["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| child["id"].clone())
+            .collect();
+        if let Some(child_id) = &focused_child_id {
+            child_history.retain(|id| id != child_id);
+            child_history.insert(0, child_id.clone());
+        }
+        value["focus"] = json!(child_history);
+        value["focused"] == true || focused_child_id.is_some()
     }
     let mut tree = empty_workspace_tree();
     let workspace_tree = &mut tree["nodes"][0]["nodes"][0];
@@ -245,6 +260,160 @@ fn tabbed_and_stacked_roots_keep_order_focus_and_singletons_without_weights() {
         assert_eq!(
             capture_outline(workspace_tree(layout, vec![left_window()], 20)),
             ("window1".into(), format!("{symbol}(window1 app_id=left)"))
+        );
+    }
+}
+
+#[test]
+fn active_indices_serialize_only_non_first_header_selections_and_parse() {
+    for (layout, selected_index) in [("tabbed", 1), ("tabbed", 2), ("stacked", 3)] {
+        let tree = workspace_tree(
+            layout,
+            vec![
+                left_window(),
+                right_window(),
+                wayland_window(22, Some("third"), 0, 0),
+            ],
+            19 + selected_index,
+        );
+        let draft = capture_recorded_tree(tree).unwrap();
+        let config = parse_filled_draft(&draft);
+        let NodeKind::Group { active, .. } = config.layout.value.kind else {
+            panic!("header group")
+        };
+        let expected = (selected_index > 1).then_some(selected_index as u64);
+        assert_eq!(active, expected);
+        assert_eq!(draft_body(&draft).contains("active:"), expected.is_some());
+        if let Some(active) = expected {
+            assert!(draft.contains(&format!("group: {layout}\n  active: {active}\n  children:")));
+        }
+        assert_eq!(config.focus, Some(format!("window{selected_index}")));
+    }
+}
+
+#[test]
+fn independent_inactive_groups_preserve_distinct_selections_and_outside_focus() {
+    let tabs = group(30, "tabbed", 600, 1080, vec![left_window(), right_window()]);
+    let stack = group(
+        31,
+        "stacked",
+        600,
+        1080,
+        vec![
+            wayland_window(22, Some("a"), 0, 0),
+            wayland_window(23, Some("b"), 0, 0),
+            wayland_window(24, Some("c"), 0, 0),
+        ],
+    );
+    let mut tree = workspace_tree(
+        "splith",
+        vec![tabs, stack, wayland_window(25, Some("outside"), 600, 1080)],
+        25,
+    );
+    let workspace = &mut tree["nodes"][0]["nodes"][0];
+    workspace["nodes"][0]["focus"] = json!([21, 20]);
+    workspace["nodes"][1]["focus"] = json!([24, 22, 23]);
+
+    let draft = capture_recorded_tree(tree).unwrap();
+    parse_filled_draft(&draft);
+    let document: Value = serde_saphyr::from_str(&draft).unwrap();
+    let root = &document["layout"];
+    assert!(root.get("active").is_none());
+    assert_eq!(root["children"][0]["active"], 2);
+    assert_eq!(root["children"][1]["active"], 3);
+    assert_eq!(document["focus"], "window6");
+}
+
+#[test]
+fn nested_selections_keep_indices_when_selected_split_wrappers_collapse() {
+    for (outer_layout, inner_layout) in [("tabbed", "stacked"), ("stacked", "tabbed")] {
+        let selected_split = group(
+            32,
+            "splith",
+            0,
+            0,
+            vec![
+                wayland_window(22, Some("a"), 300, 100),
+                wayland_window(23, Some("b"), 100, 100),
+            ],
+        );
+        let wrapper = group(33, "splitv", 0, 0, vec![selected_split]);
+        let inner = group(31, inner_layout, 0, 0, vec![right_window(), wrapper]);
+        let outer = group(30, outer_layout, 1920, 1080, vec![left_window(), inner]);
+        let draft = capture_recorded_tree(workspace_tree("splith", vec![outer], 23)).unwrap();
+        parse_filled_draft(&draft);
+        let document: Value = serde_saphyr::from_str(&draft).unwrap();
+        let root = &document["layout"];
+        assert_eq!(root["active"], 2);
+        let inner = &root["children"][1];
+        assert_eq!(inner["active"], 2);
+        assert_eq!(inner["children"][1]["group"], "splith");
+        assert_eq!(inner["children"][1]["children"][0]["weight"], 75.0);
+        assert_eq!(draft.matches("active:").count(), 2);
+        assert_eq!(document["focus"], "window4");
+    }
+}
+
+#[test]
+fn singleton_headers_need_no_usable_focus_history_and_omit_active() {
+    for layout in ["tabbed", "stacked"] {
+        for history in [json!([]), json!([999])] {
+            let mut tree = workspace_tree(layout, vec![left_window()], 20);
+            let workspace = &mut tree["nodes"][0]["nodes"][0];
+            workspace["focus"] = history;
+            let draft = capture_recorded_tree(tree).unwrap();
+            assert!(!draft_body(&draft).contains("active:"));
+            parse_filled_draft(&draft);
+        }
+    }
+}
+
+#[test]
+fn multi_child_headers_reject_unusable_or_contradictory_history_before_inference() {
+    for layout in ["tabbed", "stacked"] {
+        for history in [
+            None,
+            Some(json!([])),
+            Some(json!([999, 20])),
+            Some(json!([10])),
+            Some(json!([20, 20])),
+            Some(json!([20, 999])),
+            Some(json!([21, 20])),
+        ] {
+            let mut tree = workspace_tree(layout, vec![left_window(), right_window()], 20);
+            let workspace = &mut tree["nodes"][0]["nodes"][0];
+            match history {
+                Some(history) => workspace["focus"] = history,
+                None => {
+                    workspace.as_object_mut().unwrap().remove("focus");
+                }
+            }
+            // swayipc requires the JSON field itself; an omitted field fails acquisition.
+            let saved = match read_recorded_snapshot(tree) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    assert!(error.contains("missing field `focus`"), "{error}");
+                    continue;
+                }
+            };
+            let error = saved
+                .render_with(true, &mut |_| {
+                    panic!("invalid capture must not infer commands")
+                })
+                .unwrap_err();
+            assert!(error.contains("container id=10"), "{error}");
+            assert!(error.contains("child-focus history"), "{error}");
+        }
+
+        let inner = group(30, "splith", 960, 1080, vec![left_window()]);
+        let mut tree = workspace_tree(layout, vec![inner, right_window()], 21);
+        // A descendant is not a direct child, even when it is a captured YAML child
+        // after normalization. The original direct container must identify the selection.
+        tree["nodes"][0]["nodes"][0]["focus"] = json!([20]);
+        assert!(
+            capture_recorded_tree(tree)
+                .unwrap_err()
+                .contains("child-focus history")
         );
     }
 }
@@ -862,9 +1031,9 @@ fn scratchpad_windows_and_groups_are_refused_even_when_visible_and_tiled() {
 #[test]
 fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
     let mut desktop = workspace_tree(
-        "splith",
+        "tabbed",
         vec![view_with_pid(20, json!(101)), view_with_pid(21, json!(102))],
-        20,
+        21,
     );
     desktop["nodes"][0]["name"] = json!("DP-1");
     desktop["nodes"][0]["nodes"][0]["name"] = json!("named-workspace");
@@ -901,7 +1070,8 @@ fn saved_snapshot_survives_desktop_changes_and_retains_output_ancestry() {
             1
         )
     );
-    assert!(original.contains("focus: window1"));
+    assert!(original.contains("focus: window2"));
+    assert!(original.contains("active: 2"));
     assert!(original.contains("app_id: shared-app"));
 }
 

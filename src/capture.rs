@@ -219,6 +219,8 @@ enum CapturedNode {
     },
     Group {
         layout: GroupLayout,
+        /// One-based direct-child selection, present only for tabbed/stacked groups.
+        active: Option<usize>,
         /// Present only for splits: child extents along the split axis, parallel to `children`.
         split_extents_pixels: Option<Vec<f64>>,
         children: Vec<CapturedNode>,
@@ -313,13 +315,62 @@ fn capture_group(
                 captured_children.push(capture_node(child, layout_depth + 1, layout_node_count)?);
             }
 
+            // Each direct child produces exactly one captured child, even when singleton
+            // split wrappers collapse inside it, so selection keeps the emitted order.
+            let active = if is_split {
+                None
+            } else {
+                Some(capture_active_child(group)?)
+            };
+
             Ok(CapturedNode::Group {
                 layout,
+                active,
                 split_extents_pixels,
                 children: captured_children,
             })
         }
     }
+}
+
+/// Uses direct-child history even when keyboard focus is outside this group.
+fn capture_active_child(group: &Node) -> Result<usize, String> {
+    if group.nodes.len() == 1 {
+        return Ok(1);
+    }
+
+    let unusable_history = || {
+        format!(
+            "container id={} has unusable child-focus history; cannot determine the selected tab/stack child",
+            group.id
+        )
+    };
+    let selected_child_id = group.focus.first().ok_or_else(unusable_history)?;
+    let selected_child_index = group
+        .nodes
+        .iter()
+        .position(|child| child.id == *selected_child_id)
+        .ok_or_else(unusable_history)?;
+
+    let mut seen_child_ids = HashSet::new();
+    for child_id in &group.focus {
+        if !seen_child_ids.insert(*child_id)
+            || !group.nodes.iter().any(|child| child.id == *child_id)
+        {
+            return Err(unusable_history());
+        }
+    }
+
+    for (child_index, child) in group.nodes.iter().enumerate() {
+        if child_index != selected_child_index && child.find_as_ref(|node| node.focused).is_some() {
+            return Err(format!(
+                "container id={} has child-focus history contradicting keyboard focus",
+                group.id
+            ));
+        }
+    }
+
+    Ok(selected_child_index + 1)
 }
 
 /// Captures one tiled `con`: a window, or a structural group of further containers.
@@ -426,6 +477,8 @@ enum DraftNode {
         group: GroupLayout,
         #[serde(skip_serializing_if = "Option::is_none")]
         weight: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active: Option<usize>,
         children: Vec<DraftNode>,
     },
     Window {
@@ -556,6 +609,7 @@ fn build_draft_node(
         }
         CapturedNode::Group {
             layout,
+            active,
             split_extents_pixels,
             children,
         } => {
@@ -579,6 +633,7 @@ fn build_draft_node(
             DraftNode::Group {
                 group: *layout,
                 weight,
+                active: active.filter(|child_index| *child_index > 1),
                 children: draft_children,
             }
         }

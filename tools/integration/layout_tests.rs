@@ -730,7 +730,7 @@ fn mixed_groups_preserve_singletons_and_measure_only_nested_splits() {
 }
 
 #[test]
-fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_children() {
+fn nested_and_independent_non_first_selections_survive_capture_replay() {
     let scenario = standard_scenario("independent-native-groups");
     let window = |id, layout_id: &str| {
         wayland_window(
@@ -759,14 +759,14 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
         rect(600, 0, 400, 1000),
         vec![window(23, "window4"), window(24, "window5")],
     );
-    inner_tabs["focus"] = json!([23, 24]);
+    inner_tabs["focus"] = json!([24, 23]);
     let mut right = group(
         32,
         "stacked",
         rect(600, 0, 400, 1000),
         vec![inner_tabs, window(25, "window6")],
     );
-    right["focus"] = json!([33, 25]);
+    right["focus"] = json!([25, 33]);
     let tree = desktop("splith", vec![left, right], 22);
     let owned_windows = accepted_windows(&[
         (20, "window1"),
@@ -776,12 +776,18 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
         (24, "window5"),
         (25, "window6"),
     ]);
-    verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
+    let measurements = verify_recorded_layout(tree.clone(), &scenario, &owned_windows).unwrap();
+    let draft = crate::scenarios::expected_draft(&scenario, &measurements.shares).unwrap();
+    assert_eq!(draft.matches("active: 2").count(), 4);
+    let (yaml, replay) =
+        crate::capture::executable_capture(&draft, &scenario, &measurements).unwrap();
+    assert_eq!(yaml.matches("active: 2").count(), 4);
+    verify_recorded_layout(tree.clone(), &replay, &owned_windows).unwrap();
     for (id, bad_history) in [
         (30, json!([20, 31])),
         (31, json!([21, 22])),
-        (32, json!([25, 33])),
-        (33, json!([24, 23])),
+        (32, json!([33, 25])),
+        (33, json!([23, 24])),
     ] {
         let mut changed = tree.clone();
         node_mut(&mut changed, id)["focus"] = bad_history;
@@ -790,16 +796,14 @@ fn final_focus_overrides_ancestors_while_unrelated_inactive_groups_keep_first_ch
             "selected child differs",
         );
     }
-    // With final focus in the other branch, even the nested inactive stack resets.
+    // Moving global focus to the other branch leaves both inactive left selections intact.
     let mut scenario = scenario;
     scenario.expected_focus = "window6";
     let mut elsewhere = tree;
     set_focus(&mut elsewhere, 25);
-    node_mut(&mut elsewhere, 30)["focus"] = json!([20, 31]);
-    node_mut(&mut elsewhere, 31)["focus"] = json!([21, 22]);
     node_mut(&mut elsewhere, 32)["focus"] = json!([25, 33]);
     verify_recorded_layout(elsewhere.clone(), &scenario, &owned_windows).unwrap();
-    node_mut(&mut elsewhere, 31)["focus"] = json!([22, 21]);
+    node_mut(&mut elsewhere, 31)["focus"] = json!([21, 22]);
 
     assert_contains(
         &uncertain_message(verify_recorded_layout(elsewhere, &scenario, &owned_windows)),

@@ -117,6 +117,11 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "h(t(window1, v(window2@3, window3@2))@3, window4@2)",
             "window3",
         ),
+        (
+            "outside-focus-capture-reload",
+            "v(t(s(window1), h(window2@3, window3@2))@3, window4@2)",
+            "window4",
+        ),
     ];
     let expected: Vec<(&str, String, &str)> = expected
         .into_iter()
@@ -878,13 +883,14 @@ fn native_group_yaml_uses_parent_dependent_weights_and_no_root_weight() {
 }
 
 #[test]
-fn only_final_standard_cases_prepare_initial_layout_and_reuse_mixed_configuration() {
+fn only_initial_layout_cases_prepare_layout_and_reuse_mixed_configuration() {
     let standard = standard_scenarios(RUN_ID, FOOT, SLEEP);
     let mixed = standard_scenario("mixed-native-nesting");
-    assert_eq!(standard.len(), 19);
+    assert_eq!(standard.len(), 20);
     assert!(
-        standard[..17]
+        standard
             .iter()
+            .filter(|scenario| !matches!(scenario.name, "initially-tabbed" | "initially-stacked"))
             .all(|scenario| scenario.initial_workspace_layout.is_none())
     );
     assert!(
@@ -897,7 +903,7 @@ fn only_final_standard_cases_prepare_initial_layout_and_reuse_mixed_configuratio
             .initial_workspace_layout
             .is_none()
     );
-    for (scenario, expected) in standard[17..].iter().zip([
+    for (scenario, expected) in standard[17..19].iter().zip([
         InitialWorkspaceLayout::Tabbed,
         InitialWorkspaceLayout::Stacked,
     ]) {

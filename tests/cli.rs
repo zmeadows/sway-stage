@@ -882,6 +882,39 @@ fn unsupported_capture_emits_no_partial_yaml_and_preserves_existing_log() {
 }
 
 #[test]
+fn invalid_tab_selection_emits_no_yaml_and_preserves_existing_log() {
+    let fixture = CliFixture::new();
+    fs::create_dir_all(fixture.path.join("state/sway-stage")).unwrap();
+    fixture.file("state/sway-stage/last-run.log", "previous launch\n");
+    let mut tree = menu::capture_tree();
+    let workspace = &mut tree["nodes"][0]["nodes"][0];
+    let mut second = workspace["nodes"][0].clone();
+    second["id"] = json!(21);
+    second["focused"] = json!(false);
+    workspace["nodes"].as_array_mut().unwrap().push(second);
+    workspace["layout"] = json!("tabbed");
+    workspace["focus"] = json!([999]);
+    let socket = fixture.path.join("capture.sock");
+    let server = serve_capture(UnixListener::bind(&socket).unwrap(), tree, None);
+    let output = fixture
+        .command()
+        .env("SWAYSOCK", &socket)
+        .env("XDG_STATE_HOME", fixture.path.join("state"))
+        .arg("capture")
+        .output()
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("child-focus history"));
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap(),
+        "previous launch\n"
+    );
+}
+
+#[test]
 fn capture_failures_notify_without_touching_the_launch_log() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = CliFixture::new();

@@ -902,3 +902,39 @@ fn measured_mixed_replay_is_verified_against_fresh_tree_geometry() {
     assert!(replayed.sizing_notes.is_empty());
     assert_eq!(replayed.shares, measured.shares);
 }
+
+#[test]
+fn outside_focus_replay_preserves_inactive_selection_and_rejects_changed_active_yaml() {
+    use crate::fixtures::{
+        TARGET_WORKSPACE_ID, accepted_windows, find, mixed_native_desktop, node_mut, parse_tree,
+        set_focus,
+    };
+    let scenario = standard_scenario("outside-focus-capture-reload");
+    assert!(scenario.captures_and_reloads());
+    let owned = accepted_windows(&[
+        (20, "window1"),
+        (21, "window2"),
+        (22, "window3"),
+        (23, "window4"),
+    ]);
+    let mut tree = mixed_native_desktop(&scenario);
+    set_focus(&mut tree, 23);
+    node_mut(&mut tree, TARGET_WORKSPACE_ID)["focus"] = serde_json::json!([23, 31]);
+    let tree = parse_tree(tree);
+    let workspace = find(&tree, TARGET_WORKSPACE_ID);
+    let measurements = crate::layout::verify_layout(workspace, &scenario, &owned).unwrap();
+    let draft = expected_draft(&scenario, &measurements.shares).unwrap();
+    assert!(draft.contains("focus: window4"));
+    assert_eq!(draft.matches("active: 2").count(), 1);
+    let (yaml, replay) = executable_capture(&draft, &scenario, &measurements).unwrap();
+    assert!(yaml.contains("active: 2"));
+    crate::layout::verify_layout(workspace, &replay, &owned).unwrap();
+
+    for replacement in ["active: 1", "active: 3", "active: null", "active: '2'"] {
+        let changed = draft.replace("active: 2", replacement);
+        assert!(executable_capture(&changed, &scenario, &measurements).is_err());
+    }
+    let omitted = draft.replace("      active: 2\n", "");
+    assert_ne!(omitted, draft);
+    assert!(executable_capture(&omitted, &scenario, &measurements).is_err());
+}
