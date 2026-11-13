@@ -264,6 +264,8 @@ fn fuzzel(
     command.args(["--dmenu", "--no-exit-on-keyboard-focus-loss"]);
     if input.is_some() {
         command.arg("--no-sort");
+    } else {
+        command.arg("--width=80");
     }
     if return_index {
         command.arg("--index");

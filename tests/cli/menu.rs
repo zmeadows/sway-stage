@@ -11,6 +11,7 @@ output=''
 keep_open=0
 no_sort=0
 return_index=0
+width=0
 placeholder_value=0
 for argument in "$@"; do
     if test "$placeholder_value" = 1; then
@@ -24,6 +25,7 @@ for argument in "$@"; do
         --no-exit-on-keyboard-focus-loss) keep_open=1 ;;
         --no-sort) no_sort=1 ;;
         --index) return_index=1 ;;
+        --width=80) width=80 ;;
         --placeholder) placeholder_value=1 ;;
         *) exit 92 ;;
     esac
@@ -32,6 +34,7 @@ test "$keep_open" = 1 || exit 95
 printf '%s\n' "$output" >> "$MENU_DIRECTORY/outputs"
 case "$prompt" in
   '--prompt-only=Capture layout as: ')
+    test "$width" = 80 || exit 96
     test "$no_sort" = 0 || exit 96
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
@@ -56,6 +59,7 @@ case "$prompt" in
     exit 2
     ;;
   '--prompt=Launch in: ')
+    test "$width" = 0 || exit 96
     test "$return_index" = 1 || exit 96
     test "$no_sort" = 1 || exit 96
     test "$(/bin/cat "$MENU_DIRECTORY/state/sway-stage/last-run.log")" = 'previous launch' || exit 93
@@ -67,6 +71,7 @@ case "$prompt" in
     exit "$DIRECTORY_STATUS"
     ;;
   '--prompt=Load layout: ')
+    test "$width" = 0 || exit 96
     test "$no_sort" = 1 || exit 96
     if test "$REQUIRE_SNAPSHOT" = 1; then
         test -f "$MENU_DIRECTORY/snapshot-ready" || exit 94
@@ -519,7 +524,7 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
                 "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
-                "--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
             )
         );
         if infer_commands {
@@ -716,6 +721,7 @@ fn repeated_name_retries_save_the_original_snapshot() {
             .count(),
         4
     );
+    assert_eq!(arguments.matches("--width=80\n").count(), 4);
     assert_eq!(arguments.matches("--placeholder\n").count(), 3);
     assert!(arguments.contains("--placeholder\nMy Workspace is invalid — use [A-Za-z0-9][A-Za-z0-9_-]* without spaces or an extension\n"));
     assert!(arguments.contains("--placeholder\ndevelopment already exists — enter another name\n"));
@@ -1508,7 +1514,7 @@ fn capture_name_prompt_skips_discovery() {
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
                 "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
-                "--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
             )
         );
     }
