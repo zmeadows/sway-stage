@@ -6,7 +6,6 @@ mod discovery;
 mod launch;
 mod menu;
 mod observation;
-#[cfg(test)]
 mod profile;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -25,6 +24,9 @@ struct Cli {
     /// Read layouts, and save menu captures, in PATH instead of the XDG configuration directory
     #[arg(long, global = true, value_name = "PATH")]
     layouts_dir: Option<PathBuf>,
+    /// Read profiles in PATH instead of the XDG configuration directory
+    #[arg(long, global = true, value_name = "PATH")]
+    profiles_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -46,6 +48,11 @@ enum CliCommand {
         /// Layout name (the YAML filename without its extension)
         name: String,
     },
+    /// Validate named multi-workspace profiles offline
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Print an editable YAML draft of the focused workspace's tiled layout, read-only
     Capture {
         /// Disable automatic launch-command inference; leave commands as null
@@ -60,6 +67,15 @@ enum CliCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfileCommand {
+    /// Validate a profile and every referenced layout without contacting Sway
+    Check {
+        /// Profile name (the YAML filename without its extension)
+        name: String,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -71,6 +87,10 @@ fn main() -> ExitCode {
         Some(CliCommand::Check { name }) => {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
         }
+        Some(CliCommand::Profile {
+            command: ProfileCommand::Check { name },
+        }) => check_profile(&name, cli.profiles_dir, cli.layouts_dir)
+            .map_err(|error| format!("profile check: {error}")),
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
         Some(CliCommand::Capture { no_infer_commands }) => capture(!no_infer_commands),
         Some(CliCommand::Menu { no_infer_commands }) => menu(cli.layouts_dir, !no_infer_commands),
@@ -109,6 +129,15 @@ fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
 fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
     let path = find_layout(name, layouts_dir)?;
     config::read(&path)?;
+    writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
+}
+
+fn check_profile(
+    name: &str,
+    profiles_dir: Option<PathBuf>,
+    layouts_dir: Option<PathBuf>,
+) -> Result<(), String> {
+    profile::read_named(name, profiles_dir, layouts_dir)?;
     writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
 }
 

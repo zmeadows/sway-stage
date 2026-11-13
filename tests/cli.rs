@@ -68,6 +68,8 @@ fn help_version_and_usage_do_not_need_configuration() {
         vec![],
         vec!["--help"],
         vec!["check", "--help"],
+        vec!["profile", "--help"],
+        vec!["profile", "check", "--help"],
         vec!["load", "--help"],
         vec!["capture", "--help"],
         vec!["menu", "--help"],
@@ -85,6 +87,11 @@ fn help_version_and_usage_do_not_need_configuration() {
     }
     for arguments in [
         vec!["check"],
+        vec!["profile"],
+        vec!["profile", "check"],
+        vec!["profile", "load", "work"],
+        vec!["profile", "check", "work", "--cwd", "."],
+        vec!["--profiles-dir", "", "profile", "check", "work"],
         vec!["load"],
         vec!["menu", "extra"],
         vec!["capture", "extra"],
@@ -1197,3 +1204,6 @@ fn load_directory_override_is_validated_before_ipc_and_belongs_only_to_load() {
     let output = fixture.run(&["--layouts-dir", "layouts", "load", "good"], 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("SWAYSOCK is unset"));
 }
+
+#[path = "cli/profile.rs"]
+mod profile;

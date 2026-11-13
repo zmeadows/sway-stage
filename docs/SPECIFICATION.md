@@ -10,11 +10,12 @@ This is the authoritative contract for implemented behavior. Start with the
 | --- | --- |
 | `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
+| `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
 | `menu [--no-infer-commands]` | Load a layout or save a named capture through Fuzzel. |
 
-`check` and `list` never contact Sway, launch applications, write logs, or notify.
+`check`, `profile check`, and `list` never contact Sway, launch applications, write logs, or notify.
 `check` does not probe executables or promise that a command creates a matching window.
 Help, version, and invocation without a subcommand need no configuration or optional tools;
 no subcommand prints help and does nothing else.
@@ -158,13 +159,22 @@ numbers. Explicit nulls never trigger optional defaults.
 
 ## Named profiles, version 1
 
+`sway-stage profile check NAME` validates a profile and all its referenced layouts offline.
+It prints `NAME: valid` only after complete validation succeeds. Failures go to stderr with
+exit status 1. It never connects to Sway, launches applications, changes focus, sends
+notifications, or modifies the launch log, including on validation failure.
+
 A profile is a named YAML file containing an ordered sequence of workspace-to-layout
 mappings. Profiles use a separate directory, `$XDG_CONFIG_HOME/sway-stage/profiles`, falling
 back to `$HOME/.config/sway-stage/profiles` when XDG_CONFIG_HOME is unset or empty.
-The same absolute default-base requirements and immediate regular `.yaml`/`.yml` file
-rules as layout discovery apply. Profile names use `[A-Za-z0-9][A-Za-z0-9_-]*`, without an
+Global `--profiles-dir PATH` overrides this directory independently of `--layouts-dir PATH`;
+relative overrides resolve from the invoking directory. Existing commands ignore the profiles
+directory. The same absolute default-base requirements and immediate regular `.yaml`/`.yml`
+file rules as layout discovery apply. Profile names use `[A-Za-z0-9][A-Za-z0-9_-]*`, without an
 extension. Duplicate stems are ambiguous; unrelated invalid or ambiguous filenames do not
-prevent checking a valid name. Discovery never creates directories.
+prevent checking a valid name. A missing profile is an error, including when the default
+directory is absent; a missing explicit directory is a directory-read error. Discovery never
+creates directories.
 
 ```yaml
 version: 1
