@@ -18,9 +18,9 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   installation on the chosen baseline, including understandable failures for missing
   optional tools. Record the Sway version actually verified without implying broader
   compatibility.
-- **Final acceptance.** Complete the outstanding menu, keybinding launch-context, and loader
-  interference checks and additional manual profile variants in the developer guide. Real
-  multi-monitor verification remains incomplete; output-migration safeguards are implemented
+- **Final acceptance.** Complete the optional unified-menu acceptance procedure, keybinding
+  launch-context and loader interference checks, and additional manual profile variants
+  in the developer guide. Real multi-monitor verification remains incomplete; output-migration safeguards are implemented
   and covered offline. Hardware checks are additional acceptance evidence, not a prerequisite
   for continued development.
 - **Publish v0.1.0.** After acceptance, tag and publish the validated archives, checksums,

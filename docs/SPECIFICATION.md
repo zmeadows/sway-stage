@@ -14,7 +14,7 @@ This is the authoritative contract for implemented behavior. Start with the
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
-| `menu [--no-infer-commands]` | Load a layout or save a named capture through Fuzzel. |
+| `menu [--no-infer-commands]` | Choose a layout, profile, or individual-workspace capture through one Fuzzel menu. |
 
 `check`, `profile check`, and `list` never contact Sway, launch applications, write logs, or notify.
 `check` does not probe executables or promise that a command creates a matching window.
@@ -36,8 +36,9 @@ warnings or notifications; unambiguous files with invalid YAML retain their `[in
 `check NAME` and `load NAME` report an ambiguity error identifying the conflicting filenames
 when that name is requested, before loader IPC or application launches. Unrelated filename
 problems do not affect their resolution. Directory read, enumeration, and inspection failures
-remain fatal. Reads never create directories. A missing default directory lists as empty;
-a missing explicit directory or requested layout is an error.
+fail the affected discovery; the menu can still offer independent actions. Reads never create
+directories. A missing default directory lists as empty; a missing explicit directory or
+requested layout is an error.
 
 Success and menu cancellation exit 0, operational or validation errors exit 1, and invalid
 CLI usage exits 2. Data goes to stdout; errors, warnings, and diagnostics go to stderr.
@@ -219,7 +220,7 @@ Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at
 1 MiB, no unknown fields, duplicate keys, aliases, merge keys, or custom tags, and no scalar
 coercion. Parser resource limits also apply. Errors identify the profile file and entry/field
 path, with line/column where available; invalid layout errors retain the referenced file's
-diagnostics. Profile capture and menu integration are not implemented.
+diagnostics. The unified menu also offers profile loading. Profile capture is not implemented.
 
 Run `sway-stage profile check work`, then `sway-stage profile load work`. Loading validates
 and retains every referenced configuration before contacting Sway; files are not reread
@@ -509,43 +510,48 @@ through the menu. Fill all remaining null placeholders and run `check` before lo
 
 ## Fuzzel menu
 
-`menu` requires Fuzzel 1.11+ on `PATH`, using default dmenu text output. One read-only
-snapshot is saved **before the first prompt**. Choices depend on the actual focused
-workspace in that snapshot, never its name or number:
+`menu` requires Fuzzel 1.11+ on `PATH`. One read-only workspace snapshot is saved
+**before the first prompt**. A single flat selector, `Sway Stage: `, offers:
 
-- **Empty:** both tiled and floating child lists must be empty, exactly as for loading.
-  Even an empty structural container counts as occupancy. Validate discovered files using
-  the same syntax, semantics, and filesystem checks as `check`. Show names in lexical
-  order by actual name, with the prompt `Load layout: `. Valid names appear normally;
-  invalid or incomplete layouts have an `[invalid]` prefix. Their presence alone does
-  not notify. Selecting one reports a concise error directing the user to
-  `sway-stage check NAME`, without loading or replacing the launch log. Validation does
-  not guarantee application launch success. If no layouts exist, report the missing-layout
-  error without opening Fuzzel. If all layouts are invalid, report “No valid layouts found”
-  with guidance to run `check`, without opening Fuzzel or replacing the launch log.
-- **Populated and capturable:** immediately ask for a draft name with the prompt
-  `Capture layout as: `, using Fuzzel's prompt-only mode, after validating the saved
-  arrangement through capture rendering with command inference disabled.
-  Do not discover layouts; capture remains available with no layouts or invalid discovery
-  entries. Inference does not change eligibility when commands cannot be inferred.
-- **Populated and noncapturable:** report the capture validation reason without opening
-  Fuzzel, for example guidance to tile floating windows, exit fullscreen, or focus a window
-  instead of its parent. Load is unavailable on any occupied workspace.
+| Initial workspace state | Actions |
+| --- | --- |
+| Empty (no tiled or floating children, including empty containers) | Individual layouts and profiles |
+| Populated and capturable | Capture and profiles |
+| Populated and noncapturable | Profiles |
+| Snapshot unavailable or inconsistent | Profiles |
 
-Initial snapshot failures report an error without opening Fuzzel. No unavailable-action
-case writes the launch log. Layout choices are fixed while the prompt is open; eligibility
-is a convenience and does not replace operation-specific validation after selection.
+Capture appears first as `Capture current workspace…`. Layouts follow as `Layout: NAME`,
+then profiles as `Profile: NAME`, each category in lexical name order. Equal layout and
+profile names remain distinct. Only offered row indices are accepted; arbitrary typed
+selection text is an error. There are no separate menu modes or navigation levels.
 
-Only exact offered layout labels are accepted; arbitrary typed selection text is an error.
+Layouts use the same validation as `check`; profiles use `profile check`, including all
+referenced layouts. Invalid configurations carry an `[invalid]` prefix. Selecting one gives
+`check NAME` or `profile check NAME` guidance without construction or replacing the launch
+log. Unrelated invalid configurations do not block valid actions. Validation does not
+guarantee application launch success. Profile discovery uses the existing XDG and
+`--profiles-dir` rules, immediate regular `.yaml`/`.yml` files, and the configuration-name
+grammar. Symlinks, invalid filenames, and ambiguous duplicate stems are omitted silently.
+Discovery never creates directories. Missing default directories are empty; unusable explicit
+directories produce diagnostics. Directory discovery failures disable that category and
+report their cause on stderr while independently usable actions remain available.
+
+Capture eligibility validates only the saved arrangement, with command inference disabled.
+It does not require layout discovery. Unsupported capture states and failed snapshots disable
+standalone actions without blocking profiles. If no usable actions remain, report the relevant
+snapshot, capture, discovery, or configuration error without opening an empty selector or
+replacing the launch log. Choices are fixed while the selector is open; eligibility never
+replaces operation-specific validation after selection.
+
 All prompts use the original output when known and disable automatic exit on keyboard-focus loss,
 without changing Fuzzel's configured focus mode. Interactive input has no deadline. Escape
 at any offered prompt cancels successfully without saving/loading or replacing the launch
 log. Fuzzel cancellation requires exit status 2 and empty output; other failures, unexpected
 output, control characters, or anything other than one UTF-8 newline-terminated line are errors.
 
-- **Load:** after Fuzzel exits, rediscover and validate the selected file, then require the
-  original workspace identity to be focused and empty. A recreated workspace with the same
-  name/number is refused. Focus is never restored automatically. Intermediate away-and-back
+- **Layout:** after Fuzzel exits, rediscover and validate the selected file, then require the
+  original workspace identity to be focused and empty. Selected-file validation errors preserve
+  the previous launch log. A recreated workspace with the same name/number is refused. Focus is never restored automatically. Intermediate away-and-back
   changes while the menu is open need not be detected; construction then uses the normal
   continuous focus/output safeguards.
   With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
@@ -568,8 +574,19 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   directory never changes.
   Both prompts retain the original output and workspace baseline; directory selection
   never captures a replacement baseline or bypasses fresh emptiness, focus, output,
-  and ownership checks. With `cwd_select` omitted or false, Load uses one prompt.
-- **Capture:** render only the pre-menu snapshot, then ask for a draft name.
+  and ownership checks. With `cwd_select` omitted or false, layout loading uses only the
+  primary selector.
+- **Profile:** re-read and validate the selected profile and every referenced layout before
+  construction. Invalid selections, including files changed while the selector was open,
+  preserve the previous launch log. The ordinary profile-loading path then owns one
+  diagnostics session and performs its fresh whole-profile occupancy preflight and guarded
+  sequential construction. The initial menu snapshot is never a profile loading baseline:
+  the focused workspace may be populated and unrelated to the profile targets. Numeric and
+  exact named targets retain the normal profile safety checks. Success is silent; failure
+  stops the whole profile, preserves earlier and partial layouts, and reports progress with
+  at most one fatal notification.
+- **Capture:** render only the pre-menu snapshot, then ask for a draft name with
+  `Capture layout as: ` in prompt-only mode.
   Invalid names and existing-name conflicts reopen the same prompt with an error placeholder
   identifying the rejected input (abbreviated when long). Type another name or Escape to cancel;
   input is never prepopulated. Retries reuse the original rendered draft without further Sway
@@ -581,7 +598,8 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
 
 After a successful save, the bounded, best-effort notification says only `Saved draft 'NAME'.`.
 Notification failure does not fail the save. Cancellation and failed captures do not report
-success. `menu --no-infer-commands` disables inference for saved captures.
+success. `menu --no-infer-commands` disables inference only for individual-workspace
+capture; it does not affect discovery, presentation, layout loading, or profile loading.
 
 Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at
 most 250 ASCII characters, without an extension; input is not trimmed or normalized.
@@ -597,7 +615,7 @@ for inspection; it is outside discovery. Do not automatically remove uncertain f
 A successful save attempts a path notification; notification failure does not fail the save.
 
 Drafts appear immediately in `list`; the menu marks incomplete drafts `[invalid]` when
-at least one valid layout is available. They are saved without executable-layout validation; `check` and `load` reject remaining placeholders
+at least one usable action is available. They are saved without executable-layout validation; `check` and `load` reject remaining placeholders
 before loader IPC or application launches. Edit them in place and check them. There is no automatic repair, execution, or deletion.
 
 ## Diagnostics and troubleshooting
@@ -607,12 +625,12 @@ notifications through `notify-send`. Sizing warnings also notify. Missing notifi
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
 notification refers to `last-run.log` only when logging remains available for that attempt.
-Pre-load menu failures identify missing layouts, unavailable capture, Fuzzel problems,
+Pre-load menu failures identify unavailable layouts/profiles, invalid selections, capture, or Fuzzel problems,
 save failures, or working-directory selection problems without exposing paths or technical
 error chains. Successful loads do not notify; saved menu captures retain their save
 confirmation. Cancellation does not notify.
 
-Each load attempt, including a menu Load selection or an entire profile load, replaces the
+Each load attempt, including a menu layout/profile load or an entire standalone profile load, replaces the
 private launch log at
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to
 `$HOME/.local/state/sway-stage/last-run.log`; state bases must be absolute. New log files are
@@ -636,7 +654,7 @@ include only nonzero exit codes or terminating signals. Process exit never short
 | No matching window / wrong workspace | Check executable, exact app ID/class, Sway assignment rules, and single-instance behavior. |
 | Focus/output refusal | Keep the target focused on its original output until completion; inspect partial results before retrying. |
 | Draft rejected | Replace null commands/selectors and review inferred arguments, then run `check NAME`. |
-| Menu fails | Install Fuzzel 1.11+, use dmenu text output, and check Fuzzel's stderr/configuration. |
+| Menu fails | Install Fuzzel 1.11+ and check Fuzzel's stderr/configuration; selection lists use index output. |
 | Proportions differ | Check gaps and application minimum sizes; substantial deviations are warnings. |
 
 No minimum supported Sway version or Linux architecture/libc baseline has been established.

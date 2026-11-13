@@ -1,8 +1,7 @@
 //! Optional synchronous Fuzzel interface and private, non-overwriting saves of captured
 //! drafts into the layouts directory.
 
-use crate::{capture, config, diagnostics, discovery};
-use std::collections::BTreeMap;
+use crate::{capture, config, diagnostics, discovery, profile};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -24,6 +23,9 @@ pub struct Error {
 pub enum FailureKind {
     Snapshot,
     LayoutDiscovery,
+    ProfileDiscovery,
+    NoActions,
+    InvalidProfile(String),
     NoLayouts,
     NoValidLayouts,
     InvalidLayout(String),
@@ -43,73 +45,160 @@ impl Error {
     }
 }
 
-pub fn select_layout(
+#[derive(Debug)]
+pub enum MenuAction {
+    Capture,
+    Layout(String),
+    Profile(String),
+}
+
+/// Eligibility uses only the saved tree. Discovery failures disable one category;
+/// a valid independent action keeps the selector usable.
+pub fn select_action(
+    snapshot: Result<&capture::Snapshot, &String>,
     layouts_dir: Option<PathBuf>,
-    output_name: Option<&str>,
-) -> Result<Option<String>, Error> {
-    let directory = discovery::LayoutDirectory::resolve(layouts_dir)
-        .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
-    let discovery = directory
-        .discover()
-        .map_err(|error| Error::new(FailureKind::LayoutDiscovery, error))?;
-    if discovery.layouts.is_empty() {
-        return Err(Error::new(
-            FailureKind::NoLayouts,
-            format!(
-                "no layouts available in {}; add a layout before loading",
-                directory.path.display()
-            ),
-        ));
+    profiles_dir: Option<PathBuf>,
+) -> Result<Option<MenuAction>, Error> {
+    let mut choices = Vec::new();
+    let mut unavailable = Vec::new();
+    match snapshot {
+        Ok(snapshot) if snapshot.workspace_is_empty() => {
+            let layouts = discovery::LayoutDirectory::resolve(layouts_dir.clone())
+                .and_then(|directory| directory.discover());
+            match layouts {
+                Ok(discovery) => {
+                    for (name, path) in discovery.layouts {
+                        choices.push((MenuAction::Layout(name), config::read(&path).is_ok()));
+                    }
+                    if choices.is_empty() {
+                        unavailable.push(Error::new(
+                            FailureKind::NoLayouts,
+                            "no layouts available; add a layout or profile before loading",
+                        ));
+                    }
+                }
+                Err(error) => unavailable.push(Error::new(FailureKind::LayoutDiscovery, error)),
+            }
+        }
+        Ok(snapshot) => match snapshot.render(false) {
+            Ok(_) => choices.push((MenuAction::Capture, true)),
+            Err(error) => unavailable.push(Error::new(
+                FailureKind::Capture,
+                format!("capture unavailable: {error}"),
+            )),
+        },
+        Err(error) => unavailable.push(Error::new(
+            FailureKind::Snapshot,
+            format!("pre-menu workspace snapshot: {error}"),
+        )),
     }
 
-    // Build prompt text in discovery order, and keep exact labels paired with identities.
-    let mut prompt_input = String::new();
-    let mut choices = BTreeMap::new();
-    for (name, path) in discovery.layouts {
-        let is_valid = config::read(&path).is_ok();
-        let label = if is_valid {
-            name.clone()
+    match profile::discover_names(profiles_dir.clone()) {
+        Ok(names) => {
+            for name in names {
+                let is_valid =
+                    profile::read_named(&name, profiles_dir.clone(), layouts_dir.clone()).is_ok();
+                choices.push((MenuAction::Profile(name), is_valid));
+            }
+        }
+        Err(error) => unavailable.push(Error::new(FailureKind::ProfileDiscovery, error)),
+    }
+
+    if !choices.iter().any(|(_, is_valid)| *is_valid) {
+        let mut error = if choices.is_empty() && !unavailable.is_empty() {
+            unavailable.remove(0)
+        } else if choices
+            .iter()
+            .all(|(action, _)| matches!(action, MenuAction::Layout(_)))
+        {
+            Error::new(
+                FailureKind::NoValidLayouts,
+                "No valid layouts found. Run sway-stage check NAME to inspect a layout.",
+            )
         } else {
-            format!("[invalid] {name}")
+            Error::new(
+                FailureKind::NoActions,
+                "No usable actions found. Run sway-stage check NAME or sway-stage profile check NAME to inspect configurations.",
+            )
         };
-        prompt_input.push_str(&label);
-        prompt_input.push('\n');
-        choices.insert(label, (name, is_valid));
+        for other in unavailable {
+            error.detail.push_str(&format!("; {}", other.detail));
+        }
+        return Err(error);
     }
 
-    if !choices.values().any(|(_, is_valid)| *is_valid) {
-        return Err(Error::new(
-            FailureKind::NoValidLayouts,
-            "No valid layouts found. Run sway-stage check NAME to inspect a layout.",
-        ));
+    // Directory failures remain visible even when another category is usable.
+    for error in unavailable {
+        if matches!(
+            error.kind,
+            FailureKind::LayoutDiscovery | FailureKind::ProfileDiscovery
+        ) {
+            let _ = writeln!(io::stderr().lock(), "sway-stage: menu: {}", error.detail);
+        }
     }
 
+    let mut input = String::new();
+    for (action, is_valid) in &choices {
+        if !is_valid {
+            input.push_str("[invalid] ");
+        }
+        match action {
+            MenuAction::Capture => input.push_str("Capture current workspace…"),
+            MenuAction::Layout(name) => input.push_str(&format!("Layout: {name}")),
+            MenuAction::Profile(name) => input.push_str(&format!("Profile: {name}")),
+        }
+        input.push('\n');
+    }
+
+    let output_name = snapshot.ok().and_then(capture::Snapshot::output_name);
     let Some(selection) = fuzzel(
-        "--prompt=Load layout: ",
-        Some(&prompt_input),
+        "--prompt=Sway Stage: ",
+        Some(&input),
         output_name,
         None,
-        false,
+        true,
     )?
     else {
         return Ok(None);
     };
-
-    let (name, is_valid) = choices.remove(&selection).ok_or_else(|| {
-        Error::new(
-            FailureKind::FuzzelResponse,
-            "selection: Fuzzel returned an option that was not offered; use dmenu text output",
-        )
-    })?;
+    let selected_index = selection.parse::<usize>().ok();
+    let (action, is_valid) = selected_index
+        .and_then(|index| choices.into_iter().nth(index))
+        .ok_or_else(|| {
+            Error::new(
+                FailureKind::FuzzelResponse,
+                "selection: Fuzzel returned an index that was not offered",
+            )
+        })?;
 
     if !is_valid {
-        return Err(Error::new(
-            FailureKind::InvalidLayout(name.clone()),
-            format!("Layout '{name}' is invalid. Run sway-stage check {name} for details."),
-        ));
+        return Err(match action {
+            MenuAction::Layout(name) => invalid_layout(&name, None),
+            MenuAction::Profile(name) => invalid_profile(&name, None),
+            MenuAction::Capture => {
+                unreachable!("capture eligibility is validated before selection")
+            }
+        });
     }
+    Ok(Some(action))
+}
 
-    Ok(Some(name))
+pub fn invalid_layout(name: &str, cause: Option<String>) -> Error {
+    let mut detail =
+        format!("Layout '{name}' is invalid. Run sway-stage check {name} for details.");
+    if let Some(cause) = cause {
+        detail.push_str(&format!(" {cause}"));
+    }
+    Error::new(FailureKind::InvalidLayout(name.to_owned()), detail)
+}
+
+pub fn invalid_profile(name: &str, cause: Option<String>) -> Error {
+    let mut detail =
+        format!("Profile '{name}' is invalid. Run sway-stage profile check {name} for details.");
+    if let Some(cause) = cause {
+        detail.push_str(&format!(" {cause}"));
+    }
+    Error::new(FailureKind::InvalidProfile(name.to_owned()), detail)
 }
 
 #[derive(Debug)]

@@ -3,7 +3,7 @@ use crate::observation::{self, Observer, WorkspaceSnapshot};
 use crate::{config, discovery, launch};
 use serde::Deserialize;
 use serde_saphyr::Spanned;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -568,13 +568,25 @@ fn event_matches_workspace(node: &swayipc::Node, workspace: &WorkspaceIdentity) 
         && node.name.as_deref() == Some(workspace.name.as_str())
 }
 
-fn find_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<PathBuf, String> {
-    if !discovery::valid_name(name) {
-        return Err(format!(
-            "invalid profile name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
-        ));
+/// Immediate, unambiguous profile names; validation is left to read_named.
+pub fn discover_names(profiles_dir: Option<PathBuf>) -> Result<Vec<String>, String> {
+    let (directory, is_explicit) = profile_directory(profiles_dir)?;
+    let mut counts = BTreeMap::new();
+    for path in discovery::yaml_paths(&directory, !is_explicit)? {
+        if let Some(name) = path.file_stem().and_then(|stem| stem.to_str())
+            && discovery::valid_name(name)
+        {
+            *counts.entry(name.to_owned()).or_insert(0) += 1;
+        }
     }
 
+    Ok(counts
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1).then_some(name))
+        .collect())
+}
+
+fn profile_directory(profiles_dir: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
     let is_explicit = profiles_dir.is_some();
     let directory = match profiles_dir {
         Some(path) => {
@@ -585,6 +597,18 @@ fn find_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<PathBuf, St
         }
         None => discovery::config_home()?.join("sway-stage/profiles"),
     };
+
+    Ok((directory, is_explicit))
+}
+
+fn find_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<PathBuf, String> {
+    if !discovery::valid_name(name) {
+        return Err(format!(
+            "invalid profile name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
+        ));
+    }
+
+    let (directory, is_explicit) = profile_directory(profiles_dir)?;
 
     let mut matching_paths = Vec::new();
     for path in discovery::yaml_paths(&directory, !is_explicit)? {

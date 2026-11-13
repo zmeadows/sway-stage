@@ -190,11 +190,34 @@ fn fixture() -> CliFixture {
 }
 
 fn run(fixture: &CliFixture, steps: Vec<Step>, remove_layouts: bool) -> Output {
+    run_transcript(fixture, steps, remove_layouts, None)
+}
+
+fn run_transcript(
+    fixture: &CliFixture,
+    steps: Vec<Step>,
+    remove_layouts: bool,
+    menu_snapshot: Option<(Value, &str)>,
+) -> Output {
+    let (menu_tree, menu_selection) = match menu_snapshot {
+        Some((tree, selection)) => (Some(tree), Some(selection)),
+        None => (None, None),
+    };
     let socket_path = fixture.path.join("ipc.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     let (done, finished) = mpsc::channel();
     let layouts_path = fixture.path.clone();
     let server = thread::spawn(move || {
+        if let Some(tree) = menu_tree {
+            let (mut query, _) = listener.accept().unwrap();
+            query
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert_eq!(read_ipc_message(&mut query).0, 4);
+            fs::write(layouts_path.join("snapshot-ready"), "").unwrap();
+            write_ipc_message(&mut query, 4, &tree);
+            assert_eq!(query.read(&mut [0]).unwrap(), 0);
+        }
         listener.set_nonblocking(true).unwrap();
         let mut subscriptions: Vec<UnixStream> = vec![];
         for (index, step) in steps.into_iter().enumerate() {
@@ -302,21 +325,29 @@ fn run(fixture: &CliFixture, steps: Vec<Step>, remove_layouts: bool) -> Output {
             std::io::ErrorKind::WouldBlock
         );
     });
-    let output = fixture
-        .command()
+    let mut process = match menu_selection {
+        Some(selection) => super::menu::menu_command(fixture, selection, ""),
+        None => fixture.command(),
+    };
+    process
         .env("SWAYSOCK", socket_path)
         .env("PATH", &fixture.path)
         .args([
             "--profiles-dir",
-            ".",
+            if menu_selection.is_some() {
+                "profiles"
+            } else {
+                "."
+            },
             "--layouts-dir",
             ".",
-            "profile",
-            "load",
-            "work",
-        ])
-        .output()
-        .unwrap();
+        ]);
+    if menu_selection.is_some() {
+        process.args(["menu", "--no-infer-commands"]);
+    } else {
+        process.args(["profile", "load", "work"]);
+    }
+    let output = process.output().unwrap();
     done.send(()).unwrap();
     server.join().unwrap();
     output
@@ -1160,4 +1191,73 @@ fn named_selection_checks_identity_of_the_empty_previous_workspace_event() {
         assert_failure(&fixture, &output, "unexpected workspace change", 0);
         assert!(!fixture.path.join("launches").exists());
     }
+}
+
+#[test]
+fn unified_menu_profiles_use_fresh_coordinator_state_and_one_diagnostics_session() {
+    for initial_snapshot in [tree(), json!({})] {
+        let fixture = fixture();
+        super::menu::prepare_menu_fixture(&fixture);
+        fs::create_dir(fixture.path.join("profiles")).unwrap();
+        fixture.file(
+            "profiles/work.yaml",
+            "version: 1\nworkspaces: [{workspace: 3, layout: first}]\n",
+        );
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+        let (construction, _) = construction_steps(&selected, 3, 20);
+        steps.extend(construction);
+        let selection = if initial_snapshot == json!({}) {
+            "0\n"
+        } else {
+            "1\n"
+        };
+        let output = run_transcript(&fixture, steps, false, Some((initial_snapshot, selection)));
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        assert!(!fixture.path.join("notification").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\n"
+        );
+        let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+        assert!(log.contains("completed 1 workspaces [(3, 103)]"), "{log}");
+        assert_eq!(
+            log.matches(r#"[profile \"work\": validation] begin"#)
+                .count(),
+            1,
+            "{log}"
+        );
+    }
+}
+
+#[test]
+fn unified_menu_profile_preflights_all_targets_before_any_selection() {
+    let fixture = fixture();
+    super::menu::prepare_menu_fixture(&fixture);
+    fs::create_dir(fixture.path.join("profiles")).unwrap();
+    fixture.file("profiles/work.yaml", "version: 1\nworkspaces: [{workspace: 3, layout: first}, {workspace: 90, layout: second}]\n");
+    let initial = tree();
+    let output = run_transcript(
+        &fixture,
+        vec![snapshot(&initial)],
+        false,
+        Some((initial, "1\n")),
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must be completely empty"),
+        "{output:?}"
+    );
+    assert!(!fixture.path.join("launches").exists());
+    let notifications = fs::read_to_string(fixture.path.join("notification")).unwrap();
+    assert_eq!(notifications.matches("--app-name=sway-stage").count(), 1);
+    assert!(notifications.contains("sway-stage profile load failed"));
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(log.contains("completed 0 workspaces"), "{log}");
 }

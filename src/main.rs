@@ -18,7 +18,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses Fuzzel to load layouts or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses one Fuzzel selector to load layouts or profiles, or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
 )]
 struct Cli {
     /// Read layouts, and save menu captures, in PATH instead of the XDG configuration directory
@@ -59,7 +59,7 @@ enum CliCommand {
         #[arg(long)]
         no_infer_commands: bool,
     },
-    /// Use Fuzzel to load a layout or save a capture as a named layout draft
+    /// Use one Fuzzel menu to load layouts or profiles, or capture the current workspace
     Menu {
         /// Disable automatic launch-command inference for captures; leave commands as null
         #[arg(long)]
@@ -101,7 +101,9 @@ fn main() -> ExitCode {
         }) => load_profile(&name, cli.profiles_dir, cli.layouts_dir),
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
         Some(CliCommand::Capture { no_infer_commands }) => capture(!no_infer_commands),
-        Some(CliCommand::Menu { no_infer_commands }) => menu(cli.layouts_dir, !no_infer_commands),
+        Some(CliCommand::Menu { no_infer_commands }) => {
+            menu(cli.layouts_dir, cli.profiles_dir, !no_infer_commands)
+        }
     };
 
     match command_result {
@@ -268,40 +270,43 @@ fn print_draft(infer_commands: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String> {
-    let snapshot = capture::snapshot().map_err(|error| {
-        report_menu_failure(menu::Error::new(
-            menu::FailureKind::Snapshot,
-            format!("pre-menu workspace snapshot: {error}"),
-        ))
-    })?;
-
-    if !snapshot.workspace_is_empty() {
-        // Validate the saved arrangement without reading process arguments.
-        snapshot.render(false).map_err(|error| {
-            report_menu_failure(menu::Error::new(
-                menu::FailureKind::Capture,
-                format!("capture unavailable: {error}"),
-            ))
-        })?;
-
-        return menu::capture_draft(&snapshot, layouts_dir, infer_commands)
-            .map_err(report_menu_failure);
-    }
-
-    let output_name = snapshot.output_name();
-    let Some(name) =
-        menu::select_layout(layouts_dir.clone(), output_name).map_err(report_menu_failure)?
+fn menu(
+    layouts_dir: Option<PathBuf>,
+    profiles_dir: Option<PathBuf>,
+    infer_commands: bool,
+) -> Result<(), String> {
+    let snapshot = capture::snapshot();
+    let Some(action) =
+        menu::select_action(snapshot.as_ref(), layouts_dir.clone(), profiles_dir.clone())
+            .map_err(report_menu_failure)?
     else {
         return Ok(());
     };
 
-    // Keep validation failures under launch diagnostics, but leave the old log
-    // intact while a directory prompt can still be canceled.
-    let layout_result = read_named_layout(&name, layouts_dir);
-    let selected_directory = if let Ok((_, config)) = &layout_result
-        && config.cwd_select
-    {
+    let name = match action {
+        menu::MenuAction::Profile(name) => {
+            // Invalid selections are menu errors and preserve the previous launch log.
+            // load_profile then owns the entire attempt, including its fresh IPC preflight.
+            profile::read_named(&name, profiles_dir.clone(), layouts_dir.clone())
+                .map_err(|error| report_menu_failure(menu::invalid_profile(&name, Some(error))))?;
+            return load_profile(&name, profiles_dir, layouts_dir);
+        }
+        menu::MenuAction::Capture => {
+            let snapshot = snapshot
+                .as_ref()
+                .expect("capture requires a valid saved snapshot");
+            return menu::capture_draft(snapshot, layouts_dir, infer_commands)
+                .map_err(report_menu_failure);
+        }
+        menu::MenuAction::Layout(name) => name,
+    };
+
+    let snapshot = snapshot.expect("layout selection requires an empty saved workspace");
+    let output_name = snapshot.output_name();
+    let (path, config) = read_named_layout(&name, layouts_dir)
+        .map_err(|error| report_menu_failure(menu::invalid_layout(&name, Some(error))))?;
+
+    let selected_directory = if config.cwd_select {
         let root = config
             .cwd
             .as_deref()
@@ -327,7 +332,7 @@ fn menu(layouts_dir: Option<PathBuf>, infer_commands: bool) -> Result<(), String
     diagnostics.stage(format!("menu load {name:?}: validation"));
     load_named_layout(
         &name,
-        layout_result,
+        Ok((path, config)),
         selected_directory,
         Some(snapshot.workspace_id()),
         &mut diagnostics,

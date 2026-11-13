@@ -45,7 +45,7 @@ impl Diagnostics {
     }
 
     /// Replaces the last-run log. Call only for an invocation that loads a selected layout:
-    /// `load`, `profile load`, or `menu` once a layout is selected.
+    /// `load`, `profile load`, or `menu` after selection and cancelable prompts.
     pub fn start(operation: &'static str) -> Self {
         let mut diagnostics = Self {
             operation,
@@ -222,6 +222,17 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::Snapshot => return failure_body("menu", &error.detail, "", false),
         FailureKind::LayoutDiscovery => {
             "Cannot list saved layouts. Check the layouts directory and filenames."
+        }
+        FailureKind::ProfileDiscovery => {
+            "Cannot list saved profiles. Check the profiles directory and filenames."
+        }
+        FailureKind::NoActions => {
+            "No usable actions found. Run sway-stage check NAME or sway-stage profile check NAME to inspect configurations."
+        }
+        FailureKind::InvalidProfile(name) => {
+            return format!(
+                "Profile '{name}' is invalid. Run sway-stage profile check {name} for details."
+            );
         }
         FailureKind::NoLayouts => {
             "No saved layouts found. Add a YAML file to your layouts directory."
@@ -598,6 +609,8 @@ mod tests {
         for kind in [
             FailureKind::Snapshot,
             FailureKind::LayoutDiscovery,
+            FailureKind::ProfileDiscovery,
+            FailureKind::NoActions,
             FailureKind::NoLayouts,
             FailureKind::NoValidLayouts,
             FailureKind::Capture,

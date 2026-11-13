@@ -504,22 +504,32 @@ For optional real AppImage and Flatpak command inference, use the package harnes
 above instead of repeating manual capture acceptance. General edited-draft replay remains
 covered by the existing round-trip scenarios and can also be checked manually if desired.
 
-For menu acceptance, use a keybinding or delayed invocation with a temporary layouts
-directory. On an empty disposable workspace, confirm sorted layout names without prefixes
-appear under `Load layout: `; with no layouts, expect an error and no prompt. On a tiled,
-capturable workspace, confirm `Capture layout as: ` opens directly as the only prompt,
-including with no layouts or duplicate discovery names. With floating or fullscreen windows,
-empty structural containers, or parent focus, expect capture guidance and no prompt. Check normal Load sizing/focus, occupied-target refusal, Escape at each prompt,
-invalid/colliding names, saved draft discovery, placeholder rejection, and edited-draft
-validation. Review automatically recovered arguments; repeat captures with `--no-infer-commands`.
-Captures
-must preserve pre-menu hierarchy, weights, selectors, and focus even when pointer/window
-focus or workspace changes during the name prompt. The prompt should use the original
-output. Capture/cancellation must leave the previous launch log untouched; Load replaces it.
-A valid Load selection after switching to another workspace (or recreating the same name)
-must refuse without launching, mutating, or restoring focus. An initial snapshot failure
-must report an error without opening Fuzzel or replacing the launch log. On an eligible empty
-workspace, selecting an invalid file must still receive ordinary validation errors.
+For optional unified-menu acceptance, use one `sway-stage menu` keybinding with temporary
+layout and profile directories and trusted applications on disposable workspaces:
+
+1. On an empty workspace, confirm `Sway Stage: ` lists `Layout: NAME` then `Profile: NAME`,
+   each in lexical order. Include equal names and an invalid configuration; verify labels
+   stay distinct and invalid selections give the appropriate check command.
+2. On a tiled capturable workspace, confirm capture appears first, followed by profiles.
+   Select capture, then check name retries, collisions, Escape, private draft publication,
+   and the save notification. Repeat with `--no-infer-commands` and review recovered
+   arguments. The draft must retain the original hierarchy, weights, selectors, and focus
+   even when workspace or window focus changes during either prompt.
+3. With floating/fullscreen windows or unsupported containers/focus, confirm only profiles
+   appear. Load a profile targeting separate empty disposable workspaces from a populated
+   unrelated workspace. Check YAML order, numeric and named targets, silent success, and
+   whole-profile occupied-target refusal before any launch or selection.
+4. Check Escape at the primary, directory, and capture-name prompts preserves the launch log
+   and sends no failure notification. With no usable actions, expect an error and no selector.
+   Initial snapshot failure must still allow profiles when available.
+5. Select an individual layout after switching workspaces or recreating its original name;
+   it must refuse without launching or restoring focus. Check normal sizing/focus and
+   occupied-target refusal. Change a layout, profile, or referenced layout to invalid YAML
+   while the selector is open: selection must refuse and preserve the previous launch log.
+
+Capture and cancellation preserve the launch log; actual loading attempts replace it.
+All prompts should use the original output when known. These are user-only checks;
+offline fake-Fuzzel and IPC transcripts provide the primary automated menu coverage.
 
 For project-directory selection, use a trusted test layout with `cwd: ~/Projects` and
 `cwd_select: true`, with at least two non-hidden child directories. On an empty disposable
@@ -527,8 +537,8 @@ workspace, run `menu`, select the layout, and confirm the sorted `Launch in: ` b
 Choose a project and inspect the terminal's `pwd`; repeat with a window-level `cwd` override.
 Check Escape at each prompt preserves the previous launch log. In separate runs, remove a
 listed directory while its prompt is open, type an unoffered name, and switch workspaces
-before selecting: each must refuse without launches or focus restoration. An empty root
-must report an error. Direct `load NAME` must use the root without prompting.
+before selecting: each must refuse without launches or focus restoration. A root with no eligible children
+must still offer its base directory. Direct `load NAME` must use the root without prompting.
 
 For loader interference, separately switch away and back during a load, introduce an
 unexpected window, and change an accepted window's state. Expect no further launches or

@@ -1,7 +1,7 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
-fn prepare_menu_fixture(fixture: &CliFixture) {
+pub(super) fn prepare_menu_fixture(fixture: &CliFixture) {
     fixture.file(
         "fuzzel",
         r#"#!/bin/sh
@@ -70,7 +70,8 @@ case "$prompt" in
     printf '%b' "$DIRECTORY_OUTPUT"
     exit "$DIRECTORY_STATUS"
     ;;
-  '--prompt=Load layout: ')
+  '--prompt=Sway Stage: ')
+    test "$return_index" = 1 || exit 96
     test "$width" = 0 || exit 96
     test "$no_sort" = 1 || exit 96
     if test "$REQUIRE_SNAPSHOT" = 1; then
@@ -91,7 +92,7 @@ esac
     );
     fixture.file(
         "notify-send",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MENU_DIRECTORY/notification\"\nexit \"$NOTIFY_STATUS\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$MENU_DIRECTORY/notification\"\nexit \"$NOTIFY_STATUS\"\n",
     );
     for executable in ["fuzzel", "notify-send"] {
         fs::set_permissions(
@@ -104,13 +105,17 @@ esac
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
 }
 
-fn menu_command(fixture: &CliFixture, layout_output: &str, name_output: &str) -> Command {
+pub(super) fn menu_command(
+    fixture: &CliFixture,
+    selection_output: &str,
+    name_output: &str,
+) -> Command {
     let mut menu_command = fixture.command();
     menu_command
         .env("PATH", &fixture.path)
         .env("XDG_STATE_HOME", fixture.path.join("state"))
         .env("MENU_DIRECTORY", &fixture.path)
-        .env("MENU_OUTPUT", layout_output)
+        .env("MENU_OUTPUT", selection_output)
         .env("MENU_STATUS", "0")
         .env("NAME_OUTPUT", name_output)
         .env("NAME_STATUS", "0")
@@ -240,7 +245,7 @@ fn cancellation_lists_validated_labels_in_name_order_without_side_effects() {
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path.join("options")).unwrap(),
-        "browsing\ndevelopment\n[invalid] weighted\n[invalid] writing\n"
+        "Layout: browsing\nLayout: development\n[invalid] Layout: weighted\n[invalid] Layout: writing\n"
     );
     assert_log_preserved(&fixture);
     assert!(!fixture.path.join(".config").exists());
@@ -257,7 +262,7 @@ fn only_filename_problems_report_no_layouts_without_opening_fuzzel() {
         }
         let output = run_on_empty_workspace(
             &fixture,
-            menu_command(&fixture, "", "").args(["--layouts-dir", ".", "menu"]),
+            menu_command(&fixture, "0\n", "").args(["--layouts-dir", ".", "menu"]),
         );
         assert_eq!(output.status.code(), Some(1));
         assert!(!fixture.path.join("options").exists());
@@ -271,7 +276,7 @@ fn only_filename_problems_report_no_layouts_without_opening_fuzzel() {
 }
 
 #[test]
-fn all_valid_layouts_keep_plain_labels_and_cancel_without_notification() {
+fn all_valid_layouts_keep_distinct_labels_and_cancel_without_notification() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     for name in ["z.yaml", "a.yml"] {
@@ -287,7 +292,7 @@ fn all_valid_layouts_keep_plain_labels_and_cancel_without_notification() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path.join("options")).unwrap(),
-        "a\nz\n"
+        "Layout: a\nLayout: z\n"
     );
     assert!(!fixture.path.join("notification").exists());
     assert_log_preserved(&fixture);
@@ -309,16 +314,12 @@ fn invalid_contents_are_marked_and_refused_before_loading() {
         fixture.file("z-valid.yaml", SINGLE_WINDOW_YAML);
         let output = run_on_empty_workspace(
             &fixture,
-            menu_command(&fixture, "[invalid] a-invalid\n", "").args([
-                "--layouts-dir",
-                ".",
-                "menu",
-            ]),
+            menu_command(&fixture, "0\n", "").args(["--layouts-dir", ".", "menu"]),
         );
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "[invalid] a-invalid\nz-valid\n"
+            "[invalid] Layout: a-invalid\nLayout: z-valid\n"
         );
         let explanation =
             "Layout 'a-invalid' is invalid. Run sway-stage check a-invalid for details.";
@@ -342,7 +343,7 @@ fn all_invalid_layouts_report_check_guidance_without_opening_fuzzel() {
     );
     let output = run_on_empty_workspace(
         &fixture,
-        menu_command(&fixture, "", "").args(["--layouts-dir", ".", "menu"]),
+        menu_command(&fixture, "0\n", "").args(["--layouts-dir", ".", "menu"]),
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(!fixture.path.join("arguments").exists());
@@ -359,18 +360,18 @@ fn changed_layout_is_validated_again_after_selection_before_loader_ipc() {
     fixture.file("replacement", "malformed: [");
     let output = run_on_empty_workspace(
         &fixture,
-        menu_command(&fixture, "writing\n", "")
+        menu_command(&fixture, "0\n", "")
             .env("REPLACE_LAYOUT", fixture.path.join("writing.yaml"))
             .args(["--layouts-dir", ".", "menu"]),
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(
         fs::read_to_string(fixture.path.join("options")).unwrap(),
-        "writing\n"
+        "Layout: writing\n"
     );
     let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
-    assert!(log.contains("menu load"), "{log}");
-    assert!(log.contains("writing.yaml"), "{log}");
+    assert_log_preserved(&fixture);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("sway-stage check writing"));
     assert!(!log.contains("validated layout"), "{log}");
     assert!(!log.contains("subscribe"), "{log}");
 }
@@ -381,6 +382,9 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         ("Load: writing\n", "0", "not offered"),
         ("[invalid] writing\n", "0", "not offered"),
         ("unknown\n", "0", "not offered"),
+        ("-1\n", "0", "not offered"),
+        ("999999999999999999999999\n", "0", "not offered"),
+        ("1\n", "0", "not offered"),
         ("Capture current layout\n", "0", "not offered"),
         ("Capture current layout…\n", "0", "not offered"),
         (" writing\n", "0", "not offered"),
@@ -418,7 +422,7 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
     fs::remove_file(fixture.path.join("fuzzel")).unwrap();
-    let output = run_capture(&fixture, menu_command(&fixture, "", "").arg("menu"));
+    let output = run_capture(&fixture, menu_command(&fixture, "0\n", "").arg("menu"));
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("start Fuzzel"));
@@ -436,7 +440,7 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
         fixture.file("writing.yaml", SINGLE_WINDOW_YAML);
         // Invalid unselected layouts do not prevent a valid selection from loading.
         fixture.file("broken.yaml", "malformed: [");
-        let mut menu_command = menu_command(&fixture, "writing\n", "");
+        let mut menu_command = menu_command(&fixture, "1\n", "");
         menu_command.args(["--layouts-dir", ".", "menu"]);
         if !infer_commands {
             menu_command.arg("--no-infer-commands");
@@ -463,7 +467,7 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
 fn initial_snapshot_failure_never_opens_fuzzel() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
-    let output = menu_command(&fixture, "", "unused\n")
+    let output = menu_command(&fixture, "0\n", "unused\n")
         .arg("menu")
         .output()
         .unwrap();
@@ -499,7 +503,7 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
             Some(path) if !path.as_os_str().is_empty() => path.clone(),
             _ => fixture.path.join(".config"),
         };
-        let mut menu_command = menu_command(&fixture, "", "development\n");
+        let mut menu_command = menu_command(&fixture, "0\n", "development\n");
         menu_command
             .arg("menu")
             .env("NOTIFY_STATUS", notification_status);
@@ -511,20 +515,23 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
         }
         let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
-        assert!(!fixture.path.join("options").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Capture current workspace…\n"
+        );
         let path = config_home.join("sway-stage/layouts/development.yaml");
         let draft = fs::read_to_string(&path).unwrap();
         assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
         assert!(draft.contains("app_id: editor"));
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),
-            "DP-1\n"
+            "DP-1\nDP-1\n"
         );
         assert_eq!(
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
-                "--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=Sway Stage: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
             )
         );
         if infer_commands {
@@ -573,7 +580,7 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
 fn name_prompt_cancellation_discards_capture_without_creating_directories() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
-    let mut menu_command = menu_command(&fixture, "", "");
+    let mut menu_command = menu_command(&fixture, "0\n", "");
     menu_command.env("NAME_STATUS", "2").arg("menu");
     let output = run_capture(&fixture, &mut menu_command);
 
@@ -597,7 +604,7 @@ fn invalid_draft_names_retry_and_can_be_canceled_without_saving() {
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
-        let mut menu_command = menu_command(&fixture, "", &format!("{name}\n"));
+        let mut menu_command = menu_command(&fixture, "0\n", &format!("{name}\n"));
         menu_command.arg("menu");
         let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
@@ -621,7 +628,7 @@ fn name_prompt_operational_failures_do_not_retry() {
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
-        let mut menu_command = menu_command(&fixture, "", name);
+        let mut menu_command = menu_command(&fixture, "0\n", name);
         menu_command.env("NAME_STATUS", status).arg("menu");
         let output = run_capture(&fixture, &mut menu_command);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -648,9 +655,9 @@ fn repeated_name_retries_save_the_original_snapshot() {
     fixture.file("name-2", "development\n");
     fixture.file("name-3", "work.yaml\n");
     fixture.file("name-4", "accepted\n");
-    let mut menu_command = menu_command(&fixture, "", "My Workspace\n");
+    let mut menu_command = menu_command(&fixture, "0\n", "My Workspace\n");
     menu_command.args(["--layouts-dir", "layouts", "menu"]);
-    // Infer a private launcher before the first prompt empties it. Repeating inference
+    // Infer a private launcher before the name prompt empties it. Repeating inference
     // during a name retry would leave a null command instead of the original launcher.
     fixture.file("retry.desktop", "[Desktop Entry]\nExec=unused\n");
     let mut process = Command::new("/bin/sh")
@@ -742,7 +749,7 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
         fs::write(layouts.join("writing.yaml"), SINGLE_WINDOW_YAML).unwrap();
 
         // The relative directory resolves against the working directory, the fixture root.
-        let mut menu_command = menu_command(&fixture, "", "development\n");
+        let mut menu_command = menu_command(&fixture, "0\n", "development\n");
         menu_command.args(["--layouts-dir", "layouts", "menu"]);
         if config_bases_are_usable {
             menu_command.env("XDG_CONFIG_HOME", fixture.path.join("xdg"));
@@ -754,7 +761,10 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
         let output = run_capture(&fixture, &mut menu_command);
         assert!(output.status.success(), "{output:?}");
 
-        assert!(!fixture.path.join("options").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Capture current workspace…\n"
+        );
         let path = layouts.join("development.yaml");
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.contains("app_id: editor"), "{saved}");
@@ -778,7 +788,7 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
     prepare_menu_fixture(&fixture);
     let output = run_capture(
         &fixture,
-        menu_command(&fixture, "", "development\n").args(["--layouts-dir", "missing", "menu"]),
+        menu_command(&fixture, "0\n", "development\n").args(["--layouts-dir", "missing", "menu"]),
     );
 
     assert!(output.status.success(), "{output:?}");
@@ -789,7 +799,7 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
 fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
-    let mut capture_command = menu_command(&fixture, "", "development\n");
+    let mut capture_command = menu_command(&fixture, "0\n", "development\n");
     capture_command.args(["menu", "--no-infer-commands"]);
     let output = run_capture(&fixture, &mut capture_command);
 
@@ -808,11 +818,10 @@ fn captured_placeholders_fail_check_and_both_loads_before_loader_ipc() {
     assert!(!stderr.contains("SWAYSOCK"), "{stderr}");
 
     fixture.file("state/sway-stage/last-run.log", "previous launch\n");
+    fs::remove_file(fixture.path.join("notification")).unwrap();
     let capture_arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
-    let output = run_on_empty_workspace(
-        &fixture,
-        menu_command(&fixture, "development\n", "").arg("menu"),
-    );
+    fs::remove_file(fixture.path.join("action-pid")).unwrap();
+    let output = run_on_empty_workspace(&fixture, menu_command(&fixture, "0\n", "").arg("menu"));
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("No valid layouts found"), "{stderr}");
@@ -849,7 +858,7 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
             fs::write(layouts.join(obstacle), "preserve me").unwrap();
         }
 
-        let mut menu_command = menu_command(&fixture, "", "development\n");
+        let mut menu_command = menu_command(&fixture, "0\n", "development\n");
         menu_command.arg("menu");
         let output = run_capture(&fixture, &mut menu_command);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -917,7 +926,7 @@ fn saved_layout_and_output_are_fixed_before_the_capture_prompt() {
         .as_array_mut()
         .unwrap()
         .insert(0, other_output);
-    let mut menu_command = menu_command(&fixture, "", "saved\n");
+    let mut menu_command = menu_command(&fixture, "0\n", "saved\n");
     menu_command.arg("menu");
     let output = run_with_recorded_snapshot(&fixture, &mut menu_command, tree);
 
@@ -931,7 +940,7 @@ fn saved_layout_and_output_are_fixed_before_the_capture_prompt() {
     assert!(draft.contains("app_id: editor"));
     assert_eq!(
         fs::read_to_string(fixture.path.join("outputs")).unwrap(),
-        "original output;$literal\n"
+        "original output;$literal\noriginal output;$literal\n"
     );
 }
 
@@ -942,7 +951,7 @@ fn missing_output_does_not_change_capture_or_cancellation() {
         prepare_menu_fixture(&fixture);
         let mut tree = capture_tree();
         tree["nodes"][0]["name"] = Value::Null;
-        let mut menu_command = menu_command(&fixture, "", name);
+        let mut menu_command = menu_command(&fixture, "0\n", name);
         menu_command.arg("menu");
         if name.is_empty() {
             menu_command.env("NAME_STATUS", "2");
@@ -963,7 +972,7 @@ fn missing_output_does_not_change_capture_or_cancellation() {
 }
 
 #[test]
-fn failed_snapshot_prevents_all_selections_and_is_never_retried() {
+fn failed_snapshot_without_profiles_prevents_selection_and_is_never_retried() {
     for selection in ["", "writing\n", "valid\n"] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -987,7 +996,7 @@ fn failed_snapshot_prevents_all_selections_and_is_never_retried() {
             .env("SWAYSOCK", &socket)
             .args(["--layouts-dir", ".", "menu"]);
         if selection.is_empty() {
-            menu_command.env("MENU_STATUS", "2");
+            menu_command.env("MENU_STATUS", "2").env("MENU_OUTPUT", "");
         }
         let output = menu_command.output().unwrap();
         let listener = server.join().unwrap();
@@ -1088,7 +1097,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
             write_ipc_message(&mut query, 10, &json!({"success": true}));
             assert_eq!(events.read(&mut [0]).unwrap(), 0);
         });
-        let output = menu_command(&fixture, "writing\n", "")
+        let output = menu_command(&fixture, "0\n", "")
             .env("SWAYSOCK", &socket)
             .env("REQUIRE_SNAPSHOT", "1")
             .args(["--layouts-dir", ".", "menu"])
@@ -1140,7 +1149,7 @@ fn partial_inference_keeps_unresolved_commands_and_the_short_save_notification()
     workspace["nodes"].as_array_mut().unwrap().push(unresolved);
     let output = run_with_recorded_snapshot(
         &fixture,
-        menu_command(&fixture, "", "partial\n").args(["--layouts-dir", ".", "menu"]),
+        menu_command(&fixture, "0\n", "partial\n").args(["--layouts-dir", ".", "menu"]),
         tree,
     );
 
@@ -1207,7 +1216,7 @@ fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
 
         let output = run_on_empty_workspace(
             &fixture,
-            menu_command(&fixture, "writing\n", "")
+            menu_command(&fixture, "0\n", "")
                 .env("DIRECTORY_OUTPUT", "")
                 .env("DIRECTORY_STATUS", "2")
                 .args(["--layouts-dir", ".", "menu"]),
@@ -1247,7 +1256,7 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
         project_layout(&fixture, true);
         let output = run_on_empty_workspace(
             &fixture,
-            menu_command(&fixture, "writing\n", "")
+            menu_command(&fixture, "0\n", "")
                 .env("DIRECTORY_OUTPUT", response)
                 .env("DIRECTORY_STATUS", status)
                 .args(["--layouts-dir", ".", "menu"]),
@@ -1273,7 +1282,7 @@ fn disabled_directory_selection_uses_the_single_prompt_loading_path() {
     project_layout(&fixture, false);
     let output = run_on_empty_workspace(
         &fixture,
-        menu_command(&fixture, "writing\n", "").args(["--layouts-dir", ".", "menu"]),
+        menu_command(&fixture, "0\n", "").args(["--layouts-dir", ".", "menu"]),
     );
 
     assert_eq!(output.status.code(), Some(1));
@@ -1294,7 +1303,7 @@ fn root_without_eligible_children_still_opens_the_picker_and_can_cancel() {
 
     let output = run_on_empty_workspace(
         &fixture,
-        menu_command(&fixture, "writing\n", "")
+        menu_command(&fixture, "0\n", "")
             .env("DIRECTORY_OUTPUT", "")
             .env("DIRECTORY_STATUS", "2")
             .args(["--layouts-dir", ".", "menu"]),
@@ -1316,7 +1325,7 @@ fn disappearing_child_selection_never_reaches_loader_ipc() {
     project_layout(&fixture, true);
     let output = run_on_empty_workspace(
         &fixture,
-        menu_command(&fixture, "writing\n", "")
+        menu_command(&fixture, "0\n", "")
             .env("REMOVE_DIRECTORY", fixture.path.join("projects/gon"))
             .args(["--layouts-dir", ".", "menu"]),
     );
@@ -1435,7 +1444,7 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
             }
             assert_eq!(events.read(&mut [0]).unwrap(), 0);
         });
-        let output = menu_command(&fixture, "writing\n", "")
+        let output = menu_command(&fixture, "0\n", "")
             .env("DIRECTORY_OUTPUT", format!("{directory_index}\n"))
             .env("SWAYSOCK", &socket)
             .args(["--layouts-dir", ".", "menu"])
@@ -1481,7 +1490,7 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
 fn empty_workspace_without_layouts_reports_an_error_without_fuzzel() {
     let fixture = CliFixture::new();
     prepare_menu_fixture(&fixture);
-    let output = run_on_empty_workspace(&fixture, menu_command(&fixture, "", "").arg("menu"));
+    let output = run_on_empty_workspace(&fixture, menu_command(&fixture, "0\n", "").arg("menu"));
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("no layouts available"));
@@ -1493,7 +1502,7 @@ fn empty_workspace_without_layouts_reports_an_error_without_fuzzel() {
 }
 
 #[test]
-fn capture_name_prompt_skips_discovery() {
+fn capture_action_skips_layout_discovery() {
     for (name, status) in [("", "2"), ("saved\n", "0")] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -1502,19 +1511,22 @@ fn capture_name_prompt_skips_discovery() {
         fixture.file("writing.yml", "");
         let output = run_capture(
             &fixture,
-            menu_command(&fixture, "", name)
+            menu_command(&fixture, "0\n", name)
                 .env("NAME_STATUS", status)
                 .args(["--layouts-dir", ".", "menu"]),
         );
         assert!(output.status.success(), "{output:?}");
-        assert!(!fixture.path.join("options").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Capture current workspace…\n"
+        );
         assert!(fixture.path.join("name-opened").exists());
         assert_eq!(fixture.path.join("saved.yaml").exists(), status == "0");
         assert_eq!(
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n",
-                "--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=Sway Stage: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
             )
         );
     }
@@ -1566,7 +1578,7 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
         }
         let output = run_with_recorded_snapshot(
             &fixture,
-            menu_command(&fixture, "", "unused\n").args(["--layouts-dir", ".", "menu"]),
+            menu_command(&fixture, "0\n", "unused\n").args(["--layouts-dir", ".", "menu"]),
             tree,
         );
         assert_eq!(output.status.code(), Some(1), "{arrangement}: {output:?}");
@@ -1588,5 +1600,339 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
             &fixture,
             "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus.",
         );
+    }
+}
+
+fn add_menu_profile(fixture: &CliFixture, name: &str, contents: &str) {
+    fs::create_dir_all(fixture.path.join("profiles")).unwrap();
+    fixture.file(&format!("profiles/{name}"), contents);
+}
+
+const MENU_PROFILE: &str = "version: 1\nworkspaces: [{workspace: music, layout: shared}]\n";
+
+#[test]
+fn unified_actions_follow_workspace_eligibility_and_name_order() {
+    for state in ["empty", "capturable", "unsupported", "failed"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("zebra.yaml", SINGLE_WINDOW_YAML);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "zebra.yaml", MENU_PROFILE);
+        add_menu_profile(&fixture, "shared.yml", MENU_PROFILE);
+        let mut tree = capture_tree();
+        let expected = match state {
+            "empty" => {
+                tree = empty_tree();
+                "Layout: shared\nLayout: zebra\nProfile: shared\nProfile: zebra\n"
+            }
+            "capturable" => "Capture current workspace…\nProfile: shared\nProfile: zebra\n",
+            "unsupported" => {
+                tree["nodes"][0]["nodes"][0]["nodes"][0]["fullscreen_mode"] = json!(1);
+                "Profile: shared\nProfile: zebra\n"
+            }
+            "failed" => {
+                tree = json!({});
+                "Profile: shared\nProfile: zebra\n"
+            }
+            _ => unreachable!(),
+        };
+        let output = run_with_recorded_snapshot(
+            &fixture,
+            menu_command(&fixture, "", "")
+                .env("MENU_STATUS", "2")
+                .args(["--layouts-dir", ".", "--profiles-dir", "profiles", "menu"]),
+            tree,
+        );
+        assert!(output.status.success(), "{state}: {output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            expected
+        );
+        assert!(!fixture.path.join("notification").exists());
+    }
+}
+
+#[test]
+fn profile_discovery_marks_invalid_profiles_and_references_but_skips_bad_filenames() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = CliFixture::new();
+    prepare_menu_fixture(&fixture);
+    fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+    fixture.file("broken.yaml", "malformed: [");
+    for (filename, contents) in [
+        ("valid.yml", MENU_PROFILE),
+        ("broken.yaml", "malformed: ["),
+        (
+            "reference.yaml",
+            "version: 1\nworkspaces: [{workspace: 3, layout: broken}]\n",
+        ),
+        ("duplicate.yaml", MENU_PROFILE),
+        ("duplicate.yml", MENU_PROFILE),
+        ("bad name.yaml", MENU_PROFILE),
+        ("_hidden.yaml", MENU_PROFILE),
+        ("ignored.YAML", MENU_PROFILE),
+    ] {
+        add_menu_profile(&fixture, filename, contents);
+    }
+    let profiles = fixture.path.join("profiles");
+    symlink(profiles.join("valid.yml"), profiles.join("link.yaml")).unwrap();
+    fs::create_dir(profiles.join("nested.yaml")).unwrap();
+    fs::write(
+        profiles.join(OsString::from_vec(vec![0xff, b'.', b'y', b'm', b'l'])),
+        MENU_PROFILE,
+    )
+    .unwrap();
+    let output = run_on_empty_workspace(
+        &fixture,
+        menu_command(&fixture, "", "")
+            .env("MENU_STATUS", "2")
+            .args(["--layouts-dir", ".", "--profiles-dir", "profiles", "menu"]),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("options")).unwrap(),
+        "[invalid] Layout: broken\nLayout: shared\n[invalid] Profile: broken\n[invalid] Profile: reference\nProfile: valid\n"
+    );
+    assert_log_preserved(&fixture);
+}
+
+#[test]
+fn invalid_profile_selections_preserve_logs_and_offer_profile_check_guidance() {
+    for contents in [
+        "malformed: [",
+        "version: 1\nworkspaces: [{workspace: 3, layout: missing}]\n",
+    ] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "broken.yaml", contents);
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, "1\n", "").args([
+                "--layouts-dir",
+                ".",
+                "--profiles-dir",
+                "profiles",
+                "menu",
+            ]),
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let explanation =
+            "Profile 'broken' is invalid. Run sway-stage profile check broken for details.";
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(explanation),
+            "{output:?}"
+        );
+        assert_preload_notification(&fixture, explanation);
+    }
+}
+
+#[test]
+fn changed_profile_or_referenced_layout_is_revalidated_before_loading() {
+    for replaced_path in ["profiles/work.yaml", "shared.yaml"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "work.yaml", MENU_PROFILE);
+        fixture.file("replacement", "malformed: [");
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, "1\n", "")
+                .env("REPLACE_LAYOUT", fixture.path.join(replaced_path))
+                .args(["--layouts-dir", ".", "--profiles-dir", "profiles", "menu"]),
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("sway-stage profile check work"),
+            "{output:?}"
+        );
+        assert_preload_notification(
+            &fixture,
+            "Profile 'work' is invalid. Run sway-stage profile check work for details.",
+        );
+    }
+}
+
+#[test]
+fn profile_discovery_uses_xdg_home_and_explicit_directories_without_writes() {
+    for base in [".config", "xdg", "profiles"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        let profile_directory = if base == "profiles" {
+            "profiles".to_owned()
+        } else {
+            format!("{base}/sway-stage/profiles")
+        };
+        fs::create_dir_all(fixture.path.join(&profile_directory)).unwrap();
+        fixture.file(&format!("{profile_directory}/work.yaml"), MENU_PROFILE);
+        let mut process = menu_command(&fixture, "", "");
+        process
+            .env("MENU_STATUS", "2")
+            .args(["--layouts-dir", ".", "menu"]);
+        if base == "xdg" {
+            process.env("XDG_CONFIG_HOME", fixture.path.join(base));
+        }
+        if base == "profiles" {
+            process.args(["--profiles-dir", "profiles"]);
+        }
+        // No usable initial workspace: only profiles can be offered.
+        let output = process.output().unwrap();
+        assert!(output.status.success(), "{base}: {output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Profile: work\n"
+        );
+        assert_log_preserved(&fixture);
+        assert!(!fixture.path.join("notification").exists());
+        assert_eq!(
+            fs::read_dir(fixture.path.join(profile_directory))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn unusable_profile_directories_do_not_suppress_layouts_or_capture() {
+    for directory in ["missing", "file", "loop"] {
+        for populated in [false, true] {
+            let fixture = CliFixture::new();
+            prepare_menu_fixture(&fixture);
+            fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+            fixture.file("file", "not a directory");
+            symlink("loop", fixture.path.join("loop")).unwrap();
+            let output = run_with_recorded_snapshot(
+                &fixture,
+                menu_command(&fixture, "", "")
+                    .env("MENU_STATUS", "2")
+                    .args(["--layouts-dir", ".", "--profiles-dir", directory, "menu"]),
+                if populated {
+                    capture_tree()
+                } else {
+                    empty_tree()
+                },
+            );
+            assert!(output.status.success(), "{output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(directory), "{stderr}");
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("options")).unwrap(),
+                if populated {
+                    "Capture current workspace…\n"
+                } else {
+                    "Layout: shared\n"
+                }
+            );
+            assert_log_preserved(&fixture);
+            assert!(!fixture.path.join("notification").exists());
+        }
+    }
+}
+
+#[test]
+fn no_usable_profiles_reports_diagnostics_without_opening_fuzzel() {
+    for directory in ["missing", "profiles"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        if directory == "profiles" {
+            add_menu_profile(&fixture, "broken.yaml", "malformed: [");
+        }
+        let output = menu_command(&fixture, "0\n", "")
+            .args(["--profiles-dir", directory, "menu"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(if directory == "missing" {
+                "read directory"
+            } else {
+                "sway-stage profile check NAME"
+            }),
+            "{stderr}"
+        );
+        assert_log_preserved(&fixture);
+        assert!(!fixture.path.join("arguments").exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("notification"))
+                .unwrap()
+                .matches("--app-name=sway-stage")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn identical_layout_and_profile_names_dispatch_by_index() {
+    for selection in ["0\n", "1\n"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "shared.yaml", MENU_PROFILE);
+        let output = run_on_empty_workspace(
+            &fixture,
+            menu_command(&fixture, selection, "").args([
+                "--layouts-dir",
+                ".",
+                "--profiles-dir",
+                "profiles",
+                "menu",
+            ]),
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+        assert!(
+            log.contains(if selection == "0\n" {
+                "menu load"
+            } else {
+                "completed 0 workspaces"
+            }),
+            "{log}"
+        );
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(
+            notification.contains(if selection == "0\n" {
+                "sway-stage menu failed"
+            } else {
+                "sway-stage profile load failed"
+            }),
+            "{notification}"
+        );
+        assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
+    }
+}
+
+#[test]
+fn capture_selection_with_profiles_preserves_inference_flag_and_original_snapshot() {
+    for infer_commands in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "work.yaml", MENU_PROFILE);
+        let mut process = menu_command(&fixture, "0\n", "saved\n");
+        process.args(["--layouts-dir", ".", "--profiles-dir", "profiles", "menu"]);
+        if !infer_commands {
+            process.arg("--no-infer-commands");
+        }
+        let output = run_capture(&fixture, &mut process);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Capture current workspace…\nProfile: work\n"
+        );
+        let saved = fs::read_to_string(fixture.path.join("saved.yaml")).unwrap();
+        assert_eq!(
+            saved.lines().any(|line| line.trim() == "command: null"),
+            !infer_commands
+        );
+        assert!(saved.contains("app_id: editor"));
+        assert_log_preserved(&fixture);
     }
 }

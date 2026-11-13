@@ -64,7 +64,6 @@ sway-stage check dev
 ```
 
 ```text
-bindsym $mod+Shift+d exec sway-stage load dev
 bindsym $mod+Shift+m exec sway-stage menu
 ```
 
@@ -80,11 +79,13 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage profile check NAME` | Validate a profile and all referenced layouts without contacting Sway. |
 | `sway-stage profile load NAME` | Launch layouts in order on the profile's explicitly targeted, empty workspaces. |
 | `sway-stage capture > draft.yaml` | Capture the current arrangement as an editable draft. |
-| `sway-stage menu` | Load a layout or save a named capture through Fuzzel. |
+| `sway-stage menu` | Choose a layout, profile, or workspace capture through one Fuzzel menu. |
 
-On an empty workspace, the menu shows valid layouts normally and marks invalid or
-incomplete layouts `[invalid]`. Invalid layouts cannot launch; run `sway-stage check NAME`
-for detailed validation errors. Validation does not guarantee applications will launch.
+One menu keybinding covers all three operations. Empty workspaces offer layouts and
+profiles; populated workspaces offer capture when supported, plus profiles. Entries use
+`Layout:` and `Profile:` labels; invalid configurations are marked `[invalid]` and cannot
+load. Use `check NAME` or `profile check NAME` for details. `menu --no-infer-commands`
+disables command inference only for individual-workspace capture.
 
 Use `--layouts-dir PATH` to read layouts and save menu captures elsewhere.
 Captures preserve arrangement, sizes, selectors, tab/stack selections, and focus, and attempt to
@@ -103,8 +104,8 @@ sway-stage menu --no-infer-commands
 
 ## Troubleshooting
 
-Desktop error notifications give a short summary. Each load attempt (including a menu Load
-selection or a whole profile load) records detailed diagnostics in
+Desktop error notifications give a short summary. Each load attempt (including menu layout/profile
+loading) records detailed diagnostics in
 `$XDG_STATE_HOME/sway-stage/last-run.log`, or
 `$HOME/.local/state/sway-stage/last-run.log` when `XDG_STATE_HOME` is unset or empty.
 The state directory must be absolute. Inspect the latest load with:
