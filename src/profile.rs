@@ -130,15 +130,24 @@ pub struct PreparedWorkspace {
     pub config: config::Config,
 }
 
+/// Resolve and validate a profile without reading its referenced layouts.
+pub fn read_definition(
+    name: &str,
+    profiles_dir: Option<PathBuf>,
+) -> Result<(PathBuf, Profile), String> {
+    let path = find_profile(name, profiles_dir)?;
+    let input = config::read_yaml(&path, "profile")?;
+    let profile = parse(&input).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok((path, profile))
+}
+
 /// Resolve and validate the profile and every referenced layout, entirely offline.
 pub fn read_named(
     name: &str,
     profiles_dir: Option<PathBuf>,
     layouts_dir: Option<PathBuf>,
 ) -> Result<PreparedProfile, String> {
-    let path = find_profile(name, profiles_dir)?;
-    let input = config::read_yaml(&path, "profile")?;
-    let profile = parse(&input).map_err(|error| format!("{}: {error}", path.display()))?;
+    let (path, profile) = read_definition(name, profiles_dir)?;
 
     let layout_directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
     let layouts = layout_directory.discover()?;
@@ -568,22 +577,49 @@ fn event_matches_workspace(node: &swayipc::Node, workspace: &WorkspaceIdentity) 
         && node.name.as_deref() == Some(workspace.name.as_str())
 }
 
-/// Immediate, unambiguous profile names; validation is left to read_named.
+/// Immediate, unambiguous profile names; the menu intentionally omits filename warnings.
 pub fn discover_names(profiles_dir: Option<PathBuf>) -> Result<Vec<String>, String> {
+    let (names, _) = discover_names_with_warnings(profiles_dir)?;
+    Ok(names)
+}
+
+/// Discover names without parsing contents, retaining recoverable filename problems for list.
+pub fn discover_names_with_warnings(
+    profiles_dir: Option<PathBuf>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let (directory, is_explicit) = profile_directory(profiles_dir)?;
-    let mut counts = BTreeMap::new();
+    let mut paths_by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    let mut warnings = Vec::new();
     for path in discovery::yaml_paths(&directory, !is_explicit)? {
-        if let Some(name) = path.file_stem().and_then(|stem| stem.to_str())
-            && discovery::valid_name(name)
-        {
-            *counts.entry(name.to_owned()).or_insert(0) += 1;
+        let name = path.file_stem().and_then(|stem| stem.to_str());
+        let Some(name) = name.filter(|name| discovery::valid_name(name)) else {
+            warnings.push(format!(
+                "skipping invalid profile filename {:?}; use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml",
+                path.file_name().expect("directory entry has a filename")
+            ));
+            continue;
+        };
+
+        paths_by_name.entry(name.to_owned()).or_default().push(path);
+    }
+
+    let mut names = Vec::new();
+    for (name, paths) in paths_by_name {
+        if paths.len() == 1 {
+            names.push(name);
+        } else {
+            let filenames = paths
+                .iter()
+                .map(|path| format!("{:?}", path.file_name().expect("entry has a filename")))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            warnings.push(format!(
+                "ambiguous profile name {name:?}: {filenames}; rename one file"
+            ));
         }
     }
 
-    Ok(counts
-        .into_iter()
-        .filter_map(|(name, count)| (count == 1).then_some(name))
-        .collect())
+    Ok((names, warnings))
 }
 
 pub(crate) fn profile_directory(profiles_dir: Option<PathBuf>) -> Result<(PathBuf, bool), String> {

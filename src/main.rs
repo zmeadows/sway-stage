@@ -50,7 +50,7 @@ enum CliCommand {
         /// Layout name (the YAML filename without its extension)
         name: String,
     },
-    /// Validate, capture, or sequentially load named multi-workspace profiles
+    /// List, inspect, validate, capture, or load named multi-workspace profiles
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -71,6 +71,13 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum ProfileCommand {
+    /// Print available profile names in lexical order without parsing their contents
+    List,
+    /// Show workspace-to-layout mappings without reading layouts or contacting Sway
+    Show {
+        /// Profile name (the YAML filename without its extension)
+        name: String,
+    },
     /// Construct layouts in order on the profile's explicitly targeted empty workspaces
     Load {
         /// Profile name (the YAML filename without its extension)
@@ -107,6 +114,14 @@ fn main() -> ExitCode {
         Some(CliCommand::List) => list(cli.layouts_dir).map_err(|error| format!("list: {error}")),
         Some(CliCommand::Check { name }) => {
             check(&name, cli.layouts_dir).map_err(|error| format!("check: {error}"))
+        }
+        Some(CliCommand::Profile {
+            command: ProfileCommand::List,
+        }) => list_profiles(cli.profiles_dir).map_err(|error| format!("profile list: {error}")),
+        Some(CliCommand::Profile {
+            command: ProfileCommand::Show { name },
+        }) => {
+            show_profile(&name, cli.profiles_dir).map_err(|error| format!("profile show: {error}"))
         }
         Some(CliCommand::Profile {
             command: ProfileCommand::Check { name },
@@ -176,6 +191,38 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
     let path = find_layout(name, layouts_dir)?;
     config::read(&path)?;
     writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
+}
+
+fn list_profiles(profiles_dir: Option<PathBuf>) -> Result<(), String> {
+    let (names, warnings) = profile::discover_names_with_warnings(profiles_dir)?;
+
+    for warning in warnings {
+        let _ = writeln!(io::stderr().lock(), "sway-stage: warning: {warning}");
+    }
+
+    let mut stdout = io::stdout().lock();
+    for name in names {
+        writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn show_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<(), String> {
+    let (_, profile) = profile::read_definition(name, profiles_dir)?;
+
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{name}:").map_err(|error| format!("stdout: {error}"))?;
+    for entry in profile.workspaces {
+        writeln!(
+            stdout,
+            "  {} -> {}",
+            entry.value.workspace, entry.value.layout
+        )
+        .map_err(|error| format!("stdout: {error}"))?;
+    }
+
+    Ok(())
 }
 
 fn check_profile(

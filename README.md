@@ -76,6 +76,8 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage list` | List layout names. |
 | `sway-stage check NAME` | Validate without contacting Sway or launching anything. |
 | `sway-stage load NAME` | Launch a layout on the focused, empty workspace. |
+| `sway-stage profile list` | List profile names without parsing contents. |
+| `sway-stage profile show NAME` | Inspect workspace mappings offline without reading layouts. |
 | `sway-stage profile check NAME` | Validate a profile and all referenced layouts without contacting Sway. |
 | `sway-stage profile capture NAME 1 3 music` | Save existing workspaces as layout drafts and a named profile. |
 | `sway-stage profile load NAME` | Launch layouts in order on the profile's explicitly targeted, empty workspaces. |

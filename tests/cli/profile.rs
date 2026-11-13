@@ -345,7 +345,7 @@ fn profile_errors_include_file_entry_and_yaml_location_before_any_sway_access() 
 }
 
 #[test]
-fn profile_check_never_connects_launches_notifies_or_changes_logs_even_on_failure() {
+fn offline_profile_commands_never_connect_launch_notify_or_change_logs_even_on_failure() {
     let fixture = CliFixture::new();
     fixture.file("work.yaml", PROFILE);
     fixture.file("bad.yaml", &PROFILE.replace("workspace: 1", "workspace: 3"));
@@ -384,13 +384,39 @@ fn profile_check_never_connects_launches_notifies_or_changes_logs_even_on_failur
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
 
-    for (name, expected_exit_code) in [
-        ("work", 0),
-        ("bad", 1),
-        ("missing-layout", 1),
-        ("invalid-layout", 1),
-        ("absent", 1),
-        ("../work", 1),
+    for (command, name, expected_exit_code, expected_stdout) in [
+        ("check", Some("work"), 0, "work: valid\n"),
+        ("check", Some("bad"), 1, ""),
+        ("check", Some("missing-layout"), 1, ""),
+        ("check", Some("invalid-layout"), 1, ""),
+        ("check", Some("absent"), 1, ""),
+        ("check", Some("../work"), 1, ""),
+        (
+            "show",
+            Some("work"),
+            0,
+            "work:\n  3 -> development\n  1 -> browser\n",
+        ),
+        (
+            "show",
+            Some("missing-layout"),
+            0,
+            "missing-layout:\n  3 -> development\n  1 -> missing\n",
+        ),
+        (
+            "show",
+            Some("invalid-layout"),
+            0,
+            "invalid-layout:\n  3 -> development\n  1 -> invalid\n",
+        ),
+        ("show", Some("bad"), 1, ""),
+        ("show", Some("absent"), 1, ""),
+        (
+            "list",
+            None,
+            0,
+            "bad\nbrowser\ndevelopment\ninvalid\ninvalid-layout\nmissing-layout\nwork\n",
+        ),
     ] {
         let output = fixture
             .command()
@@ -405,9 +431,9 @@ fn profile_check_never_connects_launches_notifies_or_changes_logs_even_on_failur
                 "--layouts-dir",
                 ".",
                 "profile",
-                "check",
-                name,
+                command,
             ])
+            .args(name)
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(expected_exit_code), "{output:?}");
@@ -424,7 +450,7 @@ fn profile_check_never_connects_launches_notifies_or_changes_logs_even_on_failur
             1
         );
         if expected_exit_code == 0 {
-            assert_eq!(output.stdout, b"work: valid\n");
+            assert_eq!(output.stdout, expected_stdout.as_bytes());
             assert!(output.stderr.is_empty());
         } else {
             assert!(output.stdout.is_empty());
@@ -467,4 +493,177 @@ fn profile_check_accepts_exact_names_and_reports_invalid_target_locations_offlin
         assert!(!error.contains("SWAYSOCK"), "{error}");
     }
     assert!(!fixture.path.join(".local/state").exists());
+}
+
+#[test]
+fn profile_list_is_sorted_read_only_discovery_with_recoverable_warnings() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = CliFixture::new();
+    fixture.file("z.yaml", "not a profile");
+    fixture.file("a.yml", "malformed: [");
+    fixture.file("A-1.yaml", "");
+    fixture.file("duplicate.yaml", "");
+    fixture.file("duplicate.yml", "");
+    for filename in ["bad name.yaml", "_bad.yml", "é.yaml"] {
+        fixture.file(filename, "");
+    }
+    fs::write(
+        fixture
+            .path
+            .join(OsString::from_vec(b"bad\xff.yaml".to_vec())),
+        "",
+    )
+    .unwrap();
+    fixture.file("ignored.YAML", "");
+    fixture.file("ignored.txt", "");
+    fs::create_dir(fixture.path.join("directory.yaml")).unwrap();
+    fs::create_dir(fixture.path.join("nested")).unwrap();
+    fixture.file("nested/hidden.yaml", PROFILE);
+    symlink("z.yaml", fixture.path.join("link.yaml")).unwrap();
+    symlink("absent", fixture.path.join("dangling.yml")).unwrap();
+
+    let arguments = [
+        "profile",
+        "list",
+        "--profiles-dir",
+        ".",
+        "--layouts-dir",
+        "missing",
+    ];
+    let output = fixture.run(&arguments, 0);
+    assert_eq!(output.stdout, b"A-1\na\nz\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 5, "{stderr}");
+    for expected in [
+        "skipping invalid profile filename",
+        "bad name.yaml",
+        "_bad.yml",
+        "é.yaml",
+        "bad\\xFF.yaml",
+        "ambiguous profile name",
+        "duplicate.yaml",
+        "duplicate.yml",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert!(
+        stderr
+            .lines()
+            .all(|line| line.starts_with("sway-stage: warning: "))
+    );
+    let repeated = fixture.run(&arguments, 0);
+    assert_eq!(output.stdout, repeated.stdout);
+    assert_eq!(output.stderr, repeated.stderr);
+}
+
+#[test]
+fn profile_list_respects_default_and_explicit_directories_and_empty_results() {
+    let fixture = CliFixture::new();
+    for arguments in [
+        vec!["profile", "list"],
+        vec!["profile", "list", "--profiles-dir", "."],
+    ] {
+        let output = fixture.run(&arguments, 0);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    assert!(!fixture.path.join(".config").exists());
+    fixture.file("file", "");
+    for directory in ["missing", "file"] {
+        let output = fixture.run(&["--profiles-dir", directory, "profile", "list"], 1);
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .starts_with("sway-stage: profile list: read directory")
+        );
+    }
+    assert!(!fixture.path.join("missing").exists());
+
+    for (base, name) in [(".config", "home"), ("xdg", "xdg")] {
+        fs::create_dir_all(fixture.path.join(base).join("sway-stage/profiles")).unwrap();
+        fixture.file(&format!("{base}/sway-stage/profiles/{name}.yaml"), "");
+    }
+    let output = fixture.run(&["profile", "list"], 0);
+    assert_eq!(output.stdout, b"home\n");
+    assert!(output.stderr.is_empty());
+    let output = fixture
+        .command()
+        .env("XDG_CONFIG_HOME", fixture.path.join("xdg"))
+        .args(["profile", "list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"xdg\n");
+    assert!(output.stderr.is_empty());
+    let output = fixture.run(&["--profiles-dir", ".", "profile", "list"], 0);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn profile_show_preserves_mapping_order_and_does_not_validate_layout_files() {
+    let fixture = CliFixture::new();
+    fixture.file("work.yml", "version: 1\nworkspaces:\n  - {workspace: 3, layout: missing}\n  - {workspace: music, layout: invalid}\n  - {workspace: 1, layout: missing}\n  - {workspace: 'music player', layout: invalid}\n");
+    fixture.file("invalid.yaml", "malformed: [");
+    for directory in ["missing", ".", "invalid.yaml"] {
+        let output = fixture.run(
+            &[
+                "--profiles-dir",
+                ".",
+                "--layouts-dir",
+                directory,
+                "profile",
+                "show",
+                "work",
+            ],
+            0,
+        );
+        assert_eq!(output.stdout, b"work:\n  3 -> missing\n  \"music\" -> invalid\n  1 -> missing\n  \"music player\" -> invalid\n");
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn profile_show_refuses_missing_ambiguous_and_malformed_profiles() {
+    let fixture = CliFixture::new();
+    fixture.file("duplicate.yaml", PROFILE);
+    fixture.file("duplicate.yml", PROFILE);
+    for (name, expected) in [
+        ("missing", "not found"),
+        ("../work", "invalid profile name"),
+        ("duplicate", "ambiguous profile name"),
+    ] {
+        let output = fixture.run(&["--profiles-dir", ".", "profile", "show", name], 1);
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with("sway-stage: profile show:"), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    for (yaml, expected) in [
+        ("version: 1\nworkspaces: [".to_owned(), "workspaces"),
+        (PROFILE.replace("version: 1", "version: 2"), "version"),
+        (
+            PROFILE.replace("workspace: 1", "workspace: 3"),
+            "duplicate workspace number",
+        ),
+        (
+            PROFILE.replace("workspace: 1", "workspace: '1'"),
+            "workspaces[1].workspace",
+        ),
+        (
+            PROFILE.replace("layout: browser", "layout: ../browser"),
+            "workspaces[1].layout",
+        ),
+        (format!("{PROFILE}unknown: true\n"), "unknown field"),
+    ] {
+        fixture.file("bad.yaml", &yaml);
+        let output = fixture.run(&["--profiles-dir", ".", "profile", "show", "bad"], 1);
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for expected in ["sway-stage: profile show:", "bad.yaml", expected] {
+            assert!(stderr.contains(expected), "{stderr}");
+        }
+    }
 }

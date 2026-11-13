@@ -12,12 +12,15 @@ This is the authoritative contract for implemented behavior. Start with the
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
 | `profile load NAME` | Construct layouts sequentially on the profile’s explicitly targeted empty workspaces. Success is silent. |
 | `profile capture NAME (WORKSPACE ... or --all) [--no-infer-commands]` | Save one layout draft per selected workspace and a profile referencing them. |
+| `profile list` | Print discoverable profile names in lexical order without parsing contents. |
+| `profile show NAME` | Print workspace-to-layout mappings in YAML order without reading layouts. |
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
 | `menu [--no-infer-commands]` | Choose a layout, profile, or individual-workspace capture through one Fuzzel menu. |
 
-`check`, `profile check`, and `list` never contact Sway, launch applications, write logs, or notify.
+`check`, `list`, `profile check`, `profile list`, and `profile show` never contact Sway, launch
+applications, write logs, or notify.
 `check` does not probe executables or promise that a command creates a matching window.
 Help, version, and invocation without a subcommand need no configuration or optional tools;
 no subcommand prints help and does nothing else.
@@ -177,7 +180,15 @@ file rules as layout discovery apply. Profile names use `[A-Za-z0-9][A-Za-z0-9_-
 extension. Duplicate stems are ambiguous; unrelated invalid or ambiguous filenames do not
 prevent checking a valid name. A missing profile is an error, including when the default
 directory is absent; a missing explicit directory is a directory-read error. Discovery never
-creates directories.
+creates directories. `profile list` prints sorted, unambiguous names without parsing contents,
+reports invalid filenames and duplicate stems as warnings on stderr, and succeeds with empty
+output for an empty or missing default directory. It does not use the layouts directory.
+
+`profile show NAME` validates only the profile structure and mappings, then prints `NAME:`
+and indented `TARGET -> LAYOUT` lines in YAML order. Numeric targets are unquoted; exact
+names are double-quoted, including names without spaces. It ignores the layouts directory,
+so missing or invalid referenced layouts remain inspectable. Use `profile check NAME` for
+complete validation of all referenced layouts.
 
 For example, save this as `work.yaml` in the profiles directory, with the three named
 layouts in the layouts directory:
@@ -212,9 +223,9 @@ and other syntax are rejected. These constraints also apply to quoted YAML strin
 quoting a reserved or unsafe name does not make it valid.
 
 Each `layout` is a name following the existing layout naming and discovery rules, resolved
-in the layouts directory independently of the profile file's location. Every referenced
-layout must be unambiguous and pass complete layout validation, including configured working
-directories. Profile validation stops at the first error; checking only file existence is
+in the layouts directory independently of the profile file's location. For `profile check`
+and loading, every referenced layout must be unambiguous and pass complete layout validation,
+including configured working directories. Profile validation stops at the first error; checking only file existence is
 insufficient. Validation does not probe application executables or promise matching windows.
 
 Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at most
