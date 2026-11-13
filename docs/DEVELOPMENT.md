@@ -122,7 +122,7 @@ Both reuse ordinary hierarchy, sizing, selection, capture, preservation, and suc
 cleanup checks. Their requested split root leaves an ordinary split workspace after success;
 no layout reset or placeholder windows are used. Sway's
 [`layout` implementation](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c)
-updates the empty workspace directly; installed-version behavior still needs live acceptance.
+updates the empty workspace directly.
 
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
 commands. Expect twenty passes and three profile SKIPs for the standard two-workspace suite.
@@ -572,9 +572,10 @@ conditions and interference.
    an abort with all windows left in place and no focus restoration. Profiles must never move
    a workspace or assign an output. Record the Sway version and outputs tested.
 
-Live acceptance of the harness profile scenarios and these additional profile/hardware checks
-remains outstanding; offline fixtures do not establish live compositor compatibility or
-transactional isolation.
+The user has successfully run the complete extended harness, including all three profile
+scenarios, in their live Sway session. The additional manual variants above remain unverified;
+cross-monitor and interference runs provide optional further coverage. A successful run does
+not establish broader compositor compatibility or transactional isolation.
 
 ## Maintainer notes
 
