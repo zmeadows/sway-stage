@@ -667,3 +667,23 @@ fn profile_show_refuses_missing_ambiguous_and_malformed_profiles() {
         }
     }
 }
+
+#[test]
+fn profile_show_displays_only_configured_output_expectations() {
+    let fixture = CliFixture::new();
+    fixture.file(
+        "work.yaml",
+        &PROFILE
+            .replace(
+                "layout: development",
+                "layout: development\n    output: 'Display 1; $[]'",
+            )
+            .replace("workspace: 1", "workspace: music"),
+    );
+    let output = fixture.run(&["--profiles-dir", ".", "profile", "show", "work"], 0);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "work:\n  3 -> development (output: \"Display 1; $[]\")\n  \"music\" -> browser\n"
+    );
+    assert!(output.stderr.is_empty());
+}

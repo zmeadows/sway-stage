@@ -186,8 +186,10 @@ output for an empty or missing default directory. It does not use the layouts di
 
 `profile show NAME` validates only the profile structure and mappings, then prints `NAME:`
 and indented `TARGET -> LAYOUT` lines in YAML order. Numeric targets are unquoted; exact
-names are double-quoted, including names without spaces. It ignores the layouts directory,
-so missing or invalid referenced layouts remain inspectable. Use `profile check NAME` for
+names are double-quoted, including names without spaces. Entries with an output expectation
+append ` (output: "DP-4")`, using a quoted output name; entries without one keep the
+existing format. It ignores the layouts directory, so missing or invalid referenced layouts
+remain inspectable. Use `profile check NAME` for
 complete validation of all referenced layouts.
 
 For example, save this as `work.yaml` in the profiles directory, with the three named
@@ -198,6 +200,7 @@ version: 1
 workspaces:
   - workspace: 1
     layout: development
+    output: DP-4
   - workspace: music
     layout: monitoring
   - workspace: "music player"
@@ -205,7 +208,7 @@ workspaces:
 ```
 
 `version` must be the unquoted integer `1`. `workspaces` is a required sequence of 1 to
-256 mappings, each with exactly the required `workspace` and `layout` fields. Workspace
+256 mappings, each with required `workspace` and `layout` fields and optional `output`. Workspace
 targets must be unique. Unquoted positive integers from `1` to `999999999` select by
 numeric identity, including existing descriptive names such as `1:code`. YAML strings
 select by exact, case-sensitive name and require Sway's observed workspace number to be
@@ -221,6 +224,18 @@ spaces are invalid. Names equal to `number`, `next`, `prev`, `next_on_output`,
 case-insensitively. Quotes, escapes, command separators, variable references, controls,
 and other syntax are rejected. These constraints also apply to quoted YAML strings;
 quoting a reserved or unsafe name does not make it valid.
+
+`output`, when present, is an exact, case-sensitive Sway output name of 1 to 1024
+UTF-8 bytes without control characters. Spaces, punctuation, and Unicode are permitted;
+values are neither trimmed nor interpreted as commands or output descriptions. Null, empty
+values, and non-string YAML values are errors. Omit the field for no placement expectation;
+existing version 1 profiles remain valid. `profile check` validates this syntax offline
+without checking monitor availability. Capture does not add output expectations.
+
+Configure placement in Sway itself, for example with `workspace 1 output DP-4` in your
+Sway configuration (quote workspace/output names containing spaces as required by Sway).
+Use Sway's actual output names. Sway Stage only verifies placement; it never assigns
+outputs, moves workspaces, changes Sway configuration, or repairs a mismatch.
 
 Each `layout` is a name following the existing layout naming and discovery rules, resolved
 in the layouts directory independently of the profile file's location. For `profile check`
@@ -240,18 +255,27 @@ during construction. It preflights **all** configured targets before the first w
 selection. Every existing target must have no tiled or floating children, including empty
 structural containers. Missing targets are eligible for creation when selected; preflight
 never creates them. Duplicate workspace names, ambiguous numbers, inconsistent observations,
-or occupancy refuse the entire profile before switching or launching.
+or occupancy refuse the entire profile before switching or launching. For every configured
+`output`, an existing target must already reside on that exact output; a nonexistent
+target requires that output to be active in the observed Sway tree. A mismatch or unavailable
+output rejects the whole preflight, including when it affects a later entry.
 
 Entries execute in YAML order. Before each selection, loading rechecks focus, target identity,
 output, and emptiness, then selects the validated number or literal name with
-auto-back-and-forth disabled. Existing names such as `1: development` match by numeric
+auto-back-and-forth disabled. Configured output expectations are rechecked immediately
+before selection and immediately after selection or creation, before the layout loader
+starts. Existing names such as `1: development` match by numeric
 identity only when the configured target is an integer. Distinct named workspaces remain
 distinct even though they all report `num = -1`. Each successful selection
 requires observed focus, identity, emptiness, and event history to agree before the ordinary
 layout loader starts. Only the coordinator selects workspaces; each individual construction
 retains all loader ownership, matching, hierarchy, focus, and containing-output safeguards.
 Sway's existing workspace/output rules determine placement, including creation on an output;
-profiles do not assign outputs or move workspaces.
+profiles do not assign outputs or move workspaces. Availability cannot guarantee where
+Sway will create a nonexistent workspace: its actual output can only be verified after
+creation. A post-creation mismatch stops before launching that entry's layout. If earlier
+entries have completed, they remain intact under the same partial-failure behavior, with
+no rollback.
 
 Success leaves the final workspace focused. Any validation, selection, observation, or
 construction failure stops the profile without later entries, cleanup, rollback, or focus
@@ -304,7 +328,7 @@ Command inference reads process metadata separately and is best-effort; disable 
 For `profile capture work 1 3 music`, the generated files are `profiles/work.yaml` and
 `layouts/work-001.yaml`, `layouts/work-002.yaml`, `layouts/work-003.yaml`, under the configured
 directories. The version 1 profile references those ordinal layout names in order, with
-workspace targets `1`, `3`, and `music`. It contains no output assignments. Profile names
+workspace targets `1`, `3`, and `music`. It contains no output expectations. Profile names
 use the configuration-name grammar and are limited to 246 ASCII characters to leave room
 for `-NNN.yaml`. Existing filesystem component limits still apply.
 

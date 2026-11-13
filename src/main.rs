@@ -214,12 +214,16 @@ fn show_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<(), String>
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{name}:").map_err(|error| format!("stdout: {error}"))?;
     for entry in profile.workspaces {
-        writeln!(
+        write!(
             stdout,
             "  {} -> {}",
             entry.value.workspace, entry.value.layout
         )
         .map_err(|error| format!("stdout: {error}"))?;
+        if let Some(output) = entry.value.output {
+            write!(stdout, " (output: {output:?})").map_err(|error| format!("stdout: {error}"))?;
+        }
+        writeln!(stdout).map_err(|error| format!("stdout: {error}"))?;
     }
 
     Ok(())

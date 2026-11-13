@@ -1261,3 +1261,217 @@ fn unified_menu_profile_preflights_all_targets_before_any_selection() {
     let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
     assert!(log.contains("completed 0 workspaces"), "{log}");
 }
+
+#[test]
+fn output_expectations_accept_existing_and_created_numeric_and_named_targets() {
+    for missing in [false, true] {
+        for named in [false, true] {
+            let fixture = fixture();
+            let target = if named { "'music player'" } else { "3" };
+            fixture.file("work.yaml", &format!("version: 1\nworkspaces: [{{workspace: {target}, layout: first, output: fixture-output}}]\n"));
+            let mut initial = tree();
+            if missing {
+                initial["nodes"][0]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(1);
+            }
+            let mut selected = initial.clone();
+            if missing {
+                selected["nodes"][0]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(workspace(3, false));
+            }
+            selected = focus_workspace(&selected, 3);
+            let mut steps = vec![snapshot(&initial)];
+            steps.extend(selection_steps(&initial, &selected, 3, 90, missing));
+            steps.extend(construction_steps(&selected, 3, 20).0);
+            let steps = if named {
+                named_steps(steps, &[(3, "music player")])
+            } else {
+                steps
+            };
+            let output = run(&fixture, steps, true);
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("launches")).unwrap(),
+                "first\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn output_preflight_rejects_first_later_and_missing_targets_without_launching() {
+    for scenario in ["first", "later", "missing", "case", "scratchpad"] {
+        let fixture = fixture();
+        let target = if matches!(scenario, "first" | "case") {
+            3
+        } else {
+            1
+        };
+        let expected_output = match scenario {
+            "case" => "FIXTURE-OUTPUT",
+            "scratchpad" => "__i3",
+            _ => "other-output",
+        };
+        fixture.file("work.yaml", &format!("version: 1\nworkspaces: [{{workspace: 3, layout: first{}}}, {{workspace: 1, layout: second{}}}]\n",
+            if target == 3 { format!(", output: {expected_output}") } else { String::new() },
+            if target == 1 { format!(", output: {expected_output}") } else { String::new() }));
+        let mut initial = tree();
+        if scenario == "scratchpad" {
+            let mut internal_output = sway_node(4, "output", 100, vec![]);
+            internal_output["name"] = json!("__i3");
+            initial["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(internal_output);
+        }
+        if scenario == "later" {
+            initial["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(1, false));
+        }
+        let expected = if matches!(scenario, "first" | "later" | "case") {
+            "observed output"
+        } else {
+            "is not active"
+        };
+        let output = run(&fixture, vec![snapshot(&initial)], false);
+        assert_failure(&fixture, &output, expected, 0);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains(&format!("workspace {target}: expected output")),
+            "{error}"
+        );
+        assert!(
+            error.contains("Sway's workspace/output rules control placement"),
+            "{error}"
+        );
+        assert!(!fixture.path.join("launches").exists());
+    }
+}
+
+#[test]
+fn output_expectations_are_rechecked_before_selection_and_after_creation() {
+    for scenario in [
+        "before-existing",
+        "before-missing",
+        "created-wrong",
+        "later-created-wrong",
+    ] {
+        let fixture = fixture();
+        let later = scenario == "later-created-wrong";
+        fixture.file("work.yaml", if later {
+            "version: 1\nworkspaces: [{workspace: 3, layout: first}, {workspace: 1, layout: second, output: expected-output}]\n"
+        } else {
+            "version: 1\nworkspaces: [{workspace: 3, layout: first, output: expected-output}]\n"
+        });
+        let mut initial = tree();
+        let mut expected_display = sway_node(4, "output", 100, vec![]);
+        expected_display["name"] = json!("expected-output");
+        if scenario == "before-existing" {
+            let target = initial["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+            expected_display["nodes"] = json!([target]);
+        } else if !later {
+            initial["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+        }
+        initial["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(expected_display);
+        let mut steps = vec![snapshot(&initial)];
+        let mut before = initial.clone();
+        if later {
+            let selected = focus_workspace(&initial, 3);
+            steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+            let (construction, finished) = construction_steps(&selected, 3, 20);
+            steps.extend(construction);
+            before = finished;
+        }
+        if scenario == "before-existing" {
+            let target = before["nodes"][1]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .remove(0);
+            before["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(target);
+        } else if scenario == "before-missing" {
+            before["nodes"].as_array_mut().unwrap().pop();
+        }
+        if scenario.starts_with("before-") {
+            steps.push(snapshot(&before));
+        } else {
+            let target_number = if later { 1 } else { 3 };
+            let mut after = before.clone();
+            after["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(target_number, false));
+            after = focus_workspace(&after, target_number);
+            steps.extend(selection_steps(
+                &before,
+                &after,
+                target_number,
+                if later { 3 } else { 90 },
+                true,
+            ));
+        }
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "expected output", usize::from(later));
+        if later {
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("launches")).unwrap(),
+                "first\n"
+            );
+        } else {
+            assert!(!fixture.path.join("launches").exists());
+        }
+    }
+}
+
+#[test]
+fn configured_outputs_preserve_loader_migration_and_history_guards() {
+    for scenario in ["output-identity", "move-away-back", "focus-away-back"] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: 3, layout: first, output: fixture-output}]\n",
+        );
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+        let mut changed = snapshot(&selected);
+        if let Step::Snapshot { tree, events, .. } = &mut changed {
+            match scenario {
+                "output-identity" => tree["nodes"][0]["id"] = json!(44),
+                "move-away-back" => {
+                    for _ in 0..2 {
+                        events.push((
+                            WORKSPACE_EVENT,
+                            json!({"change": "move", "current": workspace(3, true), "old": null}),
+                        ));
+                    }
+                }
+                _ => events.extend([focus_event(90, 3), focus_event(3, 90)]),
+            }
+        }
+        // The loader freezes its own initial snapshot, then checks again before launch.
+        steps.push(snapshot(&selected));
+        steps.push(changed);
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "layout construction", 0);
+        assert!(!fixture.path.join("launches").exists());
+    }
+}

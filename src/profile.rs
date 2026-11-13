@@ -16,6 +16,7 @@ const MAX_WORKSPACE_NUMBER: u64 = 999_999_999;
 // A single quoted Sway argument preserves spaces. This allowlist deliberately excludes
 // quoting, separators, escapes, and variable syntax; it is not a general command encoder.
 const MAX_WORKSPACE_NAME_BYTES: usize = 128;
+const MAX_OUTPUT_NAME_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(
@@ -115,6 +116,15 @@ pub struct Profile {
 pub struct WorkspaceLayout {
     pub workspace: WorkspaceTarget,
     pub layout: String,
+    #[serde(default, deserialize_with = "deserialize_output_name")]
+    pub output: Option<String>,
+}
+
+// Missing expectations are optional; explicit null and non-string values are errors.
+fn deserialize_output_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug)]
@@ -125,6 +135,7 @@ pub struct PreparedProfile {
 #[derive(Debug)]
 pub struct PreparedWorkspace {
     pub workspace: WorkspaceTarget,
+    pub output: Option<String>,
     pub layout_name: String,
     pub layout_path: PathBuf,
     pub config: config::Config,
@@ -176,6 +187,7 @@ pub fn read_named(
             .map_err(|error| format!("{context}: invalid layout {layout_name:?}: {error}"))?;
         workspaces.push(PreparedWorkspace {
             workspace: entry.value.workspace.clone(),
+            output: entry.value.output.clone(),
             layout_name: layout_name.clone(),
             layout_path: layout_path.clone(),
             config,
@@ -207,6 +219,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
     for entry in &prepared.workspaces {
         diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &[]);
         empty_target(&initial, &entry.workspace)?;
+        verify_output(&initial, &entry.workspace, entry.output.as_deref())?;
     }
 
     let mut previous_snapshot = initial;
@@ -218,6 +231,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
             &mut observer,
             &socket_path,
             &entry.workspace,
+            entry.output.as_deref(),
             &previous_snapshot,
             diagnostics,
         )
@@ -261,6 +275,7 @@ fn select_workspace(
     observer: &mut Observer,
     socket_path: &Path,
     target: &WorkspaceTarget,
+    expected_output: Option<&str>,
     previous_snapshot: &WorkspaceSnapshot,
     diagnostics: &mut Diagnostics,
 ) -> Result<WorkspaceIdentity, String> {
@@ -277,6 +292,7 @@ fn select_workspace(
         return Err("unexpected focused workspace or containing output before selection".into());
     }
 
+    verify_output(&before, target, expected_output)?;
     let target_before = empty_target(&before, target)?;
     if target_before != expected_target {
         return Err(format!(
@@ -308,6 +324,7 @@ fn select_workspace(
             selected.number, selected.name, target
         ));
     }
+    verify_output(&after, target, expected_output)?;
     if empty_target(&after, target)?.as_ref() != Some(&selected)
         || target_before
             .as_ref()
@@ -445,6 +462,45 @@ fn empty_target(
         name: workspace.name.clone(),
         output_id: output.id,
     }))
+}
+
+/// Tree outputs represent active outputs; the internal scratchpad output is not a display.
+/// Names are compared as data only and never enter a Sway command.
+fn verify_output(
+    snapshot: &WorkspaceSnapshot,
+    target: &WorkspaceTarget,
+    expected_output: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected_output) = expected_output else {
+        return Ok(());
+    };
+    let placement_help = "Sway's workspace/output rules control placement; configure those rules before loading (Sway Stage never assigns outputs or moves workspaces)";
+
+    if let Some(workspace) = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| target.matches(workspace.num, &workspace.name))
+    {
+        if workspace.output != expected_output {
+            return Err(format!(
+                "workspace {target}: expected output {expected_output:?}, observed output {:?}; {placement_help}",
+                workspace.output
+            ));
+        }
+    } else {
+        let output_available = snapshot.tree.nodes.iter().any(|output| {
+            output.node_type == NodeType::Output
+                && output.name.as_deref() != Some("__i3")
+                && output.name.as_deref() == Some(expected_output)
+        });
+        if !output_available {
+            return Err(format!(
+                "workspace {target}: expected output {expected_output:?} is not active; workspace does not yet exist; {placement_help}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), String> {
@@ -716,6 +772,19 @@ fn parse(input: &str) -> Result<Profile, String> {
             )
         };
 
+        if let Some(output) = &entry.value.output
+            && (output.is_empty()
+                || output.len() > MAX_OUTPUT_NAME_BYTES
+                || output.chars().any(char::is_control))
+        {
+            return Err(fail(
+                "output",
+                &format!(
+                    "expected an exact output name of 1 to {MAX_OUTPUT_NAME_BYTES} UTF-8 bytes without control characters"
+                ),
+            ));
+        }
+
         let target = &entry.value.workspace;
         target
             .validate()
@@ -774,6 +843,65 @@ mod tests {
         );
         parse(&PROFILE.replace("browser", "development")).unwrap();
         parse("version: 1\nworkspaces: [{workspace: 999999999, layout: '123'}]").unwrap();
+    }
+
+    #[test]
+    fn output_expectations_are_optional_exact_strings_with_bounded_length() {
+        assert!(parse(PROFILE).unwrap().workspaces[0].value.output.is_none());
+        for output in [
+            "DP-4",
+            "HDMI-A-1",
+            "Display with spaces; punctuation \"$[]",
+            "é",
+            &"a".repeat(MAX_OUTPUT_NAME_BYTES),
+        ] {
+            let scalar = serde_json::to_string(output)
+                .unwrap()
+                .replace('\u{7f}', "\\u007f");
+            let input = PROFILE.replace(
+                "layout: development",
+                &format!("layout: development\n    output: {scalar}"),
+            );
+            assert_eq!(
+                parse(&input).unwrap().workspaces[0].value.output.as_deref(),
+                Some(output)
+            );
+        }
+        for output in [
+            "",
+            "DP-4\n",
+            "DP\t4",
+            "DP\0",
+            "DP\u{7f}",
+            &"a".repeat(MAX_OUTPUT_NAME_BYTES + 1),
+        ] {
+            let scalar = serde_json::to_string(output)
+                .unwrap()
+                .replace('\u{7f}', "\\u007f");
+            rejects(
+                &PROFILE.replace(
+                    "layout: development",
+                    &format!("layout: development\n    output: {scalar}"),
+                ),
+                "workspaces[0].output",
+            );
+        }
+        for scalar in ["null", "~", "", "1", "true", "[]", "{}", "1.5"] {
+            rejects(
+                &PROFILE.replace(
+                    "layout: development",
+                    &format!("layout: development\n    output: {scalar}"),
+                ),
+                "workspaces[0].output",
+            );
+        }
+        rejects(
+            &PROFILE.replace(
+                "layout: development",
+                "layout: development\n    output: DP-4\n    output: DP-4",
+            ),
+            "duplicate",
+        );
     }
 
     #[test]
@@ -1034,7 +1162,11 @@ mod tests {
         let layouts_dir = directory.join("layouts");
         fs::create_dir(&layouts_dir).unwrap();
         let profile_path = directory.join("work.yaml");
-        fs::write(&profile_path, PROFILE).unwrap();
+        fs::write(
+            &profile_path,
+            PROFILE.replace("layout: browser", "layout: browser\n    output: DP-4"),
+        )
+        .unwrap();
         fs::write(
             layouts_dir.join("development.yaml"),
             "version: 1\nlayout: {id: t, command: [not-installed], match: {app_id: t}}\n",
@@ -1072,6 +1204,7 @@ mod tests {
         assert_eq!(prepared.workspaces[0].workspace, WorkspaceTarget::Number(3));
         assert_eq!(prepared.workspaces[1].workspace, WorkspaceTarget::Number(1));
         assert_eq!(prepared.workspaces[1].layout_name, "browser");
+        assert_eq!(prepared.workspaces[1].output.as_deref(), Some("DP-4"));
         assert_eq!(
             prepared.workspaces[1].layout_path,
             layouts_dir.join("browser.yml")
