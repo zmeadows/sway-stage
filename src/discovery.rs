@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct LayoutDirectory {
     pub path: PathBuf,
@@ -45,34 +45,7 @@ impl LayoutDirectory {
     }
 
     pub fn discover(&self) -> Result<Discovery, String> {
-        let entries = match fs::read_dir(&self.path) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !self.is_explicit => {
-                return Ok(Discovery::default());
-            }
-            Err(error) => return Err(format!("read directory {}: {error}", self.path.display())),
-        };
-
-        // Sort eligible paths so filename diagnostics do not depend on enumeration order.
-        let mut layout_paths = Vec::new();
-        for entry in entries {
-            let entry = entry
-                .map_err(|error| format!("read directory {}: {error}", self.path.display()))?;
-            let path = entry.path();
-            let filename = entry.file_name();
-            let filename_bytes = filename.as_encoded_bytes();
-            if !filename_bytes.ends_with(b".yaml") && !filename_bytes.ends_with(b".yml") {
-                continue;
-            }
-
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("inspect {}: {error}", path.display()))?;
-            if file_type.is_file() {
-                layout_paths.push(path);
-            }
-        }
-        layout_paths.sort();
+        let layout_paths = yaml_paths(&self.path, !self.is_explicit)?;
 
         let mut discovery = Discovery::default();
         let mut paths_by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
@@ -109,8 +82,42 @@ impl LayoutDirectory {
     }
 }
 
-/// XDG configuration base containing the default layouts directory.
-fn config_home() -> Result<PathBuf, String> {
+/// Immediate regular YAML files in deterministic order; never follows file symlinks.
+pub(crate) fn yaml_paths(directory: &Path, missing_is_empty: bool) -> Result<Vec<PathBuf>, String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && missing_is_empty => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(format!("read directory {}: {error}", directory.display())),
+    };
+
+    // Sort eligible paths so filename diagnostics do not depend on enumeration order.
+    let mut yaml_paths = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("read directory {}: {error}", directory.display()))?;
+        let path = entry.path();
+        let filename = entry.file_name();
+        let filename_bytes = filename.as_encoded_bytes();
+        if !filename_bytes.ends_with(b".yaml") && !filename_bytes.ends_with(b".yml") {
+            continue;
+        }
+
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect {}: {error}", path.display()))?;
+        if file_type.is_file() {
+            yaml_paths.push(path);
+        }
+    }
+    yaml_paths.sort();
+
+    Ok(yaml_paths)
+}
+
+/// XDG configuration base containing layout and profile directories.
+pub(crate) fn config_home() -> Result<PathBuf, String> {
     if let Some(xdg) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         let path = PathBuf::from(xdg);
         if !path.is_absolute() {

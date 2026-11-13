@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const MAX_INPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_INPUT_BYTES: usize = 1024 * 1024;
 // Capture enforces the same structural limits, so a filled-in draft remains loadable.
 pub const MAX_LAYOUT_DEPTH: usize = 32;
 pub const MAX_LAYOUT_NODES: usize = 256;
@@ -233,7 +233,9 @@ fn non_null_match<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<M
 
 // Direct numeric deserialization accepts quoted numbers in this parser. Serde's
 // untagged buffering uses YAML scalar types and rejects those strings instead.
-fn unquoted_integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+pub(crate) fn unquoted_integer<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged, expecting = "a nonnegative YAML integer (not a string)")]
     enum Integer {
@@ -264,13 +266,19 @@ fn unquoted_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D:
 }
 
 pub fn read(path: &Path) -> Result<Config, String> {
+    let input = read_yaml(path, "layout")?;
+    parse(&input).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Read a bounded UTF-8 document for either a layout or a profile.
+pub(crate) fn read_yaml(path: &Path, file_kind: &str) -> Result<String, String> {
     let file = File::open(path).map_err(|error| format!("{}: open: {error}", path.display()))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("{}: inspect: {error}", path.display()))?;
     if !metadata.is_file() {
         return Err(format!(
-            "{}: expected a regular layout file",
+            "{}: expected a regular {file_kind} file",
             path.display()
         ));
     }
@@ -284,18 +292,13 @@ pub fn read(path: &Path) -> Result<Config, String> {
         return Err(format!("{}: input exceeds the 1 MiB limit", path.display()));
     }
 
-    let input = std::str::from_utf8(&input_bytes)
-        .map_err(|error| format!("{}: expected UTF-8 YAML: {error}", path.display()))?;
-    parse(input).map_err(|error| format!("{}: {error}", path.display()))
+    String::from_utf8(input_bytes)
+        .map_err(|error| format!("{}: expected UTF-8 YAML: {error}", path.display()))
 }
 
-/// Parses and validates one layout document.
-pub(crate) fn parse(input: &str) -> Result<Config, String> {
-    if input.len() > MAX_INPUT_BYTES {
-        return Err("input exceeds the 1 MiB limit".into());
-    }
-
-    let options = serde_saphyr::options! {
+/// Keep layout and profile parsing equally strict and resource bounded.
+pub(crate) fn yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
         merge_keys: serde_saphyr::MergeKeyPolicy::Error,
         reject_unsupported_tags: true,
@@ -315,7 +318,16 @@ pub(crate) fn parse(input: &str) -> Result<Config, String> {
             max_nodes: MAX_INPUT_BYTES,
             max_total_scalar_bytes: MAX_INPUT_BYTES,
         },
-    };
+    }
+}
+
+/// Parses and validates one layout document.
+pub(crate) fn parse(input: &str) -> Result<Config, String> {
+    if input.len() > MAX_INPUT_BYTES {
+        return Err("input exceeds the 1 MiB limit".into());
+    }
+
+    let options = yaml_options();
     let mut field_path = String::new();
     let mut config: Config =
         serde_saphyr::with_deserializer_from_str_with_options(input, options, |deserializer| {

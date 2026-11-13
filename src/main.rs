@@ -6,6 +6,8 @@ mod discovery;
 mod launch;
 mod menu;
 mod observation;
+#[cfg(test)]
+mod profile;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use diagnostics::Diagnostics;

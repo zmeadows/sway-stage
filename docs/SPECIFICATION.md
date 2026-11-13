@@ -156,6 +156,46 @@ Errors include the filename, node/field path, and line/column where available.
 String fields require quotes around numeric/boolean scalars; numeric fields reject quoted
 numbers. Explicit nulls never trigger optional defaults.
 
+## Named profiles, version 1
+
+A profile is a named YAML file containing an ordered sequence of workspace-to-layout
+mappings. Profiles use a separate directory, `$XDG_CONFIG_HOME/sway-stage/profiles`, falling
+back to `$HOME/.config/sway-stage/profiles` when XDG_CONFIG_HOME is unset or empty.
+The same absolute default-base requirements and immediate regular `.yaml`/`.yml` file
+rules as layout discovery apply. Profile names use `[A-Za-z0-9][A-Za-z0-9_-]*`, without an
+extension. Duplicate stems are ambiguous; unrelated invalid or ambiguous filenames do not
+prevent checking a valid name. Discovery never creates directories.
+
+```yaml
+version: 1
+workspaces:
+  - workspace: 1
+    layout: development
+  - workspace: 2
+    layout: browser
+  - workspace: 3
+    layout: monitoring
+```
+
+`version` must be the unquoted integer `1`. `workspaces` is a required sequence of 1 to
+256 mappings, each with exactly the required `workspace` and `layout` fields. Workspace
+numbers must be unique unquoted positive integers from `1` to `999999999`. Entry order is
+preserved, even when workspace numbers are out of numerical order. Different workspaces
+may reference the same layout.
+
+Each `layout` is a name following the existing layout naming and discovery rules, resolved
+in the layouts directory independently of the profile file's location. Every referenced
+layout must be unambiguous and pass complete layout validation, including configured working
+directories. Profile validation stops at the first error; checking only file existence is
+insufficient. Validation does not probe application executables or promise matching windows.
+
+Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at most
+1 MiB, no unknown fields, duplicate keys, aliases, merge keys, or custom tags, and no scalar
+coercion. Parser resource limits also apply. Errors identify the profile file and entry/field
+path, with line/column where available; invalid layout errors retain the referenced file's
+diagnostics. Workspace numbers only describe configuration in this phase; profile loading,
+workspace switching, capture, and menu integration are not implemented.
+
 ## Loading, sizing, and safety
 
 Layouts describe new applications in ordered split, tabbed, and stacked groups. There is no
