@@ -20,7 +20,7 @@ use std::process::ExitCode;
 #[command(
     version,
     about = "Validate, construct, and capture nested Sway layouts",
-    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses one Fuzzel selector to load layouts or profiles, or save captures as NAME.yaml in the layouts directory; edit the saved draft and run check before loading it."
+    after_help = "Load applies sibling weights and final focus on the focused empty workspace. Sizing aims within 1 percentage point and warns beyond 5, after at most three passes per split. Capture automatically infers best-effort launch commands that may contain sensitive arguments; --no-infer-commands leaves commands null. Review inferred commands before use or sharing, and fill remaining placeholders before checking or loading a draft. Menu uses one Fuzzel selector to load layouts or profiles, or save workspace drafts and multi-workspace profiles; edit the saved draft and run check before loading it."
 )]
 struct Cli {
     /// Read layouts and save captures in PATH instead of the XDG configuration directory
@@ -61,7 +61,7 @@ enum CliCommand {
         #[arg(long)]
         no_infer_commands: bool,
     },
-    /// Use one Fuzzel menu to load layouts or profiles, or capture the current workspace
+    /// Use one Fuzzel menu to load layouts or profiles, or capture a workspace or profile
     Menu {
         /// Disable automatic launch-command inference for captures; leave commands as null
         #[arg(long)]
@@ -373,6 +373,13 @@ fn menu(
             profile::read_named(&name, profiles_dir.clone(), layouts_dir.clone())
                 .map_err(|error| report_menu_failure(menu::invalid_profile(&name, Some(error))))?;
             return load_profile(&name, profiles_dir, layouts_dir);
+        }
+        menu::MenuAction::CaptureProfile => {
+            let snapshot = snapshot
+                .as_ref()
+                .expect("profile capture requires a saved snapshot");
+            return menu::capture_profile(snapshot, layouts_dir, profiles_dir, infer_commands)
+                .map_err(report_menu_failure);
         }
         menu::MenuAction::Capture => {
             let snapshot = snapshot

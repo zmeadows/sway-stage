@@ -33,7 +33,7 @@ done
 test "$keep_open" = 1 || exit 95
 printf '%s\n' "$output" >> "$MENU_DIRECTORY/outputs"
 case "$prompt" in
-  '--prompt-only=Capture layout as: ')
+  '--prompt-only=Capture layout as: '|'--prompt-only=Capture profile as: ')
     test "$width" = 80 || exit 96
     test "$no_sort" = 0 || exit 96
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
@@ -1934,5 +1934,259 @@ fn capture_selection_with_profiles_preserves_inference_flag_and_original_snapsho
         );
         assert!(saved.contains("app_id: editor"));
         assert_log_preserved(&fixture);
+    }
+}
+
+// Realistic ordinary workspace identities are required by profile capture. The older
+// single-workspace fixtures deliberately omit these unrelated selection fields.
+fn profile_capture_tree(focused_empty: bool) -> Value {
+    let mut tree = capture_tree();
+    let workspace = &mut tree["nodes"][0]["nodes"][0];
+    workspace["name"] = json!("3:work");
+    workspace["num"] = json!(3);
+    workspace["focus"] = json!([20]);
+    let mut named = workspace.clone();
+    named["id"] = json!(30);
+    named["name"] = json!("music player");
+    named["num"] = json!(-1);
+    named["focus"] = json!([40]);
+    named["nodes"][0]["id"] = json!(40);
+    named["nodes"][0]["focused"] = json!(false);
+    tree["nodes"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(named);
+    if focused_empty {
+        tree["nodes"][0]["nodes"][0]["nodes"][0]["focused"] = json!(false);
+        let mut empty = sway_node(50, "workspace", 1920, vec![]);
+        empty["name"] = json!("1");
+        empty["num"] = json!(1);
+        empty["focused"] = json!(true);
+        tree["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(empty);
+    }
+    tree
+}
+
+#[test]
+fn profile_capture_eligibility_keeps_flat_order_and_independent_loading_choices() {
+    for focused_empty in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fixture.file("shared.yaml", SINGLE_WINDOW_YAML);
+        add_menu_profile(&fixture, "work.yaml", MENU_PROFILE);
+        let output = run_with_recorded_snapshot(
+            &fixture,
+            menu_command(&fixture, "", "")
+                .env("MENU_STATUS", "2")
+                .args(["--layouts-dir", ".", "--profiles-dir", "profiles", "menu"]),
+            profile_capture_tree(focused_empty),
+        );
+        assert!(output.status.success(), "{output:?}");
+        let options = fs::read_to_string(fixture.path.join("options")).unwrap();
+        assert_eq!(
+            options,
+            if focused_empty {
+                "Capture all populated workspaces…\nLayout: shared\nProfile: work\n"
+            } else {
+                "Capture current workspace…\nCapture all populated workspaces…\nProfile: work\n"
+            }
+        );
+        assert!(!fixture.path.join("notification").exists());
+    }
+}
+
+#[test]
+fn profile_capture_reuses_snapshot_orders_targets_and_respects_inference_and_directories() {
+    for infer_commands in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        let mut process = menu_command(&fixture, "1\n", "work\n");
+        process.args(["--layouts-dir", "drafts", "--profiles-dir", "saved", "menu"]);
+        if !infer_commands {
+            process.arg("--no-infer-commands");
+        }
+        // serve_capture accepts exactly one GET_TREE and closes its listener. Any
+        // post-menu snapshot query therefore fails instead of supplying another tree.
+        let output =
+            run_with_recorded_snapshot(&fixture, &mut process, profile_capture_tree(false));
+        assert!(output.status.success(), "{output:?}");
+        let profile: Value = serde_saphyr::from_str(
+            &fs::read_to_string(fixture.path.join("saved/work.yaml")).unwrap(),
+        )
+        .unwrap();
+        for (index, target) in [json!(3), json!("music player")].iter().enumerate() {
+            let layout_name = format!("work-{:03}", index + 1);
+            assert_eq!(profile["workspaces"][index]["workspace"], *target);
+            assert_eq!(profile["workspaces"][index]["layout"], layout_name);
+            let draft: Value = serde_saphyr::from_str(
+                &fs::read_to_string(fixture.path.join(format!("drafts/{layout_name}.yaml")))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(draft["layout"]["command"].is_array(), infer_commands);
+            assert_eq!(draft["layout"]["match"]["app_id"], "editor");
+        }
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(notification.contains("Saved profile 'work' (2 workspaces)."));
+        assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
+        assert!(!fixture.path.join(".config").exists());
+    }
+}
+
+#[test]
+fn profile_capture_retries_only_invalid_names_and_preflight_conflicts() {
+    for conflict in ["profiles/taken.yml", "layouts/taken-002.yml"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        fs::create_dir(fixture.path.join("profiles")).unwrap();
+        fs::create_dir(fixture.path.join("layouts")).unwrap();
+        fixture.file(conflict, "original");
+        fixture.file("name-2", &format!("{}\n", "a".repeat(247)));
+        fixture.file("name-3", "taken\n");
+        fixture.file("name-4", "saved\n");
+        let output = run_with_recorded_snapshot(
+            &fixture,
+            menu_command(&fixture, "1\n", "bad.name\n").args([
+                "--layouts-dir",
+                "layouts",
+                "--profiles-dir",
+                "profiles",
+                "menu",
+            ]),
+            profile_capture_tree(false),
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join(conflict)).unwrap(),
+            "original"
+        );
+        assert!(fixture.path.join("profiles/saved.yaml").exists());
+        assert!(!fixture.path.join("layouts/taken-001.yaml").exists());
+        let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
+        assert_eq!(
+            arguments
+                .matches("--prompt-only=Capture profile as: ")
+                .count(),
+            4
+        );
+        assert!(arguments.contains("at most 246"));
+        assert!(arguments.contains("already exists — enter another name"));
+    }
+}
+
+#[test]
+fn profile_capture_cancellation_preserves_files_log_and_notifications() {
+    for cancel_selector in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        let mut process = menu_command(&fixture, if cancel_selector { "" } else { "1\n" }, "");
+        process.args([
+            "--layouts-dir",
+            "layouts",
+            "--profiles-dir",
+            "profiles",
+            "menu",
+        ]);
+        process.env(
+            if cancel_selector {
+                "MENU_STATUS"
+            } else {
+                "NAME_STATUS"
+            },
+            "2",
+        );
+        let output =
+            run_with_recorded_snapshot(&fixture, &mut process, profile_capture_tree(false));
+        assert!(output.status.success(), "{output:?}");
+        assert!(!fixture.path.join("layouts").exists());
+        assert!(!fixture.path.join("profiles").exists());
+        assert!(!fixture.path.join("notification").exists());
+    }
+}
+
+#[test]
+fn unsupported_profile_capture_keeps_unrelated_actions_and_never_skips_workspaces() {
+    for invalid in ["floating", "identity"] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        add_menu_profile(&fixture, "work.yaml", MENU_PROFILE);
+        let mut tree = profile_capture_tree(false);
+        let named = &mut tree["nodes"][0]["nodes"][1];
+        if invalid == "floating" {
+            named["floating_nodes"] = named["nodes"].take();
+            named["nodes"] = json!([]);
+        } else {
+            named["num"] = Value::Null;
+        }
+        let output = run_with_recorded_snapshot(
+            &fixture,
+            menu_command(&fixture, "", "")
+                .env("MENU_STATUS", "2")
+                .args(["--profiles-dir", "profiles", "menu"]),
+            tree,
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("options")).unwrap(),
+            "Capture current workspace…\n[invalid] Profile: work\n"
+        );
+        assert!(!fixture.path.join("name-opened").exists());
+        assert!(!fixture.path.join("notification").exists());
+    }
+}
+
+#[test]
+fn profile_capture_operational_errors_stop_and_notification_errors_remain_secondary() {
+    for fail_publication in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        if fail_publication {
+            fs::create_dir(fixture.path.join("profiles")).unwrap();
+            fs::set_permissions(
+                fixture.path.join("profiles"),
+                fs::Permissions::from_mode(0o500),
+            )
+            .unwrap();
+        }
+        let output = run_with_recorded_snapshot(
+            &fixture,
+            menu_command(&fixture, "1\n", "work\n")
+                .env("NOTIFY_STATUS", "1")
+                .args([
+                    "--layouts-dir",
+                    "layouts",
+                    "--profiles-dir",
+                    "profiles",
+                    "menu",
+                ]),
+            profile_capture_tree(false),
+        );
+        if fail_publication {
+            fs::set_permissions(
+                fixture.path.join("profiles"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        assert_eq!(output.status.success(), !fail_publication, "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("notification unavailable"), "{stderr}");
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
+        assert_eq!(notification.contains("Saved profile"), !fail_publication);
+        if fail_publication {
+            assert!(stderr.contains("no configuration published"), "{stderr}");
+            assert!(stderr.contains("staging files may remain"), "{stderr}");
+            assert!(!fixture.path.join("layouts/work-001.yaml").exists());
+            assert!(fs::read_dir(fixture.path.join("layouts")).unwrap().count() > 0);
+            assert!(!fixture.path.join("profiles/work.yaml").exists());
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("name-attempt")).unwrap(),
+                "1\n"
+            );
+        }
     }
 }

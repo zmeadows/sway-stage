@@ -4,7 +4,7 @@
 use crate::draft_file::{DraftSaveError, save_draft};
 #[cfg(test)]
 use crate::draft_file::{publish_draft, reject_existing_layout, validate_draft_name};
-use crate::{capture, config, diagnostics, discovery, profile};
+use crate::{capture, config, diagnostics, discovery, profile, profile_capture};
 use std::fs;
 #[cfg(test)]
 use std::fs::{File, OpenOptions};
@@ -32,6 +32,7 @@ pub enum FailureKind {
     NoValidLayouts,
     InvalidLayout(String),
     Capture,
+    ProfileCapture,
     FuzzelStart,
     FuzzelResponse,
     DraftSave,
@@ -50,6 +51,7 @@ impl Error {
 #[derive(Debug)]
 pub enum MenuAction {
     Capture,
+    CaptureProfile,
     Layout(String),
     Profile(String),
 }
@@ -93,6 +95,24 @@ pub fn select_action(
             FailureKind::Snapshot,
             format!("pre-menu workspace snapshot: {error}"),
         )),
+    }
+
+    if let Ok(snapshot) = snapshot {
+        match profile_capture::prepare(snapshot, &[], true, false) {
+            Ok(_) => {
+                let profile_capture_index =
+                    if matches!(choices.first(), Some((MenuAction::Capture, _))) {
+                        1
+                    } else {
+                        0
+                    };
+                choices.insert(profile_capture_index, (MenuAction::CaptureProfile, true));
+            }
+            Err(error) => unavailable.push(Error::new(
+                FailureKind::ProfileCapture,
+                format!("profile capture unavailable: {error}"),
+            )),
+        }
     }
 
     match profile::discover_names(profiles_dir.clone()) {
@@ -146,6 +166,7 @@ pub fn select_action(
         }
         match action {
             MenuAction::Capture => input.push_str("Capture current workspace…"),
+            MenuAction::CaptureProfile => input.push_str("Capture all populated workspaces…"),
             MenuAction::Layout(name) => input.push_str(&format!("Layout: {name}")),
             MenuAction::Profile(name) => input.push_str(&format!("Profile: {name}")),
         }
@@ -177,7 +198,7 @@ pub fn select_action(
         return Err(match action {
             MenuAction::Layout(name) => invalid_layout(&name, None),
             MenuAction::Profile(name) => invalid_profile(&name, None),
-            MenuAction::Capture => {
+            MenuAction::Capture | MenuAction::CaptureProfile => {
                 unreachable!("capture eligibility is validated before selection")
             }
         });
@@ -338,6 +359,47 @@ pub fn capture_draft(
                 placeholder = Some(name_error_placeholder(&name, &error));
             }
             Err(error) => return Err(Error::new(FailureKind::DraftSave, error.to_string())),
+        }
+    }
+}
+
+/// Prepare once from the saved tree; name retries never repeat inference or IPC.
+pub fn capture_profile(
+    snapshot: &capture::Snapshot,
+    layouts_dir: Option<PathBuf>,
+    profiles_dir: Option<PathBuf>,
+    infer_commands: bool,
+) -> Result<(), Error> {
+    let profile_error = |error| Error::new(FailureKind::ProfileCapture, error);
+    let prepared =
+        profile_capture::prepare(snapshot, &[], true, infer_commands).map_err(profile_error)?;
+    let layouts_directory =
+        discovery::LayoutDirectory::resolve(layouts_dir).map_err(profile_error)?;
+    let (profiles_directory, _) =
+        profile::profile_directory(profiles_dir).map_err(profile_error)?;
+
+    let mut placeholder = None;
+    loop {
+        let Some(name) = fuzzel(
+            "--prompt-only=Capture profile as: ",
+            None,
+            snapshot.output_name(),
+            placeholder.as_deref(),
+            false,
+        )?
+        else {
+            return Ok(());
+        };
+
+        match prepared.save(&name, &layouts_directory.path, &profiles_directory) {
+            Ok(()) => {
+                diagnostics::notify_profile_saved(&name, prepared.workspace_count());
+                return Ok(());
+            }
+            Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {
+                placeholder = Some(name_error_placeholder(&name, &error));
+            }
+            Err(error) => return Err(profile_error(error.to_string())),
         }
     }
 }

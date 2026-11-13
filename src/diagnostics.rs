@@ -246,6 +246,9 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::Capture => {
             "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus."
         }
+        FailureKind::ProfileCapture => {
+            "Could not capture the profile. Check workspace arrangements, destination directories, and terminal output for retained files."
+        }
         FailureKind::FuzzelStart => {
             "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable."
         }
@@ -359,6 +362,16 @@ pub fn notify_draft_saved(name: &str) {
         "normal",
         "sway-stage draft saved",
         &format!("Saved draft '{name}'."),
+    )
+    .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
+}
+
+/// Confirm only a fully published profile, using the bounded notification helper.
+pub fn notify_profile_saved(name: &str, workspace_count: usize) {
+    let _ = notify(
+        "normal",
+        "sway-stage profile saved",
+        &format!("Saved profile '{name}' ({workspace_count} workspaces)."),
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
 }
@@ -614,6 +627,7 @@ mod tests {
             FailureKind::NoLayouts,
             FailureKind::NoValidLayouts,
             FailureKind::Capture,
+            FailureKind::ProfileCapture,
             FailureKind::FuzzelStart,
             FailureKind::FuzzelResponse,
             FailureKind::DraftSave,

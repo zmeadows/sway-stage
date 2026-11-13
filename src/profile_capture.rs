@@ -1,13 +1,14 @@
 //! One frozen Sway observation, complete in-memory drafts, then profile-last publication.
 
-use crate::capture::{self, CommandCounts};
+use crate::capture::{self, CommandCounts, RenderedDraft, Snapshot};
+use crate::draft_file::DraftSaveError;
 use crate::profile::{self, MAX_WORKSPACES, WorkspaceTarget};
 use crate::{discovery, draft_file};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Leave room for -NNN.yaml within Linux's usual 255-byte filename component.
 const MAX_PROFILE_NAME_BYTES: usize = 246;
@@ -87,73 +88,116 @@ pub fn capture(
     let (profiles_directory, _) = profile::profile_directory(profiles_dir)?;
 
     let snapshot = capture::snapshot().map_err(|error| format!("snapshot: {error}"))?;
+    let prepared = prepare(&snapshot, &targets, all, infer_commands)?;
+    prepared
+        .save(name, &layouts_directory, &profiles_directory)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Complete rendered layouts retained across interactive name retries.
+pub struct PreparedCapture {
+    drafts: Vec<(WorkspaceTarget, RenderedDraft)>,
+    commands: CommandCounts,
+}
+
+pub fn prepare(
+    snapshot: &Snapshot,
+    targets: &[WorkspaceTarget],
+    all: bool,
+    infer_commands: bool,
+) -> Result<PreparedCapture, String> {
     let selected = snapshot
-        .select_workspaces(&targets, all)
+        .select_workspaces(targets, all)
         .map_err(|error| format!("selection: {error}"))?;
-    let mut files = Vec::new();
-    let mut entries = Vec::new();
+    let mut drafts = Vec::new();
     let mut commands = CommandCounts {
         total: 0,
         inferred: 0,
         inference_requested: infer_commands,
     };
-    for (workspace_index, (target, workspace_id)) in selected.into_iter().enumerate() {
+    for (target, workspace_id) in selected {
         let draft = snapshot
             .render_workspace(workspace_id, infer_commands)
             .map_err(|error| format!("render workspace {target}: {error}"))?;
         commands.total += draft.commands.total;
         commands.inferred += draft.commands.inferred;
-        let layout_name = format!("{name}-{:03}", workspace_index + 1);
-        files.push(DraftFile {
-            destination: layouts_directory.join(format!("{layout_name}.yaml")),
-            yaml: draft.yaml,
-        });
-        entries.push(DraftEntry {
-            workspace: target,
-            layout: layout_name,
-        });
+        drafts.push((target, draft));
     }
-
-    let profile_yaml = serde_saphyr::to_string_with_options(
-        &DraftProfile {
-            version: 1,
-            workspaces: entries,
-        },
-        serde_saphyr::ser_options! { compact_list_indent: false },
-    )
-    .map_err(|error| format!("render profile: {error}"))?;
-    files.push(DraftFile {
-        destination: profiles_directory.join(format!("{name}.yaml")),
-        yaml: format!("# Captured drafts: edit unresolved commands/matches, then run `sway-stage profile check {name}`.\n{profile_yaml}"),
-    });
-
-    publish_files(&files).map_err(|error| format!("publication: {error}"))?;
-
-    // Reporting failures cannot undo a completed publication.
-    let mut stderr = io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "sway-stage: captured profile {name:?}. {}",
-        commands.summary()
-    );
-    for file in &files {
-        let _ = writeln!(stderr, "  {}", file.destination.display());
-    }
-    Ok(())
+    Ok(PreparedCapture { drafts, commands })
 }
 
-fn preflight_files(files: &[DraftFile]) -> Result<(), String> {
+impl PreparedCapture {
+    pub fn workspace_count(&self) -> usize {
+        self.drafts.len()
+    }
+
+    pub fn save(
+        &self,
+        name: &str,
+        layouts_directory: &Path,
+        profiles_directory: &Path,
+    ) -> Result<(), DraftSaveError> {
+        validate_name(name).map_err(DraftSaveError::InvalidName)?;
+
+        let mut files = Vec::new();
+        let mut entries = Vec::new();
+        for (workspace_index, (target, draft)) in self.drafts.iter().enumerate() {
+            let layout_name = format!("{name}-{:03}", workspace_index + 1);
+            files.push(DraftFile {
+                destination: layouts_directory.join(format!("{layout_name}.yaml")),
+                yaml: draft.yaml.clone(),
+            });
+            entries.push(DraftEntry {
+                workspace: target.clone(),
+                layout: layout_name,
+            });
+        }
+
+        let profile_yaml = serde_saphyr::to_string_with_options(
+            &DraftProfile {
+                version: 1,
+                workspaces: entries,
+            },
+            serde_saphyr::ser_options! { compact_list_indent: false },
+        )
+        .map_err(|error| format!("render profile: {error}"))?;
+        let profile_header = format!(
+            "# Captured drafts: edit unresolved commands/matches, then run `sway-stage profile check {name}`.\n"
+        );
+        files.push(DraftFile {
+            destination: profiles_directory.join(format!("{name}.yaml")),
+            yaml: format!("{profile_header}{profile_yaml}"),
+        });
+
+        // Only known conflicts before staging are safe to retry. Once staging starts,
+        // every failure is operational and retains the publication diagnostics.
+        preflight_files(&files)?;
+        publish_files(&files).map_err(|error| format!("publication: {error}"))?;
+
+        // Reporting failures cannot undo a completed publication.
+        let mut stderr = io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "sway-stage: captured profile {name:?}. {}",
+            self.commands.summary()
+        );
+        for file in &files {
+            let _ = writeln!(stderr, "  {}", file.destination.display());
+        }
+        Ok(())
+    }
+}
+
+fn preflight_files(files: &[DraftFile]) -> Result<(), DraftSaveError> {
     for file in files {
-        draft_file::reject_existing_layout(&file.destination).map_err(|error| error.to_string())?;
-        draft_file::reject_existing_layout(&file.destination.with_extension("yml"))
-            .map_err(|error| error.to_string())?;
+        draft_file::reject_existing_layout(&file.destination)?;
+        draft_file::reject_existing_layout(&file.destination.with_extension("yml"))?;
     }
     Ok(())
 }
 
 fn publish_files(files: &[DraftFile]) -> Result<(), String> {
-    preflight_files(files)?;
-
     let mut staging_paths = Vec::new();
     for file in files {
         let directory = file

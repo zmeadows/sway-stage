@@ -1212,7 +1212,7 @@ fn unified_menu_profiles_use_fresh_coordinator_state_and_one_diagnostics_session
         let selection = if initial_snapshot == json!({}) {
             "0\n"
         } else {
-            "1\n"
+            "2\n"
         };
         let output = run_transcript(&fixture, steps, false, Some((initial_snapshot, selection)));
         assert!(output.status.success(), "{output:?}");
@@ -1247,7 +1247,7 @@ fn unified_menu_profile_preflights_all_targets_before_any_selection() {
         &fixture,
         vec![snapshot(&initial)],
         false,
-        Some((initial, "1\n")),
+        Some((initial, "2\n")),
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(

@@ -17,7 +17,7 @@ This is the authoritative contract for implemented behavior. Start with the
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
-| `menu [--no-infer-commands]` | Choose a layout, profile, or individual-workspace capture through one Fuzzel menu. |
+| `menu [--no-infer-commands]` | Choose a layout, profile, or workspace/profile capture through one Fuzzel menu. |
 
 `check`, `list`, `profile check`, `profile list`, and `profile show` never contact Sway, launch
 applications, write logs, or notify.
@@ -232,7 +232,7 @@ Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at
 1 MiB, no unknown fields, duplicate keys, aliases, merge keys, or custom tags, and no scalar
 coercion. Parser resource limits also apply. Errors identify the profile file and entry/field
 path, with line/column where available; invalid layout errors retain the referenced file's
-diagnostics. The unified menu also offers profile loading; profile capture is CLI-only.
+diagnostics. The unified menu also offers profile loading and capture of all populated workspaces.
 
 Run `sway-stage profile check work`, then `sway-stage profile load work`. Loading validates
 and retains every referenced configuration before contacting Sway; files are not reread
@@ -584,15 +584,23 @@ through the menu. Fill all remaining null placeholders and run `check` before lo
 
 | Initial workspace state | Actions |
 | --- | --- |
-| Empty (no tiled or floating children, including empty containers) | Individual layouts and profiles |
-| Populated and capturable | Capture and profiles |
+| Empty (no tiled or floating children, including empty containers) | Individual layouts, profiles, and profile capture when eligible |
+| Populated and capturable | Current-workspace capture, profiles, and profile capture when eligible |
 | Populated and noncapturable | Profiles |
 | Snapshot unavailable or inconsistent | Profiles |
 
-Capture appears first as `Capture current workspace…`. Layouts follow as `Layout: NAME`,
+Capture appears first as `Capture current workspace…`, followed by
+`Capture all populated workspaces…` when eligible. Layouts follow as `Layout: NAME`,
 then profiles as `Profile: NAME`, each category in lexical name order. Equal layout and
 profile names remain distinct. Only offered row indices are accepted; arbitrary typed
 selection text is an error. There are no separate menu modes or navigation levels.
+
+Profile capture is offered whenever all populated ordinary workspaces in the saved tree
+are capturable, even when the focused workspace is empty. It uses the same selection and
+rendering rules as `profile capture NAME --all`: empty workspaces are excluded, numeric
+workspaces precede exact names in deterministic order, and unsupported or inconsistent
+state disables the action rather than silently omitting workspaces. Other valid actions
+remain available.
 
 Layouts use the same validation as `check`; profiles use `profile check`, including all
 referenced layouts. Invalid configurations carry an `[invalid]` prefix. Selecting one gives
@@ -665,9 +673,23 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   eligibility validation and before the prompt, using the saved PIDs; process arguments
   may have changed since the snapshot.
 
-After a successful save, the bounded, best-effort notification says only `Saved draft 'NAME'.`.
+- **Profile capture:** render all selected workspaces from the same pre-menu snapshot,
+  then ask `Capture profile as: ` in prompt-only mode. No further Sway query or desktop
+  mutation occurs. Reuse rendered drafts and inferred commands across name retries.
+  Names use the profile-capture grammar and maximum of 246 ASCII characters, without
+  an extension. Invalid names and known pre-publication conflicts at the profile or any
+  generated layout's `.yaml`/`.yml` path retry with an error placeholder. Operational
+  failures terminate, including any failure after staging begins; retained generated or
+  staging files are reported on stderr without automatic cleanup or retry.
+  Use the existing profile-last publication rules and `NAME-NNN.yaml` layout names,
+  respecting independent `--layouts-dir` and `--profiles-dir` overrides. Only a fully
+  published profile triggers `Saved profile 'NAME' (N workspaces).` as a bounded,
+  best-effort notification.
+
+After a successful individual-workspace save, the bounded, best-effort notification says
+only `Saved draft 'NAME'.`.
 Notification failure does not fail the save. Cancellation and failed captures do not report
-success. `menu --no-infer-commands` disables inference only for individual-workspace
+success. `menu --no-infer-commands` disables inference for both workspace and profile
 capture; it does not affect discovery, presentation, layout loading, or profile loading.
 
 Save `NAME.yaml` into the discovery directory. Names follow the layout-name grammar, at

@@ -84,11 +84,13 @@ Invoke Load on a completely empty workspace and keep it focused until constructi
 | `sway-stage capture > draft.yaml` | Capture the current arrangement as an editable draft. |
 | `sway-stage menu` | Choose a layout, profile, or workspace capture through one Fuzzel menu. |
 
-One menu keybinding covers all three operations. Empty workspaces offer layouts and
+One menu keybinding covers loading and capture. Empty workspaces offer layouts and
 profiles; populated workspaces offer capture when supported, plus profiles. Entries use
 `Layout:` and `Profile:` labels; invalid configurations are marked `[invalid]` and cannot
 load. Use `check NAME` or `profile check NAME` for details. `menu --no-infer-commands`
-disables command inference only for individual-workspace capture.
+disables command inference for both workspace and profile capture.
+`Capture all populated workspaces…` prompts for a new profile name and saves its layout
+drafts, including when the focused workspace is empty.
 
 Use `--layouts-dir PATH` to read layouts and save captures elsewhere.
 `profile capture work 1 3 "music player"` captures existing numbered and exact named
