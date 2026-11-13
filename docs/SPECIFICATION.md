@@ -10,6 +10,7 @@ This is the authoritative contract for implemented behavior. Start with the
 | --- | --- |
 | `load NAME [--cwd PATH]` | Validate and launch a layout on the focused, empty workspace. Success is silent. |
 | `check NAME` | Validate syntax, semantics, and cwd existence; print `NAME: valid`. |
+| `profile load NAME` | Construct layouts sequentially on the profile’s numbered empty workspaces. Success is silent. |
 | `profile check NAME` | Validate a named profile and every referenced layout; print `NAME: valid`. |
 | `list` | Print discovered names in lexical order without parsing contents. |
 | `capture [--no-infer-commands]` | Print an editable draft of the focused workspace. |
@@ -168,13 +169,16 @@ A profile is a named YAML file containing an ordered sequence of workspace-to-la
 mappings. Profiles use a separate directory, `$XDG_CONFIG_HOME/sway-stage/profiles`, falling
 back to `$HOME/.config/sway-stage/profiles` when XDG_CONFIG_HOME is unset or empty.
 Global `--profiles-dir PATH` overrides this directory independently of `--layouts-dir PATH`;
-relative overrides resolve from the invoking directory. Existing commands ignore the profiles
+relative overrides resolve from the invoking directory. Layout commands ignore the profiles
 directory. The same absolute default-base requirements and immediate regular `.yaml`/`.yml`
 file rules as layout discovery apply. Profile names use `[A-Za-z0-9][A-Za-z0-9_-]*`, without an
 extension. Duplicate stems are ambiguous; unrelated invalid or ambiguous filenames do not
 prevent checking a valid name. A missing profile is an error, including when the default
 directory is absent; a missing explicit directory is a directory-read error. Discovery never
 creates directories.
+
+For example, save this as `work.yaml` in the profiles directory, with the three named
+layouts in the layouts directory:
 
 ```yaml
 version: 1
@@ -203,23 +207,56 @@ Profiles use the same strict YAML conventions as layouts: one UTF-8 document, at
 1 MiB, no unknown fields, duplicate keys, aliases, merge keys, or custom tags, and no scalar
 coercion. Parser resource limits also apply. Errors identify the profile file and entry/field
 path, with line/column where available; invalid layout errors retain the referenced file's
-diagnostics. Workspace numbers only describe configuration in this phase; profile loading,
-workspace switching, capture, and menu integration are not implemented.
+diagnostics. Profile capture and menu integration are not implemented.
+
+Run `sway-stage profile check work`, then `sway-stage profile load work`. Loading validates
+and retains every referenced configuration before contacting Sway; files are not reread
+during construction. It preflights **all** numbered targets before the first workspace
+selection. Every existing target must have no tiled or floating children, including empty
+structural containers. Missing targets are eligible for creation when selected; preflight
+never creates them. Ambiguous numbers, inconsistent observations, or occupancy refuse the
+entire profile before switching or launching.
+
+Entries execute in YAML order. Before each selection, loading rechecks focus, target identity,
+output, and emptiness, then selects the explicit number with auto-back-and-forth disabled.
+Existing names such as `1: development` match by numeric identity. Each successful selection
+requires observed focus, identity, emptiness, and event history to agree before the ordinary
+layout loader starts. Only the coordinator selects workspaces; each individual construction
+retains all loader ownership, matching, hierarchy, focus, and containing-output safeguards.
+Sway's existing workspace/output rules determine placement, including creation on an output;
+profiles do not assign outputs or move workspaces.
+
+Success leaves the final workspace focused. Any validation, selection, observation, or
+construction failure stops the profile without later entries, cleanup, rollback, or focus
+restoration. Earlier layouts and partially constructed layouts remain in place. Workspace
+focus changes outside the requested transition, reloads, moves, renames, unexpected
+creation/destruction, and uncertain observations stop coordination, including away-and-back
+changes recorded between snapshots. New structural window activity during preflight or
+selection also refuses progress. IPC is not transactional; event history and fresh trees
+cannot guarantee isolation from concurrent desktop activity.
+
+One diagnostics session and `last-run.log` cover the whole invocation, including validation
+failures. Errors distinguish validation, workspace selection, and layout construction, and
+retain profile name, current workspace/layout, completed workspace numbers/container IDs,
+and whether launches may have left partial layouts. A failed invocation attempts at most
+one fatal notification. `profile check` remains completely offline.
 
 ## Loading, sizing, and safety
 
 Layouts describe new applications in ordered split, tabbed, and stacked groups. There is no
-session restoration, existing-window reuse, daemon, ongoing enforcement, workspace/output
+session restoration, existing-window reuse, daemon, ongoing enforcement, output
 assignment, or management of application lifetimes after launch. Floating and fullscreen
 arrangements are outside the layout format.
 
-The following safeguards apply to standalone and menu loading:
+The following safeguards apply to each layout construction. Standalone and menu loading
+retain their focused-workspace behavior; only profile coordination may select the profile’s
+explicit workspace numbers:
 
 1. Validate the complete file before launching applications or mutating Sway. Standalone
    Load validates before contacting Sway; menu takes its read-only snapshot first. Select the
    currently focused workspace by container identity, and retain its containing output
    identity. Both tiled and floating child lists must be empty, including empty containers.
-   Never create, select, rename, or assign a workspace for the user.
+   The individual loader never creates, selects, renames, or assigns a workspace.
 2. Observe focus throughout construction, sizing, and final focus. Switching away, even
    briefly and back, destroys the safety precondition. Moving the target to another output,
    including away and back, also stops construction. Missing targets, changed output
@@ -551,7 +588,7 @@ before loader IPC or application launches. Edit them in place and check them. Th
 
 ## Diagnostics and troubleshooting
 
-`load`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
+`load`, `profile load`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
 notifications through `notify-send`. Sizing warnings also notify. Missing notification
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
@@ -561,7 +598,8 @@ save failures, or working-directory selection problems without exposing paths or
 error chains. Successful loads do not notify; saved menu captures retain their save
 confirmation. Cancellation does not notify.
 
-Each load attempt, including a menu Load selection, replaces the private launch log at
+Each load attempt, including a menu Load selection or an entire profile load, replaces the
+private launch log at
 `$XDG_STATE_HOME/sway-stage/last-run.log`, falling back to
 `$HOME/.local/state/sway-stage/last-run.log`; state bases must be absolute. New log files are
 0600 and new directories 0700. Existing log links are not followed or reused. Log failure

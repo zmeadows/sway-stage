@@ -18,8 +18,12 @@ cargo +1.89.0 check --locked --all-targets
 ```
 
 Automated tests use recorded trees/events, socket fixtures, temporary files, and fake
-external tools. They do not use the live compositor. Some CLI fixtures bind temporary Unix
-sockets, which restrictive sandboxes may forbid. The separate offline harness target is
+external tools. Profile CLI transcripts additionally cover whole-profile preflight,
+retained configurations after file removal, sequential selection/creation and construction,
+command failures/timeouts, conflicting identities/focus/history/occupancy, partial failure,
+completed-workspace diagnostics, and single fatal notifications. Exact command transcripts
+refuse retries, later selections, and rollback commands. They do not use the live compositor.
+Some CLI fixtures bind temporary Unix sockets, which restrictive sandboxes may forbid. The separate offline harness target is
 `cargo test --locked --test integration_harness`; it has no harness entry point and must
 never read `SWAYSOCK`, connect to Sway, or start processes.
 
@@ -477,6 +481,42 @@ abort. Output removal should report resulting Fuzzel errors without focus repair
 hardware checks remain incomplete; their safety logic has offline coverage and does not
 block continued development. Multi-seat behavior and a supported Sway version remain
 unverified; do not infer compatibility from one run.
+
+## Manual profile acceptance
+
+User only: use a private copy of the single profile example in the
+[specification](SPECIFICATION.md#named-profiles-version-1), pointing to trusted test layouts.
+Replace all three workspace numbers with unused disposable targets in your existing session.
+Use harmless applications with distinct, verified selectors; keep all targets empty and input
+idle. Build first, run `sway-stage profile check work` with your directory overrides, and use
+those same overrides for `sway-stage profile load work` in each independent run below.
+The profile coordinator selects the targets itself; do not run the live harness for these checks.
+
+1. **Normal loading:** include an existing empty numbered workspace with a descriptive name
+   and a missing target. Load from another workspace. Verify YAML order, each hierarchy,
+   sizing/final focus, and final target focus. Expect silent success and one launch log
+   showing all three completed numbers/container IDs.
+2. **Occupied refusal:** put a window on the last target, keeping earlier targets empty.
+   Record original focus and existing windows, then load. Expect exit 1 before any switch
+   or application launch, unchanged windows/focus, zero completed workspaces, and one fatal
+   notification. Repeat with a floating window. Remove test windows manually between runs.
+3. **Partial failure:** on fresh empty targets, make a private copy of the second layout
+   launch one valid window followed by an executable that does not exist. Offline check
+   should pass. Load and verify the first layout remains complete, the second retains its
+   partial result, and the third is never selected or launched. Expect exit 1, one fatal
+   notification, current workspace/layout plus the first completed workspace ID, and partial
+   layout advice. There must be no cleanup or focus restoration. Separately test away-and-back
+   focus during construction; it must stop further work. Inspect and close test windows
+   yourself before another attempt.
+4. **Multi-monitor placement:** with two outputs, use your existing Sway workspace rules to
+   place empty targets on different outputs. Verify selection reaches the numbered workspace
+   on its existing output, and missing targets follow Sway's normal placement rules. In separate
+   runs move a target to another output during construction, including away and back; expect
+   an abort with all windows left in place and no focus restoration. Profiles must never move
+   a workspace or assign an output. Record the Sway version and outputs tested.
+
+These manual profile and hardware checks remain outstanding; offline fixtures do not establish
+live compositor compatibility or transactional isolation.
 
 ## Maintainer notes
 

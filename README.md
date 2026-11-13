@@ -100,7 +100,8 @@ sway-stage menu --no-infer-commands
 ## Troubleshooting
 
 Desktop error notifications give a short summary. Each load attempt (including a menu Load
-selection) records detailed diagnostics in `$XDG_STATE_HOME/sway-stage/last-run.log`, or
+selection or a whole profile load) records detailed diagnostics in
+`$XDG_STATE_HOME/sway-stage/last-run.log`, or
 `$HOME/.local/state/sway-stage/last-run.log` when `XDG_STATE_HOME` is unset or empty.
 The state directory must be absolute. Inspect the latest load with:
 

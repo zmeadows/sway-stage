@@ -3,7 +3,8 @@
 ## Purpose and priorities
 
 `sway-stage` is a small Linux CLI that constructs declarative tiled layouts on the
-currently focused, empty Sway workspace. Prioritize, in order:
+currently focused, empty Sway workspace, or sequentially on a named profile’s explicit
+numeric workspaces. Prioritize, in order:
 
 1. Preserving the user's windows and workspace state.
 2. Correct behavior with understandable failures.
@@ -92,12 +93,23 @@ Do not add dependencies for stylistic reasons.
 
 ## Safety invariants
 
-- Freeze the focused workspace as the target; never choose a workspace number or output
-  for the user. Refuse any tiled or floating occupancy before the first mutation.
+- The ordinary loader freezes the focused workspace as its target and never selects or
+  creates a workspace. Only the profile coordinator may select/create the numeric workspaces
+  explicitly configured in a fully validated profile, sequentially in YAML order. Validate
+  and retain all referenced configurations before IPC; preflight every target read-only
+  before switching. Refuse any tiled or floating occupancy, including empty containers.
+  Recheck focus, target identity/output, and occupancy before each selection, verify the
+  bounded command reply and resulting state/history, then invoke the unchanged layout engine
+  with the selected workspace ID. Never assign outputs or restore focus automatically.
 - Observe workspace focus changes throughout construction, including a switch away and
   back between snapshots. Stop on a switch, missing target, IPC failure, or lost safety
   precondition. Freeze the containing output identity too; stop on target output migration,
-  including away and back. Never switch back automatically.
+  including away and back. Never switch back automatically. Keep profile coordination's
+  expected-transition history separate from each individual load's fresh frozen observer;
+  intentional profile selections must not relax construction's focus/output invariants.
+  Stop the whole profile on failure, leaving earlier and partial layouts untouched. Use one
+  diagnostics session and at most one fatal notification, retaining workspace progress even
+  when the individual loader changes diagnostic stages.
 - Snapshot existing window identities across the tree before launching, and before each
   subsequent launch. Only newly observed, unclaimed windows with the explicit expected
   app ID or Xwayland class can be accepted. Launch one application at a time and bound
@@ -144,8 +156,8 @@ configuration fixtures, pure tree/weight calculations, and recorded IPC trees/ev
 Introduce only the smallest test seam needed. Keep automated checks non-interactive and
 independent of a live compositor. Never execute commands that modify the user's live
 Sway session, including launching or terminating applications, changing focus, or moving
-or resizing windows. Never run `sway-stage load` against the real compositor. All
-live-desktop behavioral verification must be performed manually by the user on disposable
+or resizing windows. Never run `sway-stage load` or `sway-stage profile load` against the real
+compositor. All live-desktop behavioral verification must be performed manually by the user on disposable
 workspaces in their existing Sway session, following [development](docs/DEVELOPMENT.md).
 A disposable workspace does not isolate the compositor or other workspaces.
 
@@ -157,8 +169,8 @@ live compositor. Validate it only by compilation, static inspection, and the off
 `integration_harness` tests. That test target is a separate crate root without the harness
 entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
 processes. The harness's explicit switch to a disposable workspace and its owned-window
-cleanup are development-harness exceptions to the CLI's no-switch/no-close policy, not
-permission for agents to perform desktop operations.
+cleanup are development-harness exceptions to the ordinary loader's no-switch policy and
+the CLI's no-close policy, not permission for agents to perform desktop operations.
 
 Window cleanup must remain an explicit verified success phase that closes only windows
 independently proven to belong to the run, never a destructor or failure handler. SIGINT
