@@ -55,7 +55,7 @@ Each file contains one UTF-8 YAML document with these top-level keys:
 | `layout` | Required root node: a group or a window. |
 | `cwd` | Optional default working directory for all windows; a window’s own `cwd` overrides it. |
 | `cwd_select` | Optional boolean, default `false`; `true` requires top-level `cwd`. In the menu, select the base directory or an immediate child as the layout default. |
-| `focus` | Optional window `id` to focus at completion; default is the first leaf. |
+| `focus` | Optional window `id` to focus at completion; default follows active tab/stack children and the first child of each split. |
 | `window_timeout_ms` | Optional integer from `1` to `300000` (five minutes), default `20000`, for each window wait. |
 
 A group node has `group` and an ordered `children` sequence. The four values use Sway's
@@ -66,6 +66,13 @@ values are rejected; the configuration version remains `1`.
 
 `check`, loading, and capture support all four group types, including singleton
 tabbed/stacked groups and mixed nesting.
+
+Tabbed and stacked groups may also specify `active`, the **one-based index of a direct
+child** to select after loading. For example, `active: 2` selects the second child.
+Omitting `active` selects the first child; explicit `active: 1` has the same effect.
+The value must be an unquoted integer from `1` to the number of direct children, inclusive.
+Null, strings, floats, booleans, negative values, zero, and out-of-range indices are invalid.
+Split groups (`splith`/`splitv`) and window nodes must omit `active`.
 
 A window node has the following fields:
 
@@ -83,11 +90,16 @@ along the parent's split axis; weights need not sum to 100 and every sibling sum
 finite. Children of `tabbed` and `stacked` must omit `weight`, even when it would be `1`.
 The root must omit `weight` because it has no siblings. Tree order is depth-first
 launch order and sibling order, including tab/stack header order. Do not flatten nested
-splits merely because their orientation matches their parent. Global `focus` selects the
-final window and its visible tab along its ancestry; it defaults to the first leaf. After
-sizing, every tabbed/stacked group selects its first child, including inactive and nested
-groups. Global focus is applied last and may override those selections along its ancestry.
-There is no per-group selection setting.
+splits merely because their orientation matches their parent. After sizing, every
+tabbed/stacked group selects its `active` child (the first child by default), including
+inactive and nested groups. When a selected child is another group, its nested selections
+remain intact.
+
+Global `focus` is applied last. An explicit window ID takes precedence over any conflicting
+`active` selections along that window's ancestry; selections in other groups remain intact.
+These conflicts are valid configurations. When `focus` is omitted, descend through the
+selected child of each tabbed/stacked group and the first child of each split until reaching
+a window. Without any `active` settings, this remains the first depth-first window.
 
 Window matching uses exact, case-sensitive Wayland `app_id` or Xwayland
 `window_properties.class` equality, never a title, substring, regex, or PID alone. Repeated
@@ -176,8 +188,10 @@ The following safeguards apply to standalone and menu loading:
    criteria for mutations, or manipulate the global scratchpad. Construction uses neither
    window moves nor placeholder windows.
 6. Apply weights from outer splits inward, skipping sibling sizing at tabbed/stacked levels
-   while still sizing nested splits. Then focus the configured leaf (the first depth-first
-   leaf by default), verify it, and exit.
+   while still sizing nested splits. Restore tabbed/stacked selections, then apply explicit
+   global focus or the active-aware default described above. Verify the globally focused
+   window and every tabbed/stacked group's selected direct child, including inactive groups,
+   against the observed tree before exiting. Selection or focus verification failures are fatal.
 
 Construction verifies intermediate wrappers as well as the completed hierarchy. Unexpected
 wrapping, flattening, or reparenting is fatal, even when the result looks similar. An empty

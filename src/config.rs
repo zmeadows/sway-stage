@@ -49,6 +49,7 @@ pub struct LayoutNode {
 pub enum NodeKind {
     Group {
         layout: GroupLayout,
+        active: Option<u64>,
         children: Vec<Spanned<LayoutNode>>,
     },
     Window {
@@ -85,6 +86,8 @@ struct NodeFields {
     weight: Option<f64>,
     #[serde(default, deserialize_with = "non_null")]
     group: Option<GroupLayout>,
+    #[serde(default, deserialize_with = "optional_child_index")]
+    active: Option<u64>,
     #[serde(default, deserialize_with = "non_null")]
     children: Option<Vec<Spanned<LayoutNode>>>,
     #[serde(default, deserialize_with = "non_null")]
@@ -137,9 +140,14 @@ impl TryFrom<NodeFields> for LayoutNode {
             }
             NodeKind::Group {
                 layout: fields.group.ok_or("group node is missing group")?,
+                active: fields.active,
                 children: fields.children.ok_or("group node is missing children")?,
             }
         } else {
+            if fields.active.is_some() {
+                return Err("active: only tabbed and stacked groups accept active".into());
+            }
+
             NodeKind::Window {
                 id: fields.id.ok_or("window node is missing id")?,
                 command: fields.command.ok_or("window node is missing command")?,
@@ -161,6 +169,23 @@ impl LayoutNode {
     pub fn weight(&self) -> f64 {
         self.weight.unwrap_or(1.0)
     }
+
+    /// Default focus descent in a validated layout: active tab/stack child, otherwise first.
+    pub fn default_focus_child_index(&self) -> usize {
+        match &self.kind {
+            NodeKind::Group {
+                active: Some(active),
+                ..
+            } => (*active - 1) as usize,
+            _ => 0,
+        }
+    }
+}
+
+fn optional_child_index<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    unquoted_integer(deserializer).map(Some)
 }
 
 fn optional_weight<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
@@ -387,7 +412,11 @@ fn validate_node(
     }
 
     match &mut layout_node.value.kind {
-        NodeKind::Group { layout, children } => {
+        NodeKind::Group {
+            layout,
+            active,
+            children,
+        } => {
             let is_split = matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV);
             if is_split && children.len() < 2 {
                 return Err(fail(
@@ -400,6 +429,21 @@ fn validate_node(
                     ".children",
                     "a tabbed or stacked group requires at least one child",
                 ));
+            }
+
+            if let Some(active) = active {
+                if is_split {
+                    return Err(fail(
+                        ".active",
+                        "only tabbed and stacked groups accept active",
+                    ));
+                }
+                if !(1..=children.len() as u64).contains(active) {
+                    return Err(fail(
+                        ".active",
+                        &format!("expected a child index from 1 to {}", children.len()),
+                    ));
+                }
             }
 
             let mut weight_sum = 0.0;
@@ -541,6 +585,7 @@ mod tests {
         let NodeKind::Group {
             layout: root_layout,
             children: root_children,
+            ..
         } = config.layout.value.kind
         else {
             panic!("expected root split");
@@ -560,6 +605,7 @@ mod tests {
         let NodeKind::Group {
             layout: column_layout,
             children: column_children,
+            ..
         } = &root_children[2].value.kind
         else {
             panic!("expected nested right column split");
@@ -741,6 +787,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn active_accepts_one_based_indices_only_on_tabs_and_stacks() {
+        let second = WINDOW.replace("terminal", "second");
+        let third = WINDOW.replace("terminal", "third");
+        for group in ["tabbed", "stacked"] {
+            for (field, expected) in [("", None), ("active: 1,", Some(1)), ("active: 3,", Some(3))]
+            {
+                let config = parse(&format!(
+                    "version: 1\nlayout: {{group: {group}, {field} children: [{WINDOW}, {second}, {third}]}}"
+                ))
+                .unwrap();
+                let NodeKind::Group { active, .. } = config.layout.value.kind else {
+                    panic!("expected group");
+                };
+                assert_eq!(active, expected);
+            }
+
+            for invalid in [
+                "0",
+                "-1",
+                "4",
+                "1.5",
+                "1.0",
+                "'2'",
+                "true",
+                "false",
+                "null",
+                "[]",
+                "{}",
+                "18446744073709551616",
+            ] {
+                let error = parse(&format!(
+                    "version: 1\nlayout: {{group: splith, children: [{WINDOW}, {{group: {group}, active: {invalid}, children: [{second}, {third}]}}]}}"
+                ))
+                .unwrap_err();
+                for context in ["layout.children[1]", "active", "line", "column"] {
+                    assert!(error.contains(context), "invalid={invalid}: {error}");
+                }
+                if matches!(invalid, "0" | "4") {
+                    assert!(
+                        error.contains("expected a child index from 1 to 2"),
+                        "{error}"
+                    );
+                }
+            }
+        }
+
+        for group in ["splith", "splitv"] {
+            rejects(
+                &format!(
+                    "version: 1\nlayout: {{group: {group}, active: 1, children: [{WINDOW}, {second}]}}"
+                ),
+                "layout.active",
+            );
+        }
+        rejects(
+            &format!(
+                "version: 1\nlayout: {}",
+                WINDOW.replace("{id:", "{active: 1, id:")
+            ),
+            "active: only tabbed and stacked groups",
+        );
+        rejects(
+            &format!(
+                "version: 1\nlayout: {{group: tabbed, active: 1, active: 1, children: [{WINDOW}]}}"
+            ),
+            "duplicate",
+        );
+
+        let config = parse(&format!(
+            "version: 1\nfocus: terminal\nlayout: {{group: tabbed, active: 2, children: [{WINDOW}, {{group: stacked, active: 2, children: [{second}, {third}]}}]}}"
+        ))
+        .unwrap();
+        assert_eq!(config.layout.value.default_focus_child_index(), 1);
+        let NodeKind::Group { children, .. } = &config.layout.value.kind else {
+            panic!("expected group");
+        };
+        assert_eq!(children[1].value.default_focus_child_index(), 1);
     }
 
     #[test]

@@ -120,7 +120,9 @@ fn layout_outline(layout: &LayoutNode) -> String {
             matcher: Matcher::Class(class),
             ..
         } => format!("{id} class={class}"),
-        NodeKind::Group { layout, children } => {
+        NodeKind::Group {
+            layout, children, ..
+        } => {
             let group = match layout {
                 GroupLayout::SplitH => "h",
                 GroupLayout::SplitV => "v",

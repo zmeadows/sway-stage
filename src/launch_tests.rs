@@ -48,7 +48,10 @@ impl LaunchFixture {
     ) -> Result<(), String> {
         let tree = steps.last().unwrap().tree.clone();
         fn append_sizing_snapshots(steps: &mut Vec<IpcStep>, tree: &Value, node: &LayoutNode) {
-            if let NodeKind::Group { layout, children } = &node.kind {
+            if let NodeKind::Group {
+                layout, children, ..
+            } = &node.kind
+            {
                 if matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV) {
                     steps.push(snapshot_step(tree.clone()));
                 }
@@ -1289,9 +1292,9 @@ fn workspace_fullscreen_metadata_does_not_mark_tiled_child_fullscreen() {
     assert_eq!(fixture.wait_for_launch_count(), 1);
 }
 
-// A transcript supplies recorded tree shapes and exact commands. It does not execute
-// layout operations or model Sway's insertion, focus, or simplification algorithms.
-// Only window events follow from the recorded trees; see focus_events and launched.
+// A transcript supplies tree shapes and exact commands without executing layout
+// operations or emulating insertion/simplification. Focus helpers promote direct-child
+// history; focus_events and launched derive window events from the supplied trees.
 fn group(id: i64, layout: &str, children: Vec<Value>) -> Value {
     let mut value = node(id, "con", false);
     value["layout"] = json!(layout);
@@ -1300,10 +1303,7 @@ fn group(id: i64, layout: &str, children: Vec<Value>) -> Value {
 }
 
 fn focus_only(value: &mut Value, id: i64) {
-    value["focused"] = json!(value["id"] == id);
-    for child in value["nodes"].as_array_mut().unwrap() {
-        focus_only(child, id);
-    }
+    select_fixture_leaf(value, id);
 }
 
 fn arranged_tree(layout: &str, children: Vec<Value>, focused: i64) -> Value {
@@ -2961,7 +2961,7 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
         };
         let steps = vec![snapshot_step(loaded_tree.clone()), retitled, next];
         let error = with_completed_session(&fixture, &config, steps, |session| {
-            session.focus_container(&[0])
+            session.focus_container(&[0]).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
@@ -3008,7 +3008,7 @@ fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
                     find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
                 assert_eq!(configured_window_id, if explicit { "w1" } else { "w0" });
                 assert_eq!(configured_window_path, [0, if explicit { 1 } else { 0 }]);
-                session.focus_container(&configured_window_path)
+                session.focus_container(&configured_window_path).map(|_| ())
             })
             .unwrap();
         }
@@ -3082,7 +3082,7 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
             after,
         ];
         let error = with_completed_session(&fixture, &config, steps, |session| {
-            session.focus_container(&[0])
+            session.focus_container(&[0]).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
@@ -3113,22 +3113,25 @@ fn workspace_focus_steps(steps: &mut Vec<IpcStep>, before: &Value) {
 
 #[test]
 fn root_tabs_and_stacks_preserve_singletons_order_and_initial_workspace_layout() {
-    for (layout, command, initial_layout, count) in [
-        ("tabbed", "tabbed", "splith", 1),
-        ("stacked", "stacking", "splith", 1),
-        ("tabbed", "tabbed", "splitv", 3),
-        ("stacked", "stacking", "splith", 2),
-        ("tabbed", "tabbed", "tabbed", 2),
-        ("stacked", "stacking", "stacked", 1),
+    for (layout, command, initial_layout, count, active) in [
+        ("tabbed", "tabbed", "splith", 1, None),
+        ("stacked", "stacking", "splith", 1, None),
+        ("tabbed", "tabbed", "splitv", 3, None),
+        ("stacked", "stacking", "splith", 2, None),
+        ("tabbed", "tabbed", "tabbed", 2, None),
+        ("stacked", "stacking", "stacked", 1, None),
+        ("tabbed", "tabbed", "splith", 2, Some(2)),
+        ("stacked", "stacking", "splitv", 3, Some(3)),
     ] {
         let fixture = LaunchFixture::new();
         let leaves = (0..count)
             .map(|i| configured_window_yaml(&fixture, i))
             .collect::<Vec<_>>()
             .join(",");
+        let active_field = active.map_or(String::new(), |active| format!("active: {active},"));
         let config = layout_config(
             &fixture,
-            &format!("{{group: {layout}, children: [{leaves}]}}"),
+            &format!("{{group: {layout}, {active_field} children: [{leaves}]}}"),
         );
         let initial = arranged_tree(initial_layout, vec![], 10);
         let first = arranged_tree(initial_layout, vec![expected_window(20)], 20);
@@ -3159,7 +3162,15 @@ fn root_tabs_and_stacks_preserve_singletons_order_and_initial_workspace_layout()
             append_launch_steps(&mut steps, &insertion, &next);
             current = next;
         }
-        assert_completed_launches(&fixture, &config, steps, count);
+        if let Some(active) = active {
+            let selected_id = 19 + active;
+            append_final_focus_steps(&mut steps, &current, selected_id);
+            select_fixture_leaf(&mut current, selected_id);
+            append_final_focus_steps(&mut steps, &current, selected_id);
+            fixture.run(&config, steps).unwrap();
+        } else {
+            assert_completed_launches(&fixture, &config, steps, count);
+        }
     }
 }
 
@@ -3852,10 +3863,7 @@ fn group_selection_is_postorder_and_global_focus_wins_only_along_its_ancestry() 
                 );
                 with_completed_session(&fixture, &config, steps, |session| {
                     session.initialize_group_selection(&config.layout.value, &[])?;
-                    let (_, path) =
-                        find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[])
-                            .unwrap();
-                    session.focus_container(&path)
+                    session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &[])
                 })
                 .unwrap();
             }
@@ -3868,6 +3876,8 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
     for scenario in [
         "rejected-selection",
         "unobserved-focus",
+        "wrong-selection",
+        "missing-selection",
         "focus-away-and-back",
         "changed-layout",
         "disconnected-query",
@@ -3910,6 +3920,15 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
                 after.tree = initial.clone();
                 "was not observed"
             }
+            "wrong-selection" | "missing-selection" => {
+                let history = if scenario == "wrong-selection" {
+                    json!([21, 20])
+                } else {
+                    json!([])
+                };
+                after.tree["nodes"][0]["nodes"][0]["nodes"][0]["focus"] = history;
+                "group selection id=100: expected child 1 id=20"
+            }
             "focus-away-and-back" => {
                 command.events = vec![
                     (WORKSPACE_EVENT, workspace_focus_event(11, 10)),
@@ -3941,9 +3960,264 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
         };
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.initialize_group_selection(&config.layout.value, &[])?;
-            session.focus_container(&[0, 0])
+            session.focus_container(&[0, 0]).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
+    }
+}
+
+#[test]
+fn configured_active_selections_survive_nested_and_independent_focus_operations() {
+    struct SelectionCase {
+        layout_yaml: String,
+        observed_tree: Value,
+        initialization_focus_ids: Vec<i64>,
+        default_focus_id: i64,
+    }
+
+    let fixture = LaunchFixture::new();
+    let windows: Vec<_> = (0..5)
+        .map(|index| configured_window_yaml(&fixture, index))
+        .collect();
+    let cases = [
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: tabbed, active: 2, children: [{}, {}]}}",
+                windows[0], windows[1]
+            ),
+            observed_tree: arranged_tree(
+                "tabbed",
+                vec![expected_window(20), expected_window(21)],
+                20,
+            ),
+            initialization_focus_ids: vec![21],
+            default_focus_id: 21,
+        },
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: stacked, active: 3, children: [{}, {}, {}]}}",
+                windows[0], windows[1], windows[2]
+            ),
+            observed_tree: arranged_tree(
+                "stacked",
+                vec![
+                    expected_window(20),
+                    expected_window(21),
+                    expected_window(22),
+                ],
+                20,
+            ),
+            initialization_focus_ids: vec![22],
+            default_focus_id: 22,
+        },
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: tabbed, active: 2, children: [{}, {{group: stacked, active: 2, children: [{}, {}]}}]}}",
+                windows[0], windows[1], windows[2]
+            ),
+            observed_tree: arranged_tree(
+                "tabbed",
+                vec![
+                    expected_window(20),
+                    group(
+                        100,
+                        "stacked",
+                        vec![expected_window(21), expected_window(22)],
+                    ),
+                ],
+                20,
+            ),
+            initialization_focus_ids: vec![22, 22],
+            default_focus_id: 22,
+        },
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: splith, children: [{{group: tabbed, active: 2, children: [{}, {}]}}, {{group: stacked, active: 3, children: [{}, {}, {}]}}]}}",
+                windows[0], windows[1], windows[2], windows[3], windows[4]
+            ),
+            observed_tree: arranged_tree(
+                "splith",
+                vec![
+                    group(
+                        100,
+                        "tabbed",
+                        vec![expected_window(20), expected_window(21)],
+                    ),
+                    group(
+                        101,
+                        "stacked",
+                        vec![
+                            expected_window(22),
+                            expected_window(23),
+                            expected_window(24),
+                        ],
+                    ),
+                ],
+                20,
+            ),
+            initialization_focus_ids: vec![21, 24],
+            default_focus_id: 21,
+        },
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: tabbed, active: 2, children: [{{group: stacked, active: 2, children: [{}, {}]}}, {{group: tabbed, active: 2, children: [{}, {}]}}]}}",
+                windows[0], windows[1], windows[2], windows[3]
+            ),
+            observed_tree: arranged_tree(
+                "tabbed",
+                vec![
+                    group(
+                        100,
+                        "stacked",
+                        vec![expected_window(20), expected_window(21)],
+                    ),
+                    group(
+                        101,
+                        "tabbed",
+                        vec![expected_window(22), expected_window(23)],
+                    ),
+                ],
+                20,
+            ),
+            initialization_focus_ids: vec![21, 23, 23],
+            default_focus_id: 23,
+        },
+        SelectionCase {
+            layout_yaml: format!(
+                "{{group: tabbed, active: 2, children: [{}, {{group: splitv, children: [{{group: stacked, active: 2, children: [{}, {}]}}, {{group: tabbed, active: 2, children: [{}, {}]}}]}}]}}",
+                windows[0], windows[1], windows[2], windows[3], windows[4]
+            ),
+            observed_tree: arranged_tree(
+                "tabbed",
+                vec![
+                    expected_window(20),
+                    group(
+                        100,
+                        "splitv",
+                        vec![
+                            group(
+                                101,
+                                "stacked",
+                                vec![expected_window(21), expected_window(22)],
+                            ),
+                            group(
+                                102,
+                                "tabbed",
+                                vec![expected_window(23), expected_window(24)],
+                            ),
+                        ],
+                    ),
+                ],
+                20,
+            ),
+            initialization_focus_ids: vec![22, 24, 22],
+            default_focus_id: 22,
+        },
+    ];
+
+    for case in cases {
+        for explicit in [false, true] {
+            let mut config = layout_config(&fixture, &case.layout_yaml);
+            if explicit {
+                config.focus = Some("w0".into());
+            }
+
+            let mut current = case.observed_tree.clone();
+            let mut steps = vec![snapshot_step(current.clone())];
+            let final_id = if explicit { 20 } else { case.default_focus_id };
+            for id in case
+                .initialization_focus_ids
+                .iter()
+                .copied()
+                .chain([final_id])
+            {
+                let mut after = current.clone();
+                select_fixture_leaf(&mut after, id);
+                append_command_steps(
+                    &mut steps,
+                    &format!("[con_id={id}] focus"),
+                    &current,
+                    &after,
+                );
+                current = after;
+            }
+
+            with_completed_session(&fixture, &config, steps, |session| {
+                let (leaf, _) =
+                    find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
+                assert_eq!(leaf, format!("w{}", final_id - 20));
+                session.initialize_group_selection(&config.layout.value, &[])?;
+                session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &[])
+            })
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn final_selection_verification_rejects_changed_inactive_and_ancestor_history() {
+    for changed_group in [10, 100, 101] {
+        let fixture = LaunchFixture::new();
+        let mut config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: tabbed, active: 2, children: [{{group: stacked, active: 2, children: [{}, {}]}}, {{group: tabbed, active: 2, children: [{}, {}]}}]}}",
+                configured_window_yaml(&fixture, 0),
+                configured_window_yaml(&fixture, 1),
+                configured_window_yaml(&fixture, 2),
+                configured_window_yaml(&fixture, 3)
+            ),
+        );
+        config.focus = Some("w0".into());
+        let mut current = arranged_tree(
+            "tabbed",
+            vec![
+                group(
+                    100,
+                    "stacked",
+                    vec![expected_window(20), expected_window(21)],
+                ),
+                group(
+                    101,
+                    "tabbed",
+                    vec![expected_window(22), expected_window(23)],
+                ),
+            ],
+            20,
+        );
+        let mut steps = vec![snapshot_step(current.clone())];
+        for id in [21, 23, 23] {
+            let mut after = current.clone();
+            select_fixture_leaf(&mut after, id);
+            append_command_steps(
+                &mut steps,
+                &format!("[con_id={id}] focus"),
+                &current,
+                &after,
+            );
+            current = after;
+        }
+
+        let mut after = current.clone();
+        select_fixture_leaf(&mut after, 20);
+        let workspace = &mut after["nodes"][0]["nodes"][0];
+        match changed_group {
+            // A leaf ID is not a valid selection of a group whose child is a container.
+            10 => workspace["focus"] = json!([20, 101, 100]),
+            100 => workspace["nodes"][0]["focus"] = json!([21, 20]),
+            // The inactive group's configured selection must survive final global focus.
+            _ => workspace["nodes"][1]["focus"] = json!([22, 23]),
+        }
+        append_command_steps(&mut steps, "[con_id=20] focus", &current, &after);
+        let error = with_completed_session(&fixture, &config, steps, |session| {
+            session.initialize_group_selection(&config.layout.value, &[])?;
+            session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &[])
+        })
+        .unwrap_err();
+        assert!(
+            error.contains(&format!("group selection id={changed_group}:")),
+            "{error}"
+        );
     }
 }

@@ -111,17 +111,7 @@ fn load_with(
         .stage("initialize tabbed/stacked selections");
     session.initialize_group_selection(&config.layout.value, &root_path)?;
 
-    let (focus_leaf, focus_path) =
-        find_focus_leaf(&config.layout.value, config.focus.as_deref(), &root_path)
-            .ok_or("validated final focus window missing from layout")?;
-    let focus_id = session.expected_hierarchy.subtree_mut(&focus_path).id();
-    session
-        .diagnostics
-        .stage(format!("final focus leaf={focus_leaf:?} id={focus_id}"));
-    session.focus_container(&focus_path)?;
-    session.diagnostics.record(&format!(
-        "final focus verified leaf={focus_leaf:?} id={focus_id} workspace={target_workspace_id}"
-    ));
+    session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &root_path)?;
 
     Ok(sizing_warnings)
 }
@@ -363,7 +353,7 @@ impl<'a> Construction<'a> {
         Ok(after_command)
     }
 
-    fn focus_container(&mut self, path: &[usize]) -> Result<(), String> {
+    fn focus_container(&mut self, path: &[usize]) -> Result<Snapshot, String> {
         let container_id = self.expected_hierarchy.subtree_mut(path).id();
         let after_command = self.guarded_command(
             format!("[con_id={container_id}] focus"),
@@ -375,7 +365,7 @@ impl<'a> Construction<'a> {
             return Err(format!("explicit focus id={container_id} was not observed"));
         }
 
-        Ok(())
+        Ok(after_command)
     }
 
     // Workspace IDs cannot be selected with con_id criteria. Reach the frozen workspace
@@ -397,7 +387,10 @@ impl<'a> Construction<'a> {
         layout_node: &LayoutNode,
         path: &[usize],
     ) -> Result<(), String> {
-        let NodeKind::Group { layout, children } = &layout_node.kind else {
+        let NodeKind::Group {
+            layout, children, ..
+        } = &layout_node.kind
+        else {
             return Ok(());
         };
 
@@ -407,14 +400,50 @@ impl<'a> Construction<'a> {
             self.initialize_group_selection(&child.value, &child_path)?;
         }
 
-        // Focusing a descendant also selects its ancestors. Restore this group's first
-        // child after visiting descendants in later children; inactive groups keep their
-        // own child selections when focus subsequently leaves their subtree.
+        // Focusing a descendant also selects its ancestors. Restore this group after
+        // visiting every child, following nested active selections so they stay intact.
+        // Inactive groups keep their selections when focus leaves their subtree.
         if matches!(layout, GroupLayout::Tabbed | GroupLayout::Stacked) {
-            let (_, first_leaf_path) = find_focus_leaf(layout_node, None, path)
-                .ok_or("validated group has no first leaf")?;
-            self.focus_container(&first_leaf_path)?;
+            let (_, selected_leaf_path) = find_focus_leaf(layout_node, None, path)
+                .ok_or("validated group has no selected leaf")?;
+            let snapshot = self.focus_container(&selected_leaf_path)?;
+            let group_id = self.expected_hierarchy.subtree_mut(path).id();
+            let observed_group = snapshot
+                .tree
+                .find_as_ref(|node| node.id == group_id)
+                .ok_or("selection group missing")?;
+            verify_group_selections(layout_node, observed_group, None)?;
         }
+
+        Ok(())
+    }
+
+    fn apply_final_focus(
+        &mut self,
+        layout_node: &LayoutNode,
+        configured_focus: Option<&str>,
+        root_path: &[usize],
+    ) -> Result<(), String> {
+        let (focus_leaf, focus_path) = find_focus_leaf(layout_node, configured_focus, root_path)
+            .ok_or("validated final focus window missing from layout")?;
+        let focus_id = self.expected_hierarchy.subtree_mut(&focus_path).id();
+        self.diagnostics
+            .stage(format!("final focus leaf={focus_leaf:?} id={focus_id}"));
+        let snapshot = self.focus_container(&focus_path)?;
+
+        // The same guarded snapshot proves ownership, hierarchy, global focus, and
+        // inactive selections. Explicit focus overrides active only on its ancestry.
+        let root_id = self.expected_hierarchy.subtree_mut(root_path).id();
+        let observed_root = snapshot
+            .tree
+            .find_as_ref(|node| node.id == root_id)
+            .ok_or("layout root missing during selection verification")?;
+        let explicit_focus_path = configured_focus.map(|_| &focus_path[root_path.len()..]);
+        verify_group_selections(layout_node, observed_root, explicit_focus_path)?;
+        self.diagnostics.record(&format!(
+            "final focus verified leaf={focus_leaf:?} id={focus_id} workspace={}; group selections verified",
+            self.target_workspace_id
+        ));
 
         Ok(())
     }
@@ -427,7 +456,10 @@ impl<'a> Construction<'a> {
         path: &[usize],
         warnings: &mut Vec<String>,
     ) -> Result<(), String> {
-        let NodeKind::Group { layout, children } = &layout_node.kind else {
+        let NodeKind::Group {
+            layout, children, ..
+        } = &layout_node.kind
+        else {
             return Ok(());
         };
 
@@ -584,7 +616,10 @@ impl<'a> Construction<'a> {
         layout_node: &'a LayoutNode,
         insert_after: Option<Vec<usize>>,
     ) -> Result<Vec<usize>, String> {
-        let NodeKind::Group { layout, children } = &layout_node.kind else {
+        let NodeKind::Group {
+            layout, children, ..
+        } = &layout_node.kind
+        else {
             return self.launch_window(layout_node, insert_after);
         };
 
@@ -926,7 +961,7 @@ fn sibling_geometry(tree: &Node, group_id: i64) -> Result<(Vec<f64>, Vec<f64>), 
     Ok((dimensions, shares))
 }
 
-/// The configured focus window, or the first window in depth-first order, with its path.
+/// The explicit focus window, or the leaf reached through default child selections.
 fn find_focus_leaf<'a>(
     layout_node: &'a LayoutNode,
     configured_focus: Option<&str>,
@@ -938,6 +973,11 @@ fn find_focus_leaf<'a>(
             .then(|| (id.as_str(), path.to_vec())),
         NodeKind::Group { children, .. } => {
             for (child_index, child) in children.iter().enumerate() {
+                if configured_focus.is_none()
+                    && child_index != layout_node.default_focus_child_index()
+                {
+                    continue;
+                }
                 let mut child_path = path.to_vec();
                 child_path.push(child_index);
                 if let Some(found) = find_focus_leaf(&child.value, configured_focus, &child_path) {
@@ -947,6 +987,45 @@ fn find_focus_leaf<'a>(
             None
         }
     }
+}
+
+/// Call only with a hierarchy already verified against the complete owned layout.
+/// Sway's focus history lists direct children, even in inactive tab/stack containers.
+fn verify_group_selections(
+    layout_node: &LayoutNode,
+    observed: &Node,
+    explicit_focus_path: Option<&[usize]>,
+) -> Result<(), String> {
+    let NodeKind::Group {
+        layout, children, ..
+    } = &layout_node.kind
+    else {
+        return Ok(());
+    };
+    let focus_child = explicit_focus_path.and_then(|path| path.split_first());
+    if matches!(layout, GroupLayout::Tabbed | GroupLayout::Stacked) {
+        let selected_child_index = focus_child
+            .map(|(child_index, _)| *child_index)
+            .unwrap_or_else(|| layout_node.default_focus_child_index());
+        let selected_child_id = observed.nodes[selected_child_index].id;
+        if observed.focus.first() != Some(&selected_child_id) {
+            return Err(format!(
+                "group selection id={}: expected child {} id={selected_child_id}; observed child-focus history={:?}",
+                observed.id,
+                selected_child_index + 1,
+                observed.focus
+            ));
+        }
+    }
+
+    for (child_index, (child, observed_child)) in children.iter().zip(&observed.nodes).enumerate() {
+        let child_focus_path = focus_child.and_then(|(focus_child_index, rest)| {
+            (*focus_child_index == child_index).then_some(rest)
+        });
+        verify_group_selections(&child.value, observed_child, child_focus_path)?;
+    }
+
+    Ok(())
 }
 
 /// A disposable command connection is cancelled on expiry; never retry a command

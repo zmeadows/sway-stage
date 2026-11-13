@@ -7,7 +7,7 @@ native-group acceptance remains outstanding. Behavior is defined in the
 [development](DEVELOPMENT.md). Remaining work:
 
 - **Native groups, manual verification.** Guarded construction, recursive split sizing,
-  and postorder first-child tab/stack selection with final global focus are implemented.
+  and postorder configured tab/stack selection with final global focus are implemented.
   Manually verify inactive selection retention and explicit focus precedence, plus
   root and nested groups, singleton ancestry, and sibling insertion against the installed
   Sway version. Offline tree/event fixtures verify reactions, not the compositor's actual
