@@ -2275,6 +2275,45 @@ fn insertion_focus_moved_before_spawning_is_restored_within_a_bounded_budget() {
 }
 
 #[test]
+fn insertion_focus_request_and_prelaunch_fence_share_one_restoration_budget() {
+    let fixture = LaunchFixture::new();
+    let config = three_window_split_config(&fixture);
+    let (mut steps, insertion_tree) = steps_through_second_insertion_focus();
+
+    // The insertion focus request's result already shows the pointer on the first window.
+    steps.pop();
+    let moved = append_pointer_focus(&mut steps, &insertion_tree, 20);
+    steps.push(snapshot_step(moved.clone()));
+    // The pointer undoes all but the last restoration, which holds for that request.
+    for _ in 1..MAX_FOCUS_RESTORATIONS {
+        append_undone_focus_restoration(&mut steps, &moved, 21);
+        steps.extend([snapshot_step(moved.clone()), snapshot_step(moved.clone())]);
+    }
+    let restored = append_focus_restoration(&mut steps, &moved, 21);
+    steps.extend([
+        snapshot_step(restored.clone()),
+        snapshot_step(restored.clone()),
+    ]);
+
+    // The same launch's prelaunch fence then has no restorations left.
+    let moved_again = append_pointer_focus(&mut steps, &restored, 20);
+    steps.push(snapshot_step(moved_again));
+    let error = fixture.run(&config, steps).unwrap_err();
+
+    assert!(
+        error.contains("focus did not stay on container id=21 after 3 restorations"),
+        "{error}"
+    );
+    wait_for_launch_total(&fixture, 2);
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    assert_eq!(
+        log.matches("restoring id=21").count(),
+        MAX_FOCUS_RESTORATIONS,
+        "{log}"
+    );
+}
+
+#[test]
 fn insertion_focus_moved_during_the_window_wait_is_restored_only_while_safe() {
     for scenario in [
         "restored",
@@ -3158,7 +3197,7 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
         };
         let steps = vec![snapshot_step(loaded_tree.clone()), retitled, next];
         let error = with_completed_session(&fixture, &config, steps, |session| {
-            session.focus_container(&[0]).map(|_| ())
+            session.focus_container(&[0], &mut 0).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
@@ -3205,7 +3244,9 @@ fn final_focus_resolves_explicit_and_depth_first_leaf_and_verifies_result() {
                     find_focus_leaf(&config.layout.value, config.focus.as_deref(), &[]).unwrap();
                 assert_eq!(configured_window_id, if explicit { "w1" } else { "w0" });
                 assert_eq!(configured_window_path, [0, if explicit { 1 } else { 0 }]);
-                session.focus_container(&configured_window_path).map(|_| ())
+                session
+                    .focus_container(&configured_window_path, &mut 0)
+                    .map(|_| ())
             })
             .unwrap();
         }
@@ -3288,7 +3329,7 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
             }
         }
         let error = with_completed_session(&fixture, &config, steps, |session| {
-            session.focus_container(&[0]).map(|_| ())
+            session.focus_container(&[0], &mut 0).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
@@ -4185,7 +4226,7 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
         }
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.initialize_group_selection(&config.layout.value, &[])?;
-            session.focus_container(&[0, 0]).map(|_| ())
+            session.focus_container(&[0, 0], &mut 0).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");

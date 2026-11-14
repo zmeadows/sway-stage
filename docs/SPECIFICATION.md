@@ -374,11 +374,12 @@ explicit validated workspace numbers or names:
    Focus moving between the run's own windows inside the target workspace, such as with
    `focus_follows_mouse`, is recoverable. Before each focus-dependent step, and while an
    application starts until its window appears, construction rechecks the workspace, output,
-   ownership, and hierarchy, then explicitly refocuses the required container. Each focus
-   request or launch allows at most three restorations; further changes stop the run. A
-   window that opens beside a different focused window is not moved: the resulting
-   hierarchy difference is fatal. Restoration never repairs a tabbed/stacked selection
-   changed elsewhere; final selection verification still applies.
+   ownership, and hierarchy, then explicitly refocuses the required container. Each launch,
+   from its insertion focus until its window appears, and each other focus request allows
+   at most three restorations; further changes stop the run. A window that opens beside a
+   different focused window is not moved: the resulting hierarchy difference is fatal.
+   Restoration never repairs a tabbed/stacked selection changed elsewhere; final selection
+   verification still applies.
 3. Launch once per leaf in depth-first visual order, waiting for each window before
    continuing. Only a newly observed, unclaimed window absent from all pre-launch snapshots
    can match. Matching is global: a matching new window elsewhere, including the scratchpad,

@@ -33,8 +33,9 @@ const MAX_SIZING_PASSES: usize = 3;
 // Less than a tenth of a percentage point of improvement is not worth another pass.
 const MIN_SIZING_PROGRESS: f64 = 0.001;
 // Focus that moves between this run's containers inside the target workspace, as with
-// focus_follows_mouse, is restored at most this many times per focus request or launch.
-// Continued movement then stops the run instead of fighting the user's input.
+// focus_follows_mouse, is restored at most this many times per launch (from its insertion
+// focus until its window appears) or other focus request. Continued movement then stops the
+// run instead of fighting the user's input.
 const MAX_FOCUS_RESTORATIONS: usize = 3;
 
 pub fn load(
@@ -344,20 +345,25 @@ impl<'a> Construction<'a> {
     }
 
     /// Focuses an owned container and returns a settled snapshot that shows it focused.
-    fn focus_container(&mut self, path: &[usize]) -> Result<Snapshot, String> {
+    /// Restorations count against the caller's `focus_restorations` budget, which a launch
+    /// shares with the rest of its insertion focus.
+    fn focus_container(
+        &mut self,
+        path: &[usize],
+        focus_restorations: &mut usize,
+    ) -> Result<Snapshot, String> {
         let container_id = self.expected_hierarchy.subtree_mut(path).id();
         let mut after_command = self.guarded_command(
             &[format!("[con_id={container_id}] focus")],
             self.expected_hierarchy.clone(),
         )?;
 
-        let mut focus_restorations = 0;
         while !is_focused(&after_command.tree, container_id) {
             restore_focus(
                 self.connect,
                 self.diagnostics,
                 container_id,
-                &mut focus_restorations,
+                focus_restorations,
             )?;
             after_command = self.settled_snapshot()?;
         }
@@ -407,7 +413,8 @@ impl<'a> Construction<'a> {
         if matches!(layout, GroupLayout::Tabbed | GroupLayout::Stacked) {
             let (_, selected_leaf_path) = find_focus_leaf(layout_node, None, path)
                 .ok_or("validated group has no selected leaf")?;
-            let snapshot = self.focus_container(&selected_leaf_path)?;
+            let mut focus_restorations = 0;
+            let snapshot = self.focus_container(&selected_leaf_path, &mut focus_restorations)?;
             let group_id = self.expected_hierarchy.subtree_mut(path).id();
             let observed_group = snapshot
                 .tree
@@ -430,7 +437,8 @@ impl<'a> Construction<'a> {
         let focus_id = self.expected_hierarchy.subtree_mut(&focus_path).id();
         self.diagnostics
             .stage(format!("final focus leaf={focus_leaf:?} id={focus_id}"));
-        let snapshot = self.focus_container(&focus_path)?;
+        let mut focus_restorations = 0;
+        let snapshot = self.focus_container(&focus_path, &mut focus_restorations)?;
 
         // The same guarded snapshot proves ownership, hierarchy, global focus, and
         // inactive selections. Explicit focus overrides active only on its ancestry.
@@ -771,15 +779,15 @@ impl<'a> Construction<'a> {
 
         // Sway maps a new window beside whichever container is focused at that moment, so
         // insertion focus must hold from the prelaunch fence until the window appears.
-        // One restoration budget covers that fence and the whole wait.
+        // One restoration budget covers the focus request, that fence, and the whole wait.
         let insertion_container_id = insert_after
             .as_ref()
             .map(|previous_path| self.expected_hierarchy.subtree_mut(previous_path).id());
+        let mut insertion_focus_restorations = 0;
         if let Some(previous_path) = &insert_after {
-            self.focus_container(previous_path)?;
+            self.focus_container(previous_path, &mut insertion_focus_restorations)?;
         }
 
-        let mut insertion_focus_restorations = 0;
         loop {
             self.diagnostics.stage(format!(
                 "prelaunch leaf={configured_window_id:?} workspace={}",
