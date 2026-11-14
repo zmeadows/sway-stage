@@ -53,3 +53,14 @@ fn the_runner_role_is_a_private_flag_outside_the_interface() {
     assert!(parse_filter(&arguments(&[RUNNER_FLAG])).is_err());
     assert_ne!(RUNNER_FLAG, crate::process::PROBE_FLAG);
 }
+
+#[test]
+fn the_run_script_builds_and_runs_from_one_pinned_location() {
+    let script = include_str!("run.sh");
+
+    // Explicit flags override CARGO_TARGET_DIR, CARGO_BUILD_TARGET, and Cargo configuration,
+    // and the harness finds sway-stage beside the example it runs.
+    assert!(script.contains("host_target=$(rustc --print host-tuple)"));
+    assert!(script.contains(r#"--target-dir target --target "$host_target""#));
+    assert!(script.contains(r#"exec "target/$host_target/release/examples/integration" "$@""#));
+}

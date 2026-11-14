@@ -34,8 +34,6 @@ use crate::scenarios::{
 };
 use crate::{process, profile};
 
-/// This checkout's release build, which `tools/integration/run.sh` builds first.
-const SWAY_STAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage");
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -225,7 +223,13 @@ impl Harness {
             return Err("this harness requires exactly one Sway seat".into());
         }
 
-        let binary = process::find_executable(SWAY_STAGE)?;
+        let harness_executable =
+            env::current_exe().map_err(|error| format!("locate the harness: {error}"))?;
+        let sway_stage_path = sibling_sway_stage(&harness_executable)?;
+        let sway_stage_text = sway_stage_path
+            .to_str()
+            .ok_or("sway-stage path is not UTF-8")?;
+        let binary = process::find_executable(sway_stage_text)?;
         let search_path = env::var_os("PATH").unwrap_or_default();
         let foot = unresolved_executable_text("foot", &search_path)?;
         let sleep = unresolved_executable_text("sleep", &search_path)?;
@@ -1692,6 +1696,21 @@ fn check_configuration(
         IPC_TIMEOUT,
     )?;
     Ok(())
+}
+
+/// The sway-stage that the same `cargo build` placed beside this harness, which runs from
+/// `<profile directory>/examples/`. Never a separately built or installed copy.
+fn sibling_sway_stage(harness_executable: &Path) -> Result<PathBuf, String> {
+    let examples_directory = harness_executable
+        .parent()
+        .filter(|directory| directory.file_name() == Some(OsStr::new("examples")));
+    let Some(profile_directory) = examples_directory.and_then(Path::parent) else {
+        return Err(format!(
+            "{} is not a Cargo example build; use tools/integration/run.sh",
+            harness_executable.display()
+        ));
+    };
+    Ok(profile_directory.join("sway-stage"))
 }
 
 /// Foot and `sleep` keep the path found on `PATH`, unresolved, because a multi-call

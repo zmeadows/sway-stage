@@ -11,5 +11,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-cargo build --release --locked --bin sway-stage --example integration
-exec ./target/release/examples/integration "$@"
+# Explicit flags override CARGO_TARGET_DIR, CARGO_BUILD_TARGET, and Cargo configuration, so
+# both binaries are always built fresh in this one place. The harness then runs the
+# sway-stage built beside it.
+host_target=$(rustc --print host-tuple)
+cargo build --release --locked --target-dir target --target "$host_target" \
+    --bin sway-stage --example integration
+exec "target/$host_target/release/examples/integration" "$@"

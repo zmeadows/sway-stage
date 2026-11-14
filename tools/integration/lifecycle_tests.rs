@@ -1631,3 +1631,23 @@ fn returning_to_a_profile_target_requires_fresh_cleanup_evidence() {
     )
     .unwrap();
 }
+
+#[test]
+fn sway_stage_comes_from_the_same_cargo_build_as_the_harness() {
+    assert_eq!(
+        sibling_sway_stage(Path::new(
+            "/repo/target/x86_64-unknown-linux-gnu/release/examples/integration"
+        ))
+        .unwrap(),
+        Path::new("/repo/target/x86_64-unknown-linux-gnu/release/sway-stage")
+    );
+
+    for refused in [
+        "/repo/target/release/deps/integration-0123abcd",
+        "integration",
+        "/",
+    ] {
+        let error = sibling_sway_stage(Path::new(refused)).unwrap_err();
+        assert!(error.contains("run.sh"), "{refused:?}: {error}");
+    }
+}

@@ -50,8 +50,9 @@ tools/integration/run.sh                  # all 25 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
-`run.sh` builds `sway-stage` and the `integration` example in release mode, then runs the
-harness. `--filter` is a case-sensitive substring match over every scenario name, including
+`run.sh` builds `sway-stage` and the `integration` example in release mode into
+`target/<host triple>/release`, whatever `CARGO_TARGET_DIR` or a configured build target
+says, then runs the harness. `--filter` is a case-sensitive substring match over every scenario name, including
 the profile scenarios, and keeps suite order: `--filter single-window` runs one scenario and
 `--filter profile` the four profile scenarios. Any other argument, a missing or empty TEXT,
 or a filter that matches no scenario fails with exit status 2 before anything starts. A run
