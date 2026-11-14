@@ -33,8 +33,9 @@ pub struct Swaymsg {
 }
 
 impl Swaymsg {
-    /// Uses `SWAYSOCK` only. Never fall back to `I3SOCK` or socket discovery, which could
-    /// reach a compositor other than the disposable session.
+    /// Uses `SWAYSOCK` only, which the scenario runner receives from the headless session's
+    /// environment. Never fall back to `I3SOCK` or socket discovery, which could reach a
+    /// compositor other than the private session.
     pub fn from_environment() -> Result<Self, String> {
         let socket = env::var_os("SWAYSOCK")
             .filter(|path| !path.is_empty())
@@ -49,10 +50,6 @@ impl Swaymsg {
 
     /// A socket the caller created privately, such as a headless compositor's. Never
     /// consults `SWAYSOCK`, so a missing private socket cannot fall back to another session.
-    #[allow(
-        dead_code,
-        reason = "used by the headless session, not yet by the live harness"
-    )]
     pub fn at_socket(socket: PathBuf) -> Result<Self, String> {
         if !fs::metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
             return Err(format!("no Sway IPC socket at {}", socket.display()));
@@ -70,27 +67,15 @@ impl Swaymsg {
         command.env("SWAYSOCK", &self.socket);
     }
 
-    /// Read-only diagnostics remain possible after SIGINT, without another event fence.
-    pub fn remaining_tree(&self) -> Result<TreeNode, String> {
-        let mut command = self.invocation();
-        command.args(["-t", "get_tree"]);
-        let output = process::run_diagnostic(command, IPC_TIMEOUT)?;
-        serde_json::from_str(&output)
-            .map_err(|error| format!("remaining-window tree: invalid reply: {error}"))
+    /// The caller observes the result with an expected-switch fence.
+    pub fn switch_workspace(&self, name: &str) -> Result<(), String> {
+        self.command(&switch_command(name)?)
     }
 
-    pub fn switch_disposable(&self, number: &str) -> Result<(), String> {
-        self.command(&disposable_command(number)?)
-    }
-
-    pub fn restore_workspace(&self, name: &str) -> Result<(), String> {
-        self.command(&restoration_command(name)?)
-    }
-
-    /// Lifecycle has just fenced and independently verified the empty disposable ID.
-    pub fn rename_disposable(&self, old_name: &str, new_name: &str) -> Result<(), String> {
-        validate_restoration_name(old_name)?;
-        validate_restoration_name(new_name)?;
+    /// Lifecycle has just fenced and independently verified the empty workspace's ID.
+    pub fn rename_workspace(&self, old_name: &str, new_name: &str) -> Result<(), String> {
+        validate_workspace_name(old_name)?;
+        validate_workspace_name(new_name)?;
         self.command(&format!(
             "rename workspace \"{old_name}\" to \"{new_name}\""
         ))
@@ -118,10 +103,6 @@ impl Swaymsg {
         self.query("get_workspaces", None)
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by the headless session, not yet by the live harness"
-    )]
     pub fn get_outputs(&self) -> Result<Vec<Output>, String> {
         self.query("get_outputs", None)
     }
@@ -250,39 +231,24 @@ impl EventSubscription {
     }
 }
 
-/// Positive decimal workspace numbers, with neither leading zeros nor command syntax.
-pub fn workspace_number(text: &str) -> Result<String, String> {
-    let bytes = text.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > 9
-        || !matches!(bytes[0], b'1'..=b'9')
-        || !bytes.iter().all(u8::is_ascii_digit)
-    {
-        return Err("use an explicit positive workspace number (1–999999999)".into());
-    }
-    Ok(text.to_owned())
-}
-
-/// Validate before any switch, and again where the restoration command is constructed.
-pub fn validate_restoration_name(name: &str) -> Result<(), String> {
+/// Only names that can be quoted into a Sway command without escaping. Checked wherever a
+/// command naming a workspace is constructed.
+pub fn validate_workspace_name(name: &str) -> Result<(), String> {
     let mut bytes = name.bytes();
     if !bytes
         .next()
         .is_some_and(|first| first.is_ascii_alphanumeric())
         || !bytes.all(|byte| byte.is_ascii_alphanumeric() || b" _.:+-".contains(&byte))
     {
-        return Err("starting workspace name cannot be safely represented by this harness".into());
+        return Err(format!(
+            "workspace name {name:?} cannot be safely represented in a Sway command"
+        ));
     }
     Ok(())
 }
 
-fn disposable_command(number: &str) -> Result<String, String> {
-    let number = workspace_number(number)?;
-    Ok(format!("workspace --no-auto-back-and-forth {number}"))
-}
-
-fn restoration_command(name: &str) -> Result<String, String> {
-    validate_restoration_name(name)?;
+fn switch_command(name: &str) -> Result<String, String> {
+    validate_workspace_name(name)?;
     Ok(format!("workspace --no-auto-back-and-forth \"{name}\""))
 }
 
@@ -453,10 +419,6 @@ pub struct Workspace {
 }
 
 /// A `get_outputs` entry.
-#[allow(
-    dead_code,
-    reason = "used by the headless session, not yet by the live harness"
-)]
 #[derive(Debug, Deserialize)]
 pub struct Output {
     pub name: String,

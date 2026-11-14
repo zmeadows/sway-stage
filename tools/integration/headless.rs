@@ -87,12 +87,6 @@ impl SessionDirectory {
         &self.root
     }
 
-    pub fn create_private_subdirectory(&self, name: &str) -> Result<PathBuf, String> {
-        let path = self.root.join(name);
-        create_private_directory(&path)?;
-        Ok(path)
-    }
-
     /// Only after the session stopped cleanly and every check passed.
     pub fn remove(self) -> Result<(), String> {
         fs::remove_dir_all(&self.root)
@@ -203,11 +197,6 @@ impl HeadlessSession {
             wayland_display,
             client_environment,
         })
-    }
-
-    /// Bound to this session's private socket only.
-    pub fn sway(&self) -> &Swaymsg {
-        &self.sway
     }
 
     pub fn compositor_pid(&self) -> u32 {
@@ -428,8 +417,9 @@ fn observe_readiness(directory: &SessionDirectory) -> Result<(Swaymsg, OsString)
 }
 
 /// Exactly the configured headless output. A real output name means the wrong compositor;
-/// the backend's 1280x720 default means the configuration has not been applied.
-fn verify_virtual_output(outputs: &[Output]) -> Result<(), String> {
+/// the backend's 1280x720 default means the configuration has not been applied. The
+/// scenario runner repeats this check before it changes anything.
+pub fn verify_virtual_output(outputs: &[Output]) -> Result<(), String> {
     let [output] = outputs else {
         let names: Vec<&str> = outputs.iter().map(|output| output.name.as_str()).collect();
         return Err(format!(

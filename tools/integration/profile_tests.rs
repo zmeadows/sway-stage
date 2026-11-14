@@ -18,22 +18,6 @@ fn fixtures(case: Case) -> [Scenario; 2] {
 }
 
 #[test]
-fn workspace_numbers_are_distinct_and_obey_existing_restrictions() {
-    workspace_eligibility("8", "9", "10").unwrap();
-    for numbers in [
-        ("8", "8", "10"),
-        ("8", "9", "8"),
-        ("8", "9", "9"),
-        ("8", "9", "01"),
-        ("8", "9", "0"),
-        ("8", "9", "1;kill"),
-        ("8", "9", "1000000000"),
-    ] {
-        assert!(workspace_eligibility(numbers.0, numbers.1, numbers.2).is_err());
-    }
-}
-
-#[test]
 fn fixtures_use_unique_selectors_preserve_argv_and_render_ordered_profiles() {
     let mut selectors = HashSet::new();
     for case in CASES {

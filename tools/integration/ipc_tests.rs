@@ -1,13 +1,13 @@
 use super::*;
 
 #[test]
-fn commands_accept_only_validated_workspace_names_numbers_and_exact_ids() {
+fn commands_accept_only_validated_workspace_names_and_exact_ids() {
     assert_eq!(
-        disposable_command("9").unwrap(),
-        "workspace --no-auto-back-and-forth 9"
+        switch_command("2").unwrap(),
+        "workspace --no-auto-back-and-forth \"2\""
     );
     assert_eq!(
-        restoration_command("1: Main +_a.b-c").unwrap(),
+        switch_command("1: Main +_a.b-c").unwrap(),
         "workspace --no-auto-back-and-forth \"1: Main +_a.b-c\""
     );
     assert_eq!(close_command(42).unwrap(), "[con_id=42] kill");
@@ -15,13 +15,10 @@ fn commands_accept_only_validated_workspace_names_numbers_and_exact_ids() {
         close_command(i64::MAX).unwrap(),
         format!("[con_id={}] kill", i64::MAX)
     );
-    for invalid in ["0", "09", "1000000000", "9;kill", "9\n", "９"] {
-        assert!(disposable_command(invalid).is_err());
-    }
     for invalid in [
-        "", "-a", "a\"", "a\\b", "a;b", "a,b", "a\nb", "a\tb", "a\0b", "é",
+        "", "-a", "a\"", "a\\b", "a;b", "a,b", "a\nb", "a\tb", "a\0b", "é", "9;kill", "９",
     ] {
-        assert!(restoration_command(invalid).is_err(), "{invalid:?}");
+        assert!(switch_command(invalid).is_err(), "{invalid:?}");
     }
     assert!(close_command(0).is_err());
     assert!(close_command(-1).is_err());

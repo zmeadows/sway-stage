@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use crate::ipc::{TreeNode, WindowChange, WindowEvent, workspace_number};
+use crate::ipc::{TreeNode, WindowChange, WindowEvent};
 use crate::observation::{Failure, Snapshot, WorkspaceIdentity, walk};
 use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
 use crate::preservation::output_ancestry;
@@ -33,16 +33,6 @@ impl Case {
             Self::Partial => "profile-partial-failure",
         }
     }
-}
-
-pub fn workspace_eligibility(primary: &str, foreign: &str, second: &str) -> Result<(), String> {
-    for number in [primary, foreign, second] {
-        workspace_number(number)?;
-    }
-    if primary == foreign || primary == second || foreign == second {
-        return Err("primary, foreign, and profile workspaces must all differ".into());
-    }
-    Ok(())
 }
 
 /// The wrapper records *launches*, including launches that never create a window. It
@@ -276,7 +266,7 @@ pub fn verify_rename_preparation(
     destination: &str,
 ) -> Result<(), Failure> {
     observed.validate()?;
-    crate::ipc::validate_restoration_name(destination)?;
+    crate::ipc::validate_workspace_name(destination)?;
     require_quiet(&observed.window_events, None)?;
     let workspace = observed.focused_workspace();
     let expected_number = primary.name.parse::<i32>().unwrap_or(-1);

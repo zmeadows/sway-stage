@@ -38,11 +38,12 @@ pub struct ExpectedSwitch {
 /// The event subscription and the focus history derived from it.
 pub struct Events {
     subscription: EventSubscription,
-    /// The workspace that event history has established as focused: recorded by preflight,
-    /// then changed only by an expected switch. Until it is set, any focus change fails.
+    /// The workspace that event history has established as focused: recorded by the initial
+    /// observation, then changed only by an expected switch or rename. Until it is set, any
+    /// focus change fails.
     current_workspace: Option<WorkspaceIdentity>,
     /// Cleared by any fence or snapshot consistency failure, and never restored. Unlike an
-    /// ordinary failure, untrusted history forbids further fences and workspace restoration.
+    /// ordinary failure, untrusted history forbids further fences and cleanup.
     focus_history_trusted: bool,
     workspace_revision: u64,
 }
@@ -81,7 +82,7 @@ impl Events {
         self.current_workspace.as_ref()
     }
 
-    /// Records the focused workspace that preflight observed.
+    /// Records the focused workspace that the run's initial observation verified.
     pub fn set_current_workspace(&mut self, workspace: &Workspace) {
         self.current_workspace = Some(WorkspaceIdentity {
             id: workspace.id,
@@ -94,7 +95,7 @@ impl Events {
     }
 
     /// Marks focus history untrusted and returns `message` as the error, for failures that
-    /// leave user control uncertain rather than merely failing a check.
+    /// leave workspace control uncertain rather than merely failing a check.
     pub fn distrust_focus_history(&mut self, message: impl Into<String>) -> String {
         self.focus_history_trusted = false;
         message.into()
@@ -234,15 +235,17 @@ fn apply_workspace_event(
                 *switch_window_index = Some(window_event_count);
             } else if let Some(current_workspace) = current_workspace.as_ref() {
                 // Refocusing the same workspace is harmless. Any other focus change means
-                // the user has taken control, even if focus has returned by the next
-                // snapshot.
+                // something other than the harness moved focus, even if focus has returned
+                // by the next snapshot.
                 if current_id != Some(current_workspace.id)
                     || old_id.is_some_and(|id| id != current_workspace.id)
                 {
-                    return Err("workspace focus changed; user control takes precedence".into());
+                    return Err(
+                        "workspace focus changed; the harness no longer controls focus".into(),
+                    );
                 }
             } else {
-                return Err("workspace focus changed during initial preflight".into());
+                return Err("workspace focus changed during the initial observation".into());
             }
         }
         WorkspaceChange::Reload | WorkspaceChange::Rename | WorkspaceChange::Move => {
@@ -267,16 +270,16 @@ fn apply_workspace_event(
 /// without further cleanup; only `report` turns one into a message.
 #[derive(Debug)]
 pub enum Failure {
-    /// An expectation failed, such as sizing, while window ownership and user control
-    /// remain established. Workspace restoration may still be attempted.
+    /// An expectation failed, such as sizing, while window ownership and workspace control
+    /// remain established.
     Check(String),
-    /// Window ownership, placement, identity, or user control is uncertain.
+    /// Window ownership, placement, identity, or workspace control is uncertain.
     Uncertain(String),
 }
 
 impl Failure {
     /// Returns the message to report. An uncertain failure also distrusts focus history,
-    /// which refuses every later fence and so forbids cleanup and workspace restoration.
+    /// which refuses every later fence and so forbids cleanup.
     pub fn report(self, events: &mut Events) -> String {
         self.report_history(&mut events.focus_history_trusted)
     }

@@ -8,13 +8,14 @@
 
 #![allow(
     dead_code,
-    reason = "IPC, process, session, and preparation code is exercised only by user-run executables"
+    reason = "launcher, session, IPC, process, and runner code runs only in the user-run executable"
 )]
 
 mod capture;
 mod fixtures;
 mod headless;
 mod ipc;
+mod launcher;
 mod layout;
 mod lifecycle;
 mod observation;

@@ -1,8 +1,9 @@
 use super::*;
 use crate::fixtures::{
-    OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, TARGET_WORKSPACE_ID, accepted_windows,
-    assert_contains, configured_app_id, container_ids, desktop, find, group, node_mut, parse_tree,
-    rect, standard_scenario, uncertain_message, wayland_window, window_event, workspaces_reply,
+    OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SCRATCHPAD_WORKSPACE_ID,
+    TARGET_WORKSPACE_ID, accepted_windows, assert_contains, configured_app_id, container_ids,
+    desktop, find, group, node_mut, parse_tree, rect, standard_scenario, uncertain_message,
+    wayland_window, window_event, workspaces_reply,
 };
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -31,204 +32,6 @@ fn target_identity() -> WorkspaceIdentity {
     }
 }
 
-fn original_identity() -> WorkspaceIdentity {
-    WorkspaceIdentity {
-        id: OTHER_WORKSPACE_ID,
-        name: "1".into(),
-    }
-}
-
-#[test]
-fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
-    assert!(Arguments::try_parse_from(["integration"]).is_err());
-    for workspace in ["1", "9", "999999999"] {
-        let arguments = Arguments::try_parse_from([
-            "integration",
-            "--workspace",
-            workspace,
-            "--foreign-workspace",
-            "8",
-        ])
-        .unwrap();
-        assert_eq!(arguments.workspace, workspace);
-        assert_eq!(arguments.foreign_workspace, "8");
-        assert_eq!(arguments.profile_workspace, None);
-        assert_eq!(
-            arguments.binary,
-            concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage")
-        );
-    }
-    let arguments = Arguments::try_parse_from([
-        "integration",
-        "--workspace",
-        "9",
-        "--foreign-workspace",
-        "8",
-        "--profile-workspace",
-        "10",
-        "--binary",
-        "/a path/sway-stage",
-    ])
-    .unwrap();
-    assert_eq!(arguments.profile_workspace.as_deref(), Some("10"));
-    assert_eq!(arguments.binary, "/a path/sway-stage");
-
-    for invalid in [
-        "",
-        "0",
-        "01",
-        "+1",
-        "-1",
-        "1000000000",
-        "1;kill",
-        "9: test",
-        " 9",
-        "9\n",
-        "９",
-    ] {
-        assert!(
-            Arguments::try_parse_from([
-                "integration",
-                "--workspace",
-                invalid,
-                "--foreign-workspace",
-                "8"
-            ])
-            .is_err(),
-            "{invalid:?}"
-        );
-    }
-    for arguments in [
-        vec!["integration", "--workspace", "9", "--workspace", "8"],
-        vec!["integration", "--workspace", "9", "--unknown"],
-        vec!["integration", "--workspace", "9", "extra"],
-        vec!["integration", "--workspace"],
-        // Removed optional-application options fail rather than silently reducing coverage.
-        vec!["integration", "--workspace", "9", "--extended"],
-        vec![
-            "integration",
-            "--workspace",
-            "9",
-            "--firefox-app-id",
-            "firefox",
-        ],
-        vec![
-            "integration",
-            "--workspace",
-            "9",
-            "--appimage",
-            "/apps/a.AppImage",
-        ],
-        vec![
-            "integration",
-            "--workspace",
-            "9",
-            "--flatpak",
-            "org.example.App",
-        ],
-    ] {
-        let mut arguments = arguments;
-        arguments.extend(["--foreign-workspace", "8"]);
-        assert!(Arguments::try_parse_from(arguments).is_err());
-    }
-    assert!(Arguments::try_parse_from(["integration", "--workspace", "9"]).is_err());
-    assert!(
-        Arguments::try_parse_from([
-            "integration",
-            "--workspace",
-            "9",
-            "--foreign-workspace",
-            "08"
-        ])
-        .is_err()
-    );
-}
-
-#[test]
-fn preflight_accepts_only_an_empty_or_absent_designated_workspace() {
-    let eligibility = preflight_eligibility(&starting_snapshot(), "9").unwrap();
-
-    assert_eq!(eligibility.original, original_identity());
-    assert_eq!(eligibility.designated_id, Some(TARGET_WORKSPACE_ID));
-
-    let mut absent = starting_snapshot();
-    absent.workspaces.pop();
-    // Remove the target from the tree too, keeping a valid snapshot fixture.
-    absent.tree.nodes[1].nodes.pop();
-    assert_eq!(
-        preflight_eligibility(&absent, "9").unwrap().designated_id,
-        None
-    );
-
-    for floating in [false, true] {
-        let mut tree = desktop("splith", Vec::new(), PREEXISTING_WINDOW_ID);
-        let target = node_mut(&mut tree, TARGET_WORKSPACE_ID);
-        let child_key = if floating { "floating_nodes" } else { "nodes" };
-        // Even a structural container with no windows counts as occupancy.
-        target[child_key] = json!([group(30, "splith", rect(0, 0, 1920, 1080), Vec::new())]);
-        let snapshot = recorded_snapshot(tree, "1", OTHER_WORKSPACE_ID);
-        assert_contains(
-            &preflight_eligibility(&snapshot, "9").err().unwrap(),
-            "occupied",
-        );
-    }
-}
-
-#[test]
-fn preflight_refuses_the_starting_workspace_ambiguous_numbers_and_unsafe_names() {
-    let focused_target = recorded_snapshot(
-        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
-        "9",
-        TARGET_WORKSPACE_ID,
-    );
-
-    assert_contains(
-        &preflight_eligibility(&focused_target, "9").err().unwrap(),
-        "starting workspace",
-    );
-
-    let mut numbered_start = starting_snapshot();
-    numbered_start.workspaces[0].num = 9;
-    numbered_start.workspaces[0].name = "9: original".into();
-    find_and_rename(&mut numbered_start.tree, OTHER_WORKSPACE_ID, "9: original");
-    assert_contains(
-        &preflight_eligibility(&numbered_start, "9").err().unwrap(),
-        "starting workspace",
-    );
-
-    let mut differently_named = starting_snapshot();
-    differently_named.workspaces[1].name = "9: other".into();
-    find_and_rename(&mut differently_named.tree, TARGET_WORKSPACE_ID, "9: other");
-    assert_contains(
-        &preflight_eligibility(&differently_named, "9")
-            .err()
-            .unwrap(),
-        "differently named",
-    );
-
-    let mut ambiguous = starting_snapshot();
-    ambiguous.workspaces.push(crate::ipc::Workspace {
-        id: 40,
-        num: 9,
-        name: "9: another".into(),
-        focused: false,
-    });
-    assert_contains(
-        &preflight_eligibility(&ambiguous, "9").err().unwrap(),
-        "ambiguous",
-    );
-
-    for unsafe_name in ["", "-start", "start\"", "start;kill", "start\n", "スタート"] {
-        let mut unsafe_start = starting_snapshot();
-        unsafe_start.workspaces[0].name = unsafe_name.into();
-        find_and_rename(&mut unsafe_start.tree, OTHER_WORKSPACE_ID, unsafe_name);
-        assert_contains(
-            &preflight_eligibility(&unsafe_start, "9").err().unwrap(),
-            "safely represented",
-        );
-    }
-}
-
 fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
     if tree.id == id {
         tree.name = Some(name.into());
@@ -236,6 +39,157 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
     for child in tree.nodes.iter_mut().chain(&mut tree.floating_nodes) {
         find_and_rename(child, id, name);
     }
+}
+
+/// Every registered scenario, in the order a run executes them.
+const SUITE_ORDER: [&str; 25] = [
+    "single-window",
+    "horizontal-pair",
+    "vertical-pair",
+    "uneven-siblings",
+    "mixed-nesting",
+    "deep-nesting",
+    "sibling-nested-groups",
+    "process-execution",
+    "default-focus",
+    "occupied-workspace-refusal",
+    "capture-reload-roundtrip",
+    "root-tabbed",
+    "root-stacked",
+    "singleton-groups",
+    "mixed-native-nesting",
+    "independent-native-groups",
+    "mixed-capture-reload",
+    "initially-tabbed",
+    "initially-stacked",
+    "outside-focus-capture-reload",
+    "duplicate-foot-ids",
+    "profile-success",
+    "profile-occupied-refusal",
+    "profile-partial-failure",
+    "profile-named-success",
+];
+
+#[test]
+fn every_scenario_is_registered_once_and_selected_by_default_in_suite_order() {
+    assert_eq!(suite_scenario_names(), SUITE_ORDER);
+    assert_eq!(select_scenarios(None).unwrap(), SUITE_ORDER);
+
+    let unique_names: HashSet<&str> = SUITE_ORDER.into_iter().collect();
+    assert_eq!(unique_names.len(), SUITE_ORDER.len());
+}
+
+#[test]
+fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
+    assert_eq!(
+        select_scenarios(Some("single-window")).unwrap(),
+        ["single-window"]
+    );
+    assert_eq!(
+        select_scenarios(Some("pair")).unwrap(),
+        ["horizontal-pair", "vertical-pair"]
+    );
+    assert_eq!(
+        select_scenarios(Some("capture-reload")).unwrap(),
+        [
+            "capture-reload-roundtrip",
+            "mixed-capture-reload",
+            "outside-focus-capture-reload"
+        ]
+    );
+    assert_eq!(
+        select_scenarios(Some("profile")).unwrap(),
+        [
+            "profile-success",
+            "profile-occupied-refusal",
+            "profile-partial-failure",
+            "profile-named-success"
+        ]
+    );
+    assert_eq!(
+        select_scenarios(Some("refusal")).unwrap(),
+        ["occupied-workspace-refusal", "profile-occupied-refusal"]
+    );
+
+    // Matching is a case-sensitive substring test; no match is an error naming the filter.
+    for unmatched in ["PAIR", "no-such-scenario"] {
+        let error = select_scenarios(Some(unmatched)).unwrap_err();
+        assert_contains(&error, &format!("{unmatched:?} matches no scenario"));
+        assert_contains(&error, "single-window");
+    }
+}
+
+#[test]
+fn workspace_plan_starts_on_the_fresh_workspace_and_uses_distinct_safe_names() {
+    assert_eq!(FIXTURE_WORKSPACE, "1");
+
+    let names = [FIXTURE_WORKSPACE, PRIMARY_WORKSPACE, PROFILE_WORKSPACE];
+    let unique_names: HashSet<&str> = names.into_iter().collect();
+    assert_eq!(unique_names.len(), names.len());
+    for name in names {
+        crate::ipc::validate_workspace_name(name).unwrap();
+    }
+}
+
+/// A compositor nothing has used: only workspace "1", focused and empty, on one output.
+fn fresh_compositor_tree() -> Value {
+    let mut tree = desktop("splith", Vec::new(), OTHER_WORKSPACE_ID);
+    // The real output, after Sway's hidden scratchpad output.
+    let output_workspaces = tree["nodes"][1]["nodes"].as_array_mut().unwrap();
+    output_workspaces.retain(|workspace| workspace["id"] == OTHER_WORKSPACE_ID);
+    output_workspaces[0]["nodes"] = json!([]);
+    tree
+}
+
+/// The snapshot of a `fresh_compositor_tree`, possibly modified.
+fn fresh_compositor_snapshot(tree: Value) -> Snapshot {
+    let mut workspaces = workspaces_reply("1");
+    workspaces.retain(|workspace| workspace.id == OTHER_WORKSPACE_ID);
+    Snapshot {
+        tree: parse_tree(tree),
+        workspaces,
+        focused_workspace_id: OTHER_WORKSPACE_ID,
+        window_events: Vec::new(),
+    }
+}
+
+#[test]
+fn only_a_fresh_compositor_starts_a_run() {
+    let fresh = fresh_compositor_snapshot(fresh_compositor_tree());
+    assert_eq!(verify_fresh_compositor(&fresh).unwrap().name, "1");
+
+    // Another workspace and a window: a used desktop, not a fresh compositor.
+    assert_contains(
+        &uncertain_message(verify_fresh_compositor(&starting_snapshot())),
+        r#"found ["1", "9"]"#,
+    );
+
+    for child_key in ["nodes", "floating_nodes"] {
+        let mut tree = fresh_compositor_tree();
+        // Even an empty structural container makes the workspace occupied.
+        node_mut(&mut tree, OTHER_WORKSPACE_ID)[child_key] =
+            json!([group(30, "splith", rect(0, 0, 1920, 1080), Vec::new())]);
+        assert_contains(
+            &uncertain_message(verify_fresh_compositor(&fresh_compositor_snapshot(tree))),
+            "occupied",
+        );
+    }
+
+    let mut tree = fresh_compositor_tree();
+    node_mut(&mut tree, SCRATCHPAD_WORKSPACE_ID)["floating_nodes"] =
+        json!([wayland_window(40, "hidden", rect(0, 0, 100, 100))]);
+    assert_contains(
+        &uncertain_message(verify_fresh_compositor(&fresh_compositor_snapshot(tree))),
+        "found container 40",
+    );
+
+    let mut renamed = fresh_compositor_snapshot(fresh_compositor_tree());
+    renamed.workspaces[0].name = "2".into();
+    find_and_rename(&mut renamed.tree, OTHER_WORKSPACE_ID, "2");
+    assert_contains(
+        &uncertain_message(verify_fresh_compositor(&renamed)),
+        r#"starts on workspace "1", found "2""#,
+    );
 }
 
 fn loaded_pair_snapshot(scenario: &Scenario) -> Snapshot {
@@ -568,51 +522,6 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
 }
 
 #[test]
-fn restoration_requires_exact_original_identity_and_trusted_disposable_focus() {
-    let original = original_identity();
-    let target = target_identity();
-    let mut snapshot = recorded_snapshot(
-        desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
-        "9",
-        TARGET_WORKSPACE_ID,
-    );
-
-    assert!(controls_target(true, Some(&target), &target));
-    assert!(!controls_target(false, Some(&target), &target));
-    assert!(!controls_target(true, Some(&original), &target));
-    assert!(!controls_target(true, None, &target));
-    assert_eq!(
-        restoration_refusal(&snapshot, &original, &target, true),
-        None
-    );
-    assert_eq!(
-        restoration_refusal(&snapshot, &original, &target, false),
-        Some(LOST_CONTROL)
-    );
-    assert_eq!(
-        restoration_refusal(&starting_snapshot(), &original, &target, true),
-        Some(LOST_CONTROL)
-    );
-
-    snapshot.workspaces[0].id = 100;
-    assert_eq!(
-        restoration_refusal(&snapshot, &original, &target, true),
-        Some(ORIGINAL_GONE)
-    );
-    snapshot.workspaces[0].id = original.id;
-    snapshot.workspaces[0].name = "renamed".into();
-    assert_eq!(
-        restoration_refusal(&snapshot, &original, &target, true),
-        Some(ORIGINAL_GONE)
-    );
-    snapshot.workspaces.remove(0);
-    assert_eq!(
-        restoration_refusal(&snapshot, &original, &target, true),
-        Some(ORIGINAL_GONE)
-    );
-}
-
-#[test]
 fn operation_deadlines_keep_their_established_limits() {
     assert_eq!(CAPTURE_TIMEOUT, Duration::from_secs(15));
     assert_eq!(
@@ -626,7 +535,7 @@ fn operation_deadlines_keep_their_established_limits() {
 }
 
 #[test]
-fn temporary_yaml_is_private_replaced_safely_and_automatically_removed() {
+fn temporary_yaml_is_private_and_replaced_safely() {
     let test_id = format!("{RUN_ID}-{}-private-yaml", std::process::id());
     let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
     let path = directory.path.clone();
@@ -650,8 +559,11 @@ fn temporary_yaml_is_private_replaced_safely_and_automatically_removed() {
     symlink(&captured, path.join("symlink.yaml")).unwrap();
     assert!(directory.write("symlink", "changed").is_err());
     assert_eq!(fs::read_to_string(&captured).unwrap(), "second");
+
+    // Dropping it removes nothing: the launcher keeps the session directory after a failure.
     drop(directory);
-    assert!(!path.exists());
+    assert!(captured.is_file());
+    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -707,9 +619,7 @@ fn private_process_directory_refuses_existing_entries_and_missing_parents() {
             .unwrap_err()
             .contains("create private process cwd")
     );
-    let path = directory.path.clone();
-    drop(directory);
-    assert!(!path.exists());
+    fs::remove_dir_all(&directory.path).unwrap();
 }
 
 fn refused_output(code: i32, stderr: &str) -> process::CompletedProcess {
@@ -828,22 +738,8 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
 }
 
 #[test]
-fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_cleanup() {
+fn foreign_fixture_requires_its_own_launch_evidence_for_cleanup() {
     use crate::fixtures::{FOOT, SLEEP};
-
-    assert!(fixture_eligibility("9", "8").is_ok());
-    assert!(fixture_eligibility("9", "9").is_err());
-    assert!(fixture_eligibility("9", "8;kill").is_err());
-    // Both numbered targets independently use the existing preflight rules: occupied,
-    // original, and differently named workspaces never become fixtures.
-    assert!(preflight_eligibility(&starting_snapshot(), "1").is_err());
-    assert!(
-        preflight_eligibility(
-            &loaded_pair_snapshot(&standard_scenario("horizontal-pair")),
-            "9"
-        )
-        .is_err()
-    );
 
     let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
     let fixture_app_id = configured_app_id(&scenario, "window1");
@@ -1024,58 +920,6 @@ fn fixture_creation_evidence_survives_expected_focus_changes_but_never_changed_s
         &fixture,
         &workspace_baseline,
     ));
-}
-
-#[test]
-fn refusal_notification_stub_is_private_and_scoped_to_the_refusal_command() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    let test_id = format!("{RUN_ID}-{}-refusal-notification", std::process::id());
-    let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
-    let original_path = env::var_os("PATH");
-    let inherited_path = OsString::from_vec(b"/tools with spaces:/non-utf8-\xff:/usr/bin".to_vec());
-    let binary = Path::new("/a path/sway-stage");
-    let refused = directory.refusal_command(binary, &inherited_path).unwrap();
-
-    let notification_bin = directory.path.join("refusal-notification-bin");
-    let stub = notification_bin.join("notify-send");
-
-    assert_eq!(fs::read(&stub).unwrap(), b"#!/bin/sh\nexit 0\n");
-    for path in [&notification_bin, &stub] {
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
-    let overrides: Vec<_> = refused.get_envs().collect();
-    let [(key, Some(child_path))] = overrides.as_slice() else {
-        panic!("expected only one child PATH override: {overrides:?}");
-    };
-    assert_eq!(*key, OsStr::new("PATH"));
-    assert_eq!(
-        env::split_paths(child_path).collect::<Vec<_>>(),
-        [
-            notification_bin,
-            PathBuf::from("/tools with spaces"),
-            PathBuf::from(OsString::from_vec(b"/non-utf8-\xff".to_vec())),
-            PathBuf::from("/usr/bin"),
-        ]
-    );
-    assert_eq!(env::var_os("PATH"), original_path);
-
-    let ordinary = configured_command(binary, &directory.path, "load", "single-window");
-    assert_eq!(refused.get_program(), ordinary.get_program());
-    assert_eq!(
-        refused.get_args().collect::<Vec<_>>(),
-        ordinary.get_args().collect::<Vec<_>>()
-    );
-    assert_eq!(ordinary.get_envs().count(), 0);
-    // An existing stub directory is never reused or overwritten.
-    assert!(directory.refusal_command(binary, &inherited_path).is_err());
-    let path = directory.path.clone();
-    drop(directory);
-    assert!(!path.exists());
 }
 
 #[test]
@@ -1621,40 +1465,6 @@ fn initial_layout_failure_leaves_no_launch_or_cleanup_evidence() {
 }
 
 #[test]
-fn optional_profile_workspace_uses_the_same_preflight_rules_before_mutation() {
-    let base = [
-        "integration",
-        "--workspace",
-        "8",
-        "--foreign-workspace",
-        "9",
-    ];
-    assert!(
-        Arguments::try_parse_from(base)
-            .unwrap()
-            .profile_workspace
-            .is_none()
-    );
-    let mut arguments = base.to_vec();
-    arguments.extend(["--profile-workspace", "10"]);
-    assert_eq!(
-        Arguments::try_parse_from(arguments)
-            .unwrap()
-            .profile_workspace
-            .as_deref(),
-        Some("10")
-    );
-    for invalid in ["0", "01", "10: named", "1000000000", "10;kill"] {
-        let mut arguments = base.to_vec();
-        arguments.extend(["--profile-workspace", invalid]);
-        assert!(Arguments::try_parse_from(arguments).is_err());
-    }
-    // Eligibility is independent of which flag designates the candidate number.
-    assert!(preflight_eligibility(&starting_snapshot(), "1").is_err());
-    assert!(preflight_eligibility(&starting_snapshot(), "9").is_ok());
-}
-
-#[test]
 fn profile_refusal_requires_specific_diagnostics_and_an_unchanged_desktop() {
     let before = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
@@ -1770,6 +1580,7 @@ fn profile_launch_record_distinguishes_refusal_order_and_no_window_launches() {
         fs::write(&record, incorrect).unwrap();
         assert!(verify_profile_launch_record(&record, &layouts, profile::Case::Partial).is_err());
     }
+    fs::remove_dir_all(&directory.path).unwrap();
 }
 
 #[test]

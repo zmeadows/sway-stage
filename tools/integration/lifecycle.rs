@@ -1,6 +1,8 @@
-//! Explicit executable lifecycle: preflight, scenarios, verified closes, and restoration.
-//! A failure leaves windows alone. Only the success path enters cleanup; restoration is
-//! a separate, guarded operation. Files and the IPC helper may be dropped, never windows.
+//! The scenario runner: a foreign fixture, then the selected scenarios in suite order,
+//! each with verified success-path cleanup. It runs only as the launcher's child inside the
+//! private headless session's environment and refuses any compositor that is not a fresh
+//! headless one. A failure stops the run and leaves every window to the compositor's
+//! shutdown; files and the IPC helper may be dropped, never windows.
 
 use std::collections::{BTreeMap, HashSet};
 use std::env;
@@ -13,15 +15,11 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
-
 use crate::capture::{executable_capture, verify_capture, verify_inferred_capture};
-use crate::ipc::{
-    IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, validate_restoration_name,
-    workspace_number,
-};
+use crate::headless::verify_virtual_output;
+use crate::ipc::{IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, Workspace};
 use crate::layout::{
-    Shape, Signature, class, is_window, outline, remove_from_shape, shape, signature, verify_layout,
+    Shape, Signature, is_window, outline, remove_from_shape, shape, signature, verify_layout,
 };
 use crate::observation::{
     Events, ExpectedSwitch, Failure, Snapshot, WorkspaceIdentity, snapshot, walk,
@@ -36,32 +34,48 @@ use crate::scenarios::{
 };
 use crate::{process, profile};
 
+/// This checkout's release build, which `tools/integration/run.sh` builds first.
+const SWAY_STAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage");
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const RESTORED: &str = "Original workspace restored.";
-const LOST_CONTROL: &str =
-    "Original workspace not restored: focus history is uncertain or user took control.";
-const ORIGINAL_GONE: &str =
-    "Original workspace not restored: its recorded identity no longer exists.";
 
-#[derive(Debug, Parser)]
-#[command(
-    about = "Manual layout/profile checks on two or three disposable workspaces in the existing Sway session"
-)]
-pub struct Arguments {
-    #[arg(long, required = true, value_parser = workspace_number)]
-    workspace: String,
-    #[arg(long, required = true, value_parser = workspace_number,
-        help = "Second empty disposable workspace for the owned foreign-window fixture")]
-    foreign_workspace: String,
-    #[arg(long, value_parser = workspace_number,
-        help = "Third empty disposable workspace; enables four multi-workspace profile scenarios")]
-    profile_workspace: Option<String>,
-    #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage"))]
-    binary: String,
+/// A fresh compositor's only workspace. The foreign fixture loads here without a switch and
+/// stays for the whole run, so it is also the occupied target of the profile refusal.
+const FIXTURE_WORKSPACE: &str = "1";
+/// The target of every standard scenario and the first target of every profile.
+const PRIMARY_WORKSPACE: &str = "2";
+/// Each profile's second target. Every profile leaves it empty and returns to the primary,
+/// so Sway removes it and the next profile load creates it again.
+const PROFILE_WORKSPACE: &str = "3";
+
+/// Every scenario in suite order: the standard scenarios, then the profile cases.
+pub fn suite_scenario_names() -> Vec<&'static str> {
+    // Scenario definitions are pure, so placeholder executables suffice for their names.
+    let standard = standard_scenarios("names-only", "foot", "sleep");
+
+    let mut names: Vec<&'static str> = standard.iter().map(|scenario| scenario.name).collect();
+    names.extend(profile::CASES.iter().map(|case| case.name()));
+    names
 }
 
-/// Last accepted evidence is retained for diagnostics even if a later verification fails.
+/// The scenarios whose names contain `filter`, in suite order; every scenario without one.
+pub fn select_scenarios(filter: Option<&str>) -> Result<Vec<&'static str>, String> {
+    let selected: Vec<&'static str> = suite_scenario_names()
+        .into_iter()
+        .filter(|name| filter.is_none_or(|text| name.contains(text)))
+        .collect();
+
+    if selected.is_empty() {
+        return Err(format!(
+            "--filter {:?} matches no scenario; scenarios are: {}",
+            filter.unwrap_or_default(),
+            suite_scenario_names().join(", ")
+        ));
+    }
+    Ok(selected)
+}
+
+/// The scenario being run and the ownership evidence of its current load cycle.
 struct ScenarioProgress {
     scenario: Scenario,
     preexisting_ids: Option<HashSet<i64>>,
@@ -118,38 +132,43 @@ struct ForeignFixture {
 }
 
 struct Harness {
-    arguments: Arguments,
     binary: PathBuf,
     foot: String,
     sleep: String,
     sway: Swaymsg,
     events: Events,
     run_id: String,
-    original: Option<WorkspaceIdentity>,
-    disposable: Option<WorkspaceIdentity>,
-    switch_attempted: bool,
+    /// Recorded by the switch to `PRIMARY_WORKSPACE`, before any scenario.
+    primary: Option<WorkspaceIdentity>,
     current_scenario: Option<ScenarioProgress>,
     fixture: Option<ForeignFixture>,
-    refusal_verified: bool,
-    profile_passed: usize,
-    profile_progress: Vec<(String, AcceptedWindows)>,
     stage: String,
     passed: usize,
-    skipped: usize,
-    restoration: Option<String>,
 }
 
-pub fn run(arguments: Arguments) -> bool {
-    let mut harness = match Harness::new(arguments) {
-        Ok(harness) => harness,
+/// Runs the selected scenarios in suite order, stopping at the first failure. Returns
+/// whether every selected scenario passed.
+pub fn run(filter: Option<&str>) -> bool {
+    let selected = match select_scenarios(filter) {
+        Ok(selected) => selected,
         Err(error) => {
-            eprintln!("FAIL  preflight: {error}");
-            println!("\n0 passed, 1 failed, 0 skipped");
+            eprintln!("FAIL  selection: {error}");
             return false;
         }
     };
 
-    let result = harness.execute().and_then(|()| interruption_check());
+    let mut harness = match Harness::new() {
+        Ok(harness) => harness,
+        Err(error) => {
+            eprintln!("FAIL  setup: {error}");
+            println!("\n0 of {} selected scenarios passed.", selected.len());
+            return false;
+        }
+    };
+
+    let result = harness
+        .execute(&selected)
+        .and_then(|()| interruption_check());
     let mut failed = result.is_err();
     if let Err(failure) = result {
         // Process helpers return strings. A SIGINT recorded during one of them must
@@ -159,37 +178,10 @@ pub fn run(arguments: Arguments) -> bool {
         }
         let message = failure.report(&mut harness.events);
         eprintln!("FAIL  {}: {message}", harness.stage);
-        if harness.switch_attempted {
-            for (workspace, accepted) in &harness.profile_progress {
-                eprintln!(
-                    "  Profile workspace {workspace}: last known owned IDs {accepted:?}; remaining windows retained on failure (some verified closes may already have completed)."
-                );
-            }
-            report_remaining(
-                &harness.sway,
-                &harness.run_id,
-                harness.current_scenario.as_ref(),
-            );
-            if let Some(fixture) = &harness.fixture {
-                eprintln!(
-                    "  Foreign fixture workspace {:?}, id={}, last accepted={:?}; terminal lifetime 3600 seconds.",
-                    fixture.workspace.name, fixture.workspace.id, fixture.progress.accepted
-                );
-            }
-            if harness.stage != "final restoration" {
-                harness.restoration = Some(match harness.restore() {
-                    Ok(message) => message.to_owned(),
-                    Err(failure) => format!(
-                        "Original workspace not restored: {}",
-                        failure.report(&mut harness.events)
-                    ),
-                });
-            }
-        }
     }
 
-    // Explicit bounded helper shutdown on every outcome. This terminates only our IPC
-    // helper, and never requests desktop cleanup.
+    // Explicit bounded helper shutdown on every outcome. This stops only our IPC helper;
+    // remaining windows end with the compositor.
     if let Err(error) = harness.events.close() {
         failed = true;
         eprintln!("FAIL  event helper shutdown: {error}");
@@ -198,84 +190,68 @@ pub fn run(arguments: Arguments) -> bool {
         failed = true;
         eprintln!("FAIL  shutdown: interrupted");
     }
+
     println!(
-        "\n{} passed, {} failed, {} skipped",
+        "\n{} of {} selected scenarios passed.",
         harness.passed,
-        usize::from(failed),
-        harness.skipped
+        selected.len()
     );
-    println!(
-        "{} successful scenarios with foreign-window preservation; {} expected occupied-workspace refusal verified.",
-        harness.passed - harness.profile_passed,
-        usize::from(harness.refusal_verified)
-    );
-    println!(
-        "{} profile scenarios verified (including expected failures).",
-        harness.profile_passed
-    );
-    if let Some(restoration) = harness.restoration {
-        println!("{restoration}");
+    if failed {
+        println!("The run stopped at the failure above.");
     }
     !failed
 }
 
 impl Harness {
-    fn new(arguments: Arguments) -> Result<Self, String> {
+    fn new() -> Result<Self, String> {
         process::install_sigint_handler()?;
         process::check_interruption()?;
+
+        // The headless session sets SWAYSOCK to its private socket. Prove that it reaches
+        // the virtual output before anything else: a real desktop fails here, before any
+        // event subscription or command.
         let sway = Swaymsg::from_environment()?;
-        let binary = process::find_executable(&arguments.binary)?;
+        verify_virtual_output(&sway.get_outputs()?)
+            .map_err(|error| format!("not the private headless compositor: {error}"))?;
+        if sway.seat_names()?.len() != 1 {
+            return Err("this harness requires exactly one Sway seat".into());
+        }
+
+        let binary = process::find_executable(SWAY_STAGE)?;
         let search_path = env::var_os("PATH").unwrap_or_default();
         let foot = unresolved_executable_text("foot", &search_path)?;
         let sleep = unresolved_executable_text("sleep", &search_path)?;
         let run_id = random_run_id()?;
-        if sway.seat_names()?.len() != 1 {
-            return Err("this harness requires exactly one Sway seat".into());
-        }
+
         // Establish subscription readiness before the first workspace observation.
         let events = Events::subscribe(&sway)?;
 
         Ok(Self {
-            arguments,
             binary,
             foot,
             sleep,
             sway,
             events,
             run_id,
-            original: None,
-            disposable: None,
-            switch_attempted: false,
+            primary: None,
             current_scenario: None,
             fixture: None,
-            refusal_verified: false,
-            profile_passed: 0,
-            profile_progress: Vec::new(),
-            stage: "preflight".into(),
+            stage: "setup".into(),
             passed: 0,
-            skipped: 0,
-            restoration: None,
         })
     }
 
-    fn execute(&mut self) -> Result<(), Failure> {
-        let initial = preflight(&self.sway, &mut self.events, &self.arguments.workspace)?;
-        fixture_eligibility(&self.arguments.workspace, &self.arguments.foreign_workspace)?;
-        preflight(
-            &self.sway,
-            &mut self.events,
-            &self.arguments.foreign_workspace,
-        )?;
-        if let Some(second) = &self.arguments.profile_workspace {
-            profile::workspace_eligibility(
-                &self.arguments.workspace,
-                &self.arguments.foreign_workspace,
-                second,
-            )?;
-            preflight(&self.sway, &mut self.events, second)?;
-        }
-        self.original = Some(initial.original);
+    fn execute(&mut self, selected: &[&'static str]) -> Result<(), Failure> {
+        self.stage = "fresh compositor".into();
+        let initial = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&initial.window_events, None)?;
+        let initial_workspace = verify_fresh_compositor(&initial)?;
+        // From here on, every fence rejects a workspace focus change we did not request.
+        self.events.set_current_workspace(initial_workspace);
 
+        // Every standard layout is checked, selected or not: the occupied refusal loads the
+        // `single-window` layout as its second, refused layout.
+        self.stage = "configuration preparation".into();
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
         let mut scenarios = standard_scenarios(&self.run_id, &self.foot, &self.sleep);
         let helper =
@@ -292,37 +268,35 @@ impl Harness {
             directory.write(scenario.name, &configuration_yaml(scenario))?;
             check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
         }
-        self.stage = "preflight".into();
+
         self.prepare_fixture(&directory)?;
-        self.stage = "primary target: preflight".into();
-        let ready = preflight(&self.sway, &mut self.events, &self.arguments.workspace)?;
-        self.stage = "workspace switch".into();
+
+        self.stage = "primary workspace switch".into();
+        let fixture_workspace_id = self
+            .fixture
+            .as_ref()
+            .expect("fixture prepared before the primary switch")
+            .workspace
+            .id;
         interruption_check()?;
-        self.switch_attempted = true;
-        self.sway.switch_disposable(&self.arguments.workspace)?;
+        self.sway.switch_workspace(PRIMARY_WORKSPACE)?;
         let transition = ExpectedSwitch {
-            from_id: ready.original.id,
-            destination_name: self.arguments.workspace.clone(),
+            from_id: fixture_workspace_id,
+            destination_name: PRIMARY_WORKSPACE.into(),
         };
         let switched = snapshot(&self.sway, &mut self.events, Some(&transition))?;
         require_quiet(&switched.window_events, None)?;
-        if ready
-            .designated_id
-            .is_some_and(|id| id != switched.focused_workspace_id)
-        {
-            return Err(Failure::Uncertain(
-                "disposable workspace identity changed during the switch".into(),
-            ));
-        }
-        self.disposable = Some(WorkspaceIdentity {
-            id: switched.focused_workspace_id,
-            name: self.arguments.workspace.clone(),
-        });
         require_empty(switched.focused_workspace())?;
-
+        self.primary = Some(WorkspaceIdentity {
+            id: switched.focused_workspace_id,
+            name: PRIMARY_WORKSPACE.into(),
+        });
         let target_baseline = ForeignWindows::record(&switched, switched.focused_workspace_id)?;
 
         for scenario in scenarios {
+            if !selected.contains(&scenario.name) {
+                continue;
+            }
             interruption_check()?;
             self.current_scenario = Some(ScenarioProgress {
                 scenario,
@@ -331,56 +305,35 @@ impl Harness {
             });
             self.run_scenario(&directory, &target_baseline)?;
         }
-
         self.current_scenario = None;
-        if let Some(second) = self.arguments.profile_workspace.clone() {
-            for case in profile::CASES {
-                let result = if case == profile::Case::NamedSuccess {
-                    self.run_named_profile(&second, &directory)
-                } else {
-                    self.run_profile(case, &second, &directory)
-                };
-                if let Err(failure) = result {
-                    self.events
-                        .distrust_focus_history("profile scenario failed; retained windows");
-                    return Err(failure);
-                }
+
+        for case in profile::CASES {
+            if !selected.contains(&case.name()) {
+                continue;
             }
-        } else {
-            self.skipped += profile::CASES.len();
-            for case in profile::CASES {
-                println!("SKIP  {} --profile-workspace not supplied", case.name());
+            if case == profile::Case::NamedSuccess {
+                self.run_named_profile(&directory)?;
+            } else {
+                self.run_profile(case, &directory)?;
             }
         }
 
-        self.finish_fixture()?;
-        self.stage = "final restoration".into();
-        let restoration = self.restore()?;
-        self.restoration = Some(restoration.to_owned());
-        if restoration != RESTORED {
-            return Err(Failure::Check(restoration.to_owned()));
-        }
-        Ok(())
+        self.verify_fixture_survived()
     }
 
-    fn run_named_profile(
-        &mut self,
-        second: &str,
-        directory: &TemporaryConfigurations,
-    ) -> Result<(), Failure> {
+    fn run_named_profile(&mut self, directory: &TemporaryConfigurations) -> Result<(), Failure> {
         let original_name = self
-            .disposable
+            .primary
             .as_ref()
             .expect("primary selected")
             .name
             .clone();
         let named = format!("stage-{} music", self.run_id);
         self.rename_empty_primary(&named)?;
-        self.run_profile(profile::Case::NamedSuccess, second, directory)?;
+        self.run_profile(profile::Case::NamedSuccess, directory)?;
         // Name restoration is an explicit verified success phase, never a failure handler.
         self.rename_empty_primary(&original_name)?;
         self.passed += 1;
-        self.profile_passed += 1;
         println!(
             "PASS  profile-named-success (independent verification; cleanup and original name verified)"
         );
@@ -388,9 +341,9 @@ impl Harness {
     }
 
     fn rename_empty_primary(&mut self, destination: &str) -> Result<(), Failure> {
-        self.stage = "profile named target: guarded disposable rename".into();
+        self.stage = "profile named target: guarded primary rename".into();
         let before = snapshot(&self.sway, &mut self.events, None)?;
-        let primary = self.disposable.as_ref().expect("primary selected");
+        let primary = self.primary.as_ref().expect("primary selected");
         profile::verify_rename_preparation(&before, primary, destination)?;
         let foreign = ForeignWindows::record(&before, primary.id)?;
         let renamed = WorkspaceIdentity {
@@ -398,42 +351,32 @@ impl Harness {
             name: destination.into(),
         };
         println!(
-            "      renaming disposable id={} {:?} to {:?}; failure retains its current name",
+            "      renaming primary id={} {:?} to {:?}",
             primary.id, primary.name, destination
         );
         interruption_check()?;
-        self.sway.rename_disposable(&primary.name, destination)?;
+        self.sway.rename_workspace(&primary.name, destination)?;
         let after =
             crate::observation::snapshot_after_rename(&self.sway, &mut self.events, &renamed)?;
         profile::verify_rename_result(&before, &after, &renamed)?;
         foreign.verify(&after)?;
-        self.disposable = Some(renamed);
+        self.primary = Some(renamed);
         Ok(())
     }
 
     fn run_profile(
         &mut self,
         case: profile::Case,
-        second_number: &str,
         directory: &TemporaryConfigurations,
     ) -> Result<(), Failure> {
         let name = case.name();
+        let second_number = PROFILE_WORKSPACE;
+        // The refusal names the still-occupied fixture workspace as its second target.
         let destination = if case == profile::Case::Occupied {
-            self.arguments.foreign_workspace.clone()
+            FIXTURE_WORKSPACE
         } else {
-            second_number.to_owned()
+            second_number
         };
-        self.profile_progress = vec![
-            (
-                self.disposable
-                    .as_ref()
-                    .expect("primary selected")
-                    .name
-                    .clone(),
-                AcceptedWindows::new(),
-            ),
-            (destination.clone(), AcceptedWindows::new()),
-        ];
         self.stage = format!("{name}: preparation");
         let files = directory.subdirectory(name)?;
         let layouts_directory = files.subdirectory("layouts")?;
@@ -460,8 +403,8 @@ impl Harness {
         profiles_directory.write(
             name,
             &profile::configuration(
-                &self.disposable.as_ref().expect("primary selected").name,
-                &destination,
+                &self.primary.as_ref().expect("primary selected").name,
+                destination,
             ),
         )?;
         let profile_command = |operation: &str| {
@@ -479,16 +422,13 @@ impl Harness {
         if checked != format!("{name}: valid\n") {
             return Err(Failure::Uncertain("unexpected profile check output".into()));
         }
-        let mut command = profile_command("load");
-        if matches!(case, profile::Case::Occupied | profile::Case::Partial) {
-            files.suppress_notification(&mut command, &env::var_os("PATH").unwrap_or_default())?;
-        }
+        let command = profile_command("load");
 
         self.stage = format!("{name}: fresh workspace baselines");
         let before = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&before.window_events, None)?;
         let primary = self
-            .disposable
+            .primary
             .as_ref()
             .expect("primary selected before scenarios");
         let primary_target = profile::Target::record(&before, &primary.name)?
@@ -510,8 +450,13 @@ impl Harness {
         let second_before = if case == profile::Case::Occupied {
             None
         } else {
-            preflight_eligibility(&before, second_number)?;
-            profile::Target::record(&before, second_number)?
+            // Normally absent, removed after the previous profile; if present, it must be
+            // empty and keep its identity and output.
+            let existing = profile::Target::record(&before, second_number)?;
+            if let Some(existing) = &existing {
+                require_empty(existing.verify(&before)?)?;
+            }
+            existing
         };
         let preexisting: HashSet<i64> = walk(&before.tree)
             .iter()
@@ -553,7 +498,7 @@ impl Harness {
                 &completed,
                 &before,
                 &loaded,
-                &destination,
+                destination,
                 fixture.workspace.id,
                 workspace_revision != self.events.workspace_revision(),
             )?;
@@ -593,10 +538,9 @@ impl Harness {
                     "profile did not leave the second workspace focused".into(),
                 ));
             }
-            for (target_index, (layout, (target, owned))) in layouts
+            for (layout, (target, owned)) in layouts
                 .iter()
                 .zip([(&primary_target, &accepted[0]), (&second, &accepted[1])])
-                .enumerate()
             {
                 verify_ownership(
                     &loaded.tree,
@@ -605,7 +549,6 @@ impl Harness {
                     &preexisting,
                     owned,
                 )?;
-                self.profile_progress[target_index].1 = owned.clone();
             }
             let measurements = crate::layout::verify_inactive_layout(
                 primary_target.verify(&loaded)?,
@@ -742,7 +685,7 @@ impl Harness {
 
             self.stage = format!("{name}: return to primary and refresh cleanup evidence");
             interruption_check()?;
-            self.sway.restore_workspace(&primary.name)?;
+            self.sway.switch_workspace(&primary.name)?;
             let transition = ExpectedSwitch {
                 from_id: second.workspace.id,
                 destination_name: primary.name.clone(),
@@ -785,10 +728,8 @@ impl Harness {
             require_quiet(&cleaned.window_events, None)?;
             require_empty(cleaned.focused_workspace())?;
         }
-        self.profile_progress.clear();
         if case != profile::Case::NamedSuccess {
             self.passed += 1;
-            self.profile_passed += 1;
             println!("PASS  {name} (independent verification; success-path cleanup only)");
         }
         Ok(())
@@ -850,7 +791,7 @@ impl Harness {
             if let Some(initial_layout) = progress.scenario.initial_workspace_layout {
                 self.stage = format!("{cycle_name}: initial workspace layout");
                 let target = self
-                    .disposable
+                    .primary
                     .as_ref()
                     .expect("target selected before scenarios");
                 let workspace_revision = self.events.workspace_revision();
@@ -880,7 +821,7 @@ impl Harness {
                 .as_ref()
                 .expect("just recorded IDs");
             let target = self
-                .disposable
+                .primary
                 .as_ref()
                 .expect("successful switch established target");
 
@@ -942,8 +883,8 @@ impl Harness {
                 self.stage = format!("{cycle_name}: expected refusal");
                 // A different, already checked layout has distinct selectors. A broken load
                 // cannot silently substitute its new windows for the first layout's windows.
-                let search_path = env::var_os("PATH").unwrap_or_default();
-                let mut refused = directory.refusal_command(&self.binary, &search_path)?;
+                let mut refused =
+                    configured_command(&self.binary, &directory.path, "load", "single-window");
                 self.sway.select_socket(&mut refused);
 
                 let before_refusal = snapshot(&self.sway, &mut self.events, None)?;
@@ -962,7 +903,6 @@ impl Harness {
                 )?;
                 foreign.verify(&after_refusal)?;
                 verify_unchanged(&after_refusal, target.id, progress, &before_capture)?;
-                self.refusal_verified = true;
             }
 
             self.stage = format!("{cycle_name}: capture");
@@ -1066,39 +1006,23 @@ impl Harness {
         Ok(())
     }
 
+    /// Loads one independently owned Foot window on the fresh compositor's focused
+    /// workspace. It stays outside every scenario's target for the whole run, so each
+    /// scenario can prove it left a window it does not own untouched.
     fn prepare_fixture(&mut self, directory: &TemporaryConfigurations) -> Result<(), Failure> {
-        self.stage = "foreign fixture: preflight".into();
+        self.stage = "foreign fixture: check".into();
         let scenario = foreign_fixture_scenario(&self.run_id, &self.foot, &self.sleep);
         directory.write(scenario.name, &configuration_yaml(&scenario))?;
         check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
-        let ready = preflight(
-            &self.sway,
-            &mut self.events,
-            &self.arguments.foreign_workspace,
-        )?;
-        self.stage = "foreign fixture: workspace switch".into();
-        interruption_check()?;
-        self.switch_attempted = true;
-        self.sway
-            .switch_disposable(&self.arguments.foreign_workspace)?;
-        let transition = ExpectedSwitch {
-            from_id: ready.original.id,
-            destination_name: self.arguments.foreign_workspace.clone(),
-        };
-        let before = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+
+        self.stage = "foreign fixture: empty-workspace precondition".into();
+        let before = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&before.window_events, None)?;
         require_empty(before.focused_workspace())?;
-        if ready
-            .designated_id
-            .is_some_and(|id| id != before.focused_workspace_id)
-        {
-            return Err(Failure::Uncertain(
-                "foreign fixture workspace identity changed during switch".into(),
-            ));
-        }
+        // Every snapshot requires focus on the workspace the initial observation recorded.
         let workspace = WorkspaceIdentity {
             id: before.focused_workspace_id,
-            name: self.arguments.foreign_workspace.clone(),
+            name: FIXTURE_WORKSPACE.into(),
         };
         let foreign = ForeignWindows::record(&before, workspace.id)?;
         let preexisting_ids = walk(&before.tree)
@@ -1161,140 +1085,38 @@ impl Harness {
         )?;
         fixture.loaded_signature = Some(signature(loaded.focused_workspace()));
         println!(
-            "Foreign fixture: workspace {:?}, container IDs {:?} (verified; lifetime 3600 seconds).",
+            "Foreign fixture: workspace {:?}, container IDs {:?} (verified).",
             fixture.workspace.name,
             fixture.progress.accepted.keys().collect::<Vec<_>>()
         );
         Ok(())
     }
 
-    fn finish_fixture(&mut self) -> Result<(), Failure> {
-        self.stage = "foreign fixture: verified return".into();
+    /// The fixture must survive the whole run unchanged. It is never closed: compositor
+    /// shutdown ends it with every other client.
+    fn verify_fixture_survived(&mut self) -> Result<(), Failure> {
+        self.stage = "foreign fixture: final verification".into();
         let fixture = self
             .fixture
             .as_ref()
             .expect("fixture prepared before scenarios");
-        let target = self
-            .disposable
-            .as_ref()
-            .expect("scenario target established");
-        let before = snapshot(&self.sway, &mut self.events, None)?;
-        require_quiet(&before.window_events, None)?;
-        require_empty(before.focused_workspace())?;
-        fixture.foreign.verify(&before)?;
-        // Prove the fixture survived the last scenario before deliberately changing focus.
-        let baseline = fixture
-            .loaded_signature
-            .as_ref()
-            .expect("fixture load verified");
-        verify_fixture_state(&before, fixture, baseline)?;
-        interruption_check()?;
-        self.sway.switch_disposable(&fixture.workspace.name)?;
-        let transition = ExpectedSwitch {
-            from_id: target.id,
-            destination_name: fixture.workspace.name.clone(),
-        };
-        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
-        for event in &returned.window_events {
-            if event.change == crate::ipc::WindowChange::Focus
-                && fixture.progress.accepted.contains_key(&event.container.id)
-            {
-                continue;
-            }
-            require_quiet(std::slice::from_ref(event), None)?;
-        }
-        fixture.foreign.verify(&returned)?;
-        verify_fixture_state(&returned, fixture, baseline)?;
-        if returned.focused_workspace_id != fixture.workspace.id {
-            return Err(Failure::Uncertain(
-                "foreign fixture workspace identity changed".into(),
-            ));
-        }
-        self.stage = "foreign fixture: cleanup".into();
-        let context = CleanupContext {
-            target: &fixture.workspace,
-            layout: &fixture.progress.scenario.layout,
-            preexisting_ids: fixture
-                .progress
-                .preexisting_ids
-                .as_ref()
-                .expect("recorded before fixture load"),
-            foreign: &fixture.foreign,
-        };
-        cleanup(
-            &self.sway,
-            &mut self.events,
-            &context,
-            &fixture.progress.accepted,
-            signature(returned.focused_workspace()),
-        )?;
-        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
-        fixture.foreign.verify(&cleaned)?;
-        require_quiet(&cleaned.window_events, None)?;
-        require_empty(cleaned.focused_workspace())?;
-        println!("Foreign fixture preservation and verified cleanup passed.");
-        Ok(())
-    }
-
-    fn restore(&mut self) -> Result<&'static str, Failure> {
-        interruption_check()?;
-        let current = self.events.current_workspace();
-        let disposable = self
-            .disposable
-            .as_ref()
-            .filter(|target| Some(*target) == current)
-            .or_else(|| {
-                self.fixture
-                    .as_ref()
-                    .map(|fixture| &fixture.workspace)
-                    .filter(|target| Some(*target) == current)
-            });
-        let (Some(original), Some(disposable)) = (&self.original, disposable) else {
-            return Ok(LOST_CONTROL);
-        };
-        if !controls_target(
-            self.events.focus_history_trusted(),
-            self.events.current_workspace(),
-            disposable,
-        ) {
-            return Ok(LOST_CONTROL);
-        }
 
         let observed = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&observed.window_events, None)?;
-        if let Some(reason) = restoration_refusal(
+        require_empty(observed.focused_workspace())?;
+        fixture.foreign.verify(&observed)?;
+        verify_fixture_state(
             &observed,
-            original,
-            disposable,
-            self.events.focus_history_trusted(),
-        ) {
-            return Ok(reason);
-        }
-        interruption_check()?;
-        self.sway.restore_workspace(&original.name)?;
-        let transition = ExpectedSwitch {
-            from_id: disposable.id,
-            destination_name: original.name.clone(),
-        };
-        let restored = snapshot(&self.sway, &mut self.events, Some(&transition))?;
-        if restored.focused_workspace_id != original.id {
-            return Err(Failure::Uncertain(
-                "restored workspace has a different identity".into(),
-            ));
-        }
-        Ok(RESTORED)
-    }
-}
+            fixture,
+            fixture
+                .loaded_signature
+                .as_ref()
+                .expect("fixture load verified"),
+        )?;
 
-fn fixture_eligibility(target_number: &str, fixture_number: &str) -> Result<(), String> {
-    workspace_number(target_number)?;
-    workspace_number(fixture_number)?;
-    if target_number == fixture_number {
-        return Err(
-            "foreign fixture workspace must differ from the primary disposable target".into(),
-        );
+        println!("Foreign fixture preserved through the whole run.");
+        Ok(())
     }
-    Ok(())
 }
 
 /// Ownership is re-established on the fixture's own workspace, never by selecting all
@@ -1531,77 +1353,41 @@ fn interruption_check() -> Result<(), Failure> {
     process::check_interruption().map_err(Failure::Uncertain)
 }
 
-struct Preflight {
-    original: WorkspaceIdentity,
-    designated_id: Option<i64>,
-}
+/// A compositor nothing has used yet: exactly the fixture workspace, focused and empty, and
+/// no window anywhere, including the scratchpad. Anything else means a reused or wrong
+/// compositor, so the runner stops before its first command.
+fn verify_fresh_compositor(observed: &Snapshot) -> Result<&Workspace, Failure> {
+    observed.validate()?;
 
-fn preflight(sway: &Swaymsg, events: &mut Events, number: &str) -> Result<Preflight, Failure> {
-    interruption_check()?;
-    let observed = snapshot(sway, events, None)?;
-    require_quiet(&observed.window_events, None)?;
-    let eligibility = preflight_eligibility(&observed, number)?;
-    let original = observed
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == eligibility.original.id)
-        .expect("validated snapshot contains the focused workspace");
-    events.set_current_workspace(original);
-    Ok(eligibility)
-}
-
-/// Pure eligibility rules over an already validated, synchronized snapshot.
-fn preflight_eligibility(observed: &Snapshot, number: &str) -> Result<Preflight, String> {
-    let number = workspace_number(number)?;
-    let numeric_workspace: i32 = number
-        .parse()
-        .expect("validated nine-digit workspace number");
-    let original = observed.focused_workspace();
-    let original_name = original
-        .name
-        .as_deref()
-        .ok_or("starting workspace has no name")?;
-    if original_name == number
-        || observed
+    let [workspace] = observed.workspaces.as_slice() else {
+        let names: Vec<&str> = observed
             .workspaces
             .iter()
-            .any(|workspace| workspace.id == original.id && workspace.num == numeric_workspace)
-    {
-        return Err("disposable workspace is the starting workspace".into());
-    }
-    validate_restoration_name(original_name)?;
-
-    let candidates: Vec<_> = observed
-        .workspaces
-        .iter()
-        .filter(|workspace| workspace.name == number || workspace.num == numeric_workspace)
-        .collect();
-    if candidates.len() > 1 {
-        return Err("ambiguous disposable workspace number".into());
-    }
-    let designated_id = if let Some(designated) = candidates.first() {
-        if designated.name != number {
-            return Err(
-                "workspace number belongs to a differently named workspace; refusing".into(),
-            );
-        }
-        let workspace = walk(&observed.tree)
-            .into_iter()
-            .map(|placed| placed.node)
-            .find(|node| node.id == designated.id)
-            .ok_or("designated workspace missing from tree")?;
-        require_empty(workspace)?;
-        Some(designated.id)
-    } else {
-        None
+            .map(|workspace| workspace.name.as_str())
+            .collect();
+        return Err(Failure::Uncertain(format!(
+            "a fresh compositor has only workspace {FIXTURE_WORKSPACE:?}, found {names:?}"
+        )));
     };
-    Ok(Preflight {
-        original: WorkspaceIdentity {
-            id: original.id,
-            name: original_name.to_owned(),
-        },
-        designated_id,
-    })
+    // Validation already proved that the only workspace is the focused one.
+    if workspace.name != FIXTURE_WORKSPACE {
+        return Err(Failure::Uncertain(format!(
+            "a fresh compositor starts on workspace {FIXTURE_WORKSPACE:?}, found {:?}",
+            workspace.name
+        )));
+    }
+
+    require_empty(observed.focused_workspace()).map_err(Failure::Uncertain)?;
+    if let Some(window) = walk(&observed.tree)
+        .into_iter()
+        .find(|placed| is_window(placed.node))
+    {
+        return Err(Failure::Uncertain(format!(
+            "a fresh compositor has no windows, found container {}",
+            window.node.id
+        )));
+    }
+    Ok(workspace)
 }
 
 /// Shared pre/post guard for the one empty-workspace layout mutation. The baseline
@@ -1661,36 +1447,6 @@ fn require_empty(workspace: &TreeNode) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn controls_target(
-    trusted: bool,
-    current: Option<&WorkspaceIdentity>,
-    target: &WorkspaceIdentity,
-) -> bool {
-    trusted && current == Some(target)
-}
-
-fn restoration_refusal(
-    observed: &Snapshot,
-    original: &WorkspaceIdentity,
-    disposable: &WorkspaceIdentity,
-    trusted: bool,
-) -> Option<&'static str> {
-    let focused = observed.focused_workspace();
-    if !trusted || focused.id != disposable.id || focused.name.as_deref() != Some(&disposable.name)
-    {
-        return Some(LOST_CONTROL);
-    }
-    let matches = observed
-        .workspaces
-        .iter()
-        .filter(|workspace| workspace.id == original.id && workspace.name == original.name)
-        .count();
-    if matches != 1 {
-        return Some(ORIGINAL_GONE);
-    }
-    None
 }
 
 fn verify_unchanged(
@@ -1901,50 +1657,6 @@ fn verify_close_observation(
     Ok(true)
 }
 
-fn report_remaining(sway: &Swaymsg, run_id: &str, progress: Option<&ScenarioProgress>) {
-    eprintln!(
-        "No further cleanup attempted. Scenario terminals expire after 300 seconds; the foreign fixture after 3600 seconds."
-    );
-    let empty = AcceptedWindows::new();
-    let known = progress.map_or(&empty, |progress| &progress.accepted);
-    eprintln!("  Last associated container IDs -> layout IDs: {known:?}");
-    let tree = match sway.remaining_tree() {
-        Ok(tree) => tree,
-        Err(error) => {
-            eprintln!("  Remaining windows could not be queried: {error}; last accepted={known:?}");
-            return;
-        }
-    };
-    let leaves = progress
-        .map(|progress| progress.scenario.layout.leaves())
-        .unwrap_or_default();
-    let prefix = format!("sway-stage-it-{run_id}-");
-    for placed in walk(&tree) {
-        let window = placed.node;
-        let observed_app_id = window.app_id.as_deref();
-        let matches = leaves
-            .iter()
-            .any(|leaf| observed_app_id == Some(leaf.app_id.as_str()));
-        let newly_observed = progress
-            .and_then(|progress| progress.preexisting_ids.as_ref())
-            .is_some_and(|preexisting| !preexisting.contains(&window.id) && is_window(window));
-        let run_identifier = observed_app_id.is_some_and(|app_id| app_id.starts_with(&prefix));
-        if known.contains_key(&window.id) || matches || newly_observed || run_identifier {
-            let workspace_name = placed
-                .workspace
-                .and_then(|workspace| workspace.name.as_deref());
-            eprintln!(
-                "  observed id={} app_id={:?} class={:?} pid={:?} workspace={workspace_name:?} unsafe_state={} (candidate only; ownership not implied)",
-                window.id,
-                window.app_id,
-                class(window),
-                window.pid,
-                placed.unsafe_state
-            );
-        }
-    }
-}
-
 fn load_timeout(scenario: &Scenario) -> Duration {
     Duration::from_millis(scenario.layout.leaves().len() as u64 * scenario.window_timeout_ms)
         + Duration::from_secs(30)
@@ -1992,8 +1704,10 @@ fn random_run_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Owns private YAML files, profile-scenario directories, the refusal notification stub,
-/// and the process test cwd; never desktop windows.
+/// Owns private YAML files, profile-scenario directories, and the process test cwd in the
+/// session's temporary directory; never desktop windows. Nothing here removes them: the
+/// launcher removes the whole session directory after a successful run and keeps it, with
+/// these files, as diagnostics after a failure.
 struct TemporaryConfigurations {
     path: PathBuf,
 }
@@ -2028,42 +1742,6 @@ impl TemporaryConfigurations {
             .map_err(|error| format!("create private process cwd: {error}"))
     }
 
-    /// Only the intentionally refused load intercepts notify-send. Keep its exit status,
-    /// stderr, bounded execution, and desktop verification unchanged.
-    fn refusal_command(&self, binary: &Path, search_path: &OsStr) -> Result<Command, String> {
-        let mut command = configured_command(binary, &self.path, "load", "single-window");
-        self.suppress_notification(&mut command, search_path)?;
-        Ok(command)
-    }
-
-    fn suppress_notification(
-        &self,
-        command: &mut Command,
-        search_path: &OsStr,
-    ) -> Result<(), String> {
-        let notification_bin = self.path.join("refusal-notification-bin");
-        let child_search_path = env::join_paths(
-            std::iter::once(notification_bin.clone()).chain(env::split_paths(search_path)),
-        )
-        .map_err(|error| format!("prepare refusal notification PATH: {error}"))?;
-
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&notification_bin)
-            .map_err(|error| format!("create private refusal notification directory: {error}"))?;
-        let mut stub = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(notification_bin.join("notify-send"))
-            .map_err(|error| format!("create refusal notify-send stub: {error}"))?;
-        stub.write_all(b"#!/bin/sh\nexit 0\n")
-            .map_err(|error| format!("write refusal notify-send stub: {error}"))?;
-
-        command.env("PATH", child_search_path);
-        Ok(())
-    }
-
     fn write(&self, name: &str, contents: &str) -> Result<(), String> {
         if name.is_empty()
             || !name
@@ -2093,17 +1771,6 @@ impl TemporaryConfigurations {
             .map_err(|error| format!("open temporary YAML {}: {error}", path.display()))?;
         file.write_all(contents.as_bytes())
             .map_err(|error| format!("write temporary YAML {}: {error}", path.display()))
-    }
-}
-
-impl Drop for TemporaryConfigurations {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.path) {
-            eprintln!(
-                "Could not remove temporary YAML directory {}: {error}",
-                self.path.display()
-            );
-        }
     }
 }
 

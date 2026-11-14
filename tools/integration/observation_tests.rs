@@ -413,7 +413,7 @@ fn no_second_switch_is_accepted_after_the_expected_one() {
     for second_switch in &second_switches {
         let mut fence = FenceState::new(Some(original.clone()), Some(switch_to_target()));
         fence.assert_accepts(&focus_event(&original, &target));
-        fence.assert_rejects(second_switch, "user control takes precedence");
+        fence.assert_rejects(second_switch, "no longer controls focus");
     }
 }
 
@@ -448,7 +448,7 @@ fn focus_changes_before_initial_preflight_are_rejected() {
         focus_event(&original, &elsewhere),
         focus_event(&original, &original),
     ] {
-        FenceState::new(None, None).assert_rejects(&focus_change, "during initial preflight");
+        FenceState::new(None, None).assert_rejects(&focus_change, "during the initial observation");
     }
 }
 
@@ -465,7 +465,7 @@ fn focus_changes_involving_another_workspace_are_rejected() {
     // another workspace.
     for focus_change in [away, back, elsewhere_without_old] {
         let mut fence = FenceState::new(Some(original.clone()), None);
-        fence.assert_rejects(&focus_change, "user control takes precedence");
+        fence.assert_rejects(&focus_change, "no longer controls focus");
     }
 }
 

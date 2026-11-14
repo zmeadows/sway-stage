@@ -4,7 +4,7 @@
 //! never establish ownership. Later checks require those container IDs on the target
 //! workspace in safe tiled state, as native Wayland windows with the exact app ID, and,
 //! where the leaf requires it, the literal launch arguments in `/proc/PID/cmdline`.
-//! Every failure here is `Uncertain`, which forbids cleanup and workspace restoration.
+//! Every failure here is `Uncertain`, which forbids cleanup.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;

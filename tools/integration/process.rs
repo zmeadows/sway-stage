@@ -7,9 +7,9 @@
 //! descendant keeps an output stream open.
 //!
 //! The only signal sent is SIGKILL to one of the harness's own direct children, to stop
-//! the event helper, an overdue run, or a private headless compositor. It never reaches
-//! that child's descendants, such as applications started by `sway-stage load`, and never
-//! targets a window.
+//! the event helper, an overdue run, the private headless compositor, or an overdue
+//! scenario runner. It never reaches that child's descendants, such as applications started
+//! by `sway-stage load`, and never targets a window.
 
 use std::env;
 use std::ffi::OsStr;
@@ -102,14 +102,7 @@ fn is_executable_file(path: &Path) -> bool {
 /// child only. A nonzero exit reports the child's stderr. On expiry or a capture failure,
 /// the direct child is killed and reaped before the error is returned.
 pub fn run(command: Command, operation: &str, timeout: Duration) -> Result<String, String> {
-    run_bounded(command, operation, timeout, false)?.require_success(operation)
-}
-
-/// Only the read-only remaining-window query may run after an interrupt. It still has
-/// output limits, a deadline, and direct-child shutdown on failure.
-pub fn run_diagnostic(command: Command, timeout: Duration) -> Result<String, String> {
-    run_bounded(command, "remaining-window tree query", timeout, true)?
-        .require_success("remaining-window tree query")
+    run_bounded(command, operation, timeout)?.require_success(operation)
 }
 
 /// The same bounded runner, with exit interpretation left to an explicit refusal check.
@@ -119,7 +112,7 @@ pub fn run_with_status(
     operation: &str,
     timeout: Duration,
 ) -> Result<CompletedProcess, String> {
-    run_bounded(command, operation, timeout, false)
+    run_bounded(command, operation, timeout)
 }
 
 #[derive(Debug)]
@@ -146,7 +139,6 @@ fn run_bounded(
     mut command: Command,
     operation: &str,
     timeout: Duration,
-    diagnostic: bool,
 ) -> Result<CompletedProcess, String> {
     let (stdout_socket, child_stdout) = socket_pair(operation)?;
     let (stderr_socket, child_stderr) = socket_pair(operation)?;
@@ -159,10 +151,9 @@ fn run_bounded(
         .stdin(Stdio::null())
         .stdout(child_stdout)
         .stderr(child_stderr);
-    let mut child = spawn(command, operation, diagnostic)?;
+    let mut child = spawn(command, operation)?;
 
-    let status = match collect_until_exit(&mut child, &mut stdout, &mut stderr, timeout, diagnostic)
-    {
+    let status = match collect_until_exit(&mut child, &mut stdout, &mut stderr, timeout) {
         Ok(status) => status,
         Err(error) => {
             let mut message = format!("{operation}: {error}");
@@ -192,16 +183,12 @@ pub fn spawn_with_output(
         .stdin(Stdio::null())
         .stdout(child_stdout)
         .stderr(Stdio::null());
-    let child = spawn(command, operation, false)?;
+    let child = spawn(command, operation)?;
     Ok((child, output))
 }
 
 /// Starts a long-running helper whose stdout and stderr both append to `log`. Its stdin is
 /// null. The caller owns the child and stops it with `kill_and_reap`.
-#[allow(
-    dead_code,
-    reason = "used by the headless session, not yet by the live harness"
-)]
 pub fn spawn_with_log(mut command: Command, operation: &str, log: &File) -> Result<Child, String> {
     let clone_log = || {
         log.try_clone()
@@ -211,7 +198,7 @@ pub fn spawn_with_log(mut command: Command, operation: &str, log: &File) -> Resu
         .stdin(Stdio::null())
         .stdout(clone_log()?)
         .stderr(clone_log()?);
-    spawn(command, operation, false)
+    spawn(command, operation)
 }
 
 /// Sends SIGKILL to one of the harness's own direct children and reaps it within a bound.
@@ -241,14 +228,12 @@ pub fn kill_and_reap(child: &mut Child, description: &str) -> Result<(), String>
 
 /// Takes `command` by value so it is dropped on return. A `Command` keeps its own copies
 /// of the child's socket ends, and end of output is observable only once they are closed.
-fn spawn(mut command: Command, operation: &str, diagnostic: bool) -> Result<Child, String> {
+fn spawn(mut command: Command, operation: &str) -> Result<Child, String> {
     // Executables are resolved beforehand; never rely on PATH lookup at spawn time.
     if !Path::new(command.get_program()).is_absolute() {
         return Err(format!("{operation}: executable must be an absolute path"));
     }
-    if !diagnostic {
-        check_interruption()?;
-    }
+    check_interruption()?;
 
     // A terminal sends SIGINT to its foreground process group. Isolate each direct child
     // before exec so Ctrl-C reaches the harness, not sway-stage's launched applications.
@@ -272,14 +257,11 @@ fn collect_until_exit(
     stdout: &mut CapturedOutput,
     stderr: &mut CapturedOutput,
     timeout: Duration,
-    diagnostic: bool,
 ) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     let mut exit_status = None;
     loop {
-        if !diagnostic {
-            check_interruption()?;
-        }
+        check_interruption()?;
         let stdout_progressed = stdout.read_chunk()?;
         let stderr_progressed = stderr.read_chunk()?;
         if exit_status.is_none() {
