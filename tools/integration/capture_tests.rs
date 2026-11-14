@@ -437,8 +437,8 @@ fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
     assert_eq!(replay.expected_focus, "window2");
     assert_eq!(replay.configured_focus, Some("window2"));
     assert_eq!(
-        replay.layout.leaves()[0].selector,
-        scenario.layout.leaves()[0].selector
+        replay.layout.leaves()[0].app_id,
+        scenario.layout.leaves()[0].app_id
     );
     assert!(!yaml.contains("command: [\"true\"]"));
 }
@@ -525,7 +525,7 @@ fn nested_replay_retains_focus_shape_and_every_captured_weight() {
     assert_eq!(replay.configured_focus, Some("window3"));
     for (original, replayed) in scenario.layout.leaves().iter().zip(replay.layout.leaves()) {
         assert_eq!(original.layout_id, replayed.layout_id);
-        assert_eq!(original.selector, replayed.selector);
+        assert_eq!(original.app_id, replayed.app_id);
         assert_eq!(original.command, replayed.command);
     }
     assert_eq!(
@@ -545,7 +545,7 @@ fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
     let shares = BTreeMap::from([(vec![0], 59.9), (vec![1], 40.1)]);
     let default = expected_draft(&scenario, &shares).unwrap();
     let leaves = scenario.layout.leaves();
-    let shared_id = leaves[0].selector.value();
+    let shared_id = leaves[0].app_id.as_str();
     let titles: Vec<_> = leaves
         .iter()
         .map(|leaf| option_values(&leaf.command, "--title")[0])

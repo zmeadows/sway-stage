@@ -21,8 +21,7 @@ use crate::ipc::{
     workspace_number,
 };
 use crate::layout::{
-    Shape, Signature, class, is_window, observed_identifier, outline, remove_from_shape, shape,
-    signature, verify_layout,
+    Shape, Signature, class, is_window, outline, remove_from_shape, shape, signature, verify_layout,
 };
 use crate::observation::{
     Events, ExpectedSwitch, Failure, Snapshot, WorkspaceIdentity, snapshot, walk,
@@ -1922,16 +1921,14 @@ fn report_remaining(sway: &Swaymsg, run_id: &str, progress: Option<&ScenarioProg
     let prefix = format!("sway-stage-it-{run_id}-");
     for placed in walk(&tree) {
         let window = placed.node;
+        let observed_app_id = window.app_id.as_deref();
         let matches = leaves
             .iter()
-            .any(|leaf| observed_identifier(window, &leaf.selector) == Some(leaf.selector.value()));
+            .any(|leaf| observed_app_id == Some(leaf.app_id.as_str()));
         let newly_observed = progress
             .and_then(|progress| progress.preexisting_ids.as_ref())
             .is_some_and(|preexisting| !preexisting.contains(&window.id) && is_window(window));
-        let run_identifier = [window.app_id.as_deref(), class(window)]
-            .into_iter()
-            .flatten()
-            .any(|identifier| identifier.starts_with(&prefix));
+        let run_identifier = observed_app_id.is_some_and(|app_id| app_id.starts_with(&prefix));
         if known.contains_key(&window.id) || matches || newly_observed || run_identifier {
             let workspace_name = placed
                 .workspace

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, Shell, TreeNode};
 use crate::observation::{Failure, walk};
 use crate::ownership::AcceptedWindows;
-use crate::scenarios::{ConfiguredNode, Scenario, Selector, describe_path, diagnostic_yaml};
+use crate::scenarios::{ConfiguredNode, Scenario, describe_path, diagnostic_yaml};
 
 /// Deviations above this many percentage points are reported: sway-stage's sizing target.
 const SIZING_TARGET_POINTS: f64 = 1.0;
@@ -26,14 +26,6 @@ pub fn is_window(node: &TreeNode) -> bool {
 /// The Xwayland `WM_CLASS` class, when Sway reports one.
 pub fn class(node: &TreeNode) -> Option<&str> {
     node.window_properties.as_ref()?.class.as_deref()
-}
-
-/// The identifier of the selector's own kind: an Xwayland class never satisfies an app ID
-/// selector.
-pub fn observed_identifier<'a>(node: &'a TreeNode, selector: &Selector) -> Option<&'a str> {
-    match selector {
-        Selector::AppId(_) => node.app_id.as_deref(),
-    }
 }
 
 /// A compact diagnostic outline: `id:app_id`, `id:class`, or `id:layout`, then tiled and

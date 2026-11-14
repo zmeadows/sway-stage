@@ -29,14 +29,14 @@ pub fn standard_scenario(name: &str) -> Scenario {
         .expect("a standard scenario name")
 }
 
-/// The selector value configured for one of the scenario's windows.
-pub fn selector_value(scenario: &Scenario, layout_id: &str) -> String {
+/// The app ID configured for one of the scenario's windows.
+pub fn configured_app_id(scenario: &Scenario, layout_id: &str) -> String {
     let leaves = scenario.layout.leaves();
     let leaf = leaves
         .iter()
         .find(|leaf| leaf.layout_id == layout_id)
         .expect("a layout ID in the scenario");
-    leaf.selector.value().to_owned()
+    leaf.app_id.clone()
 }
 
 pub fn accepted_windows(windows: &[(i64, &str)]) -> AcceptedWindows {
@@ -267,7 +267,7 @@ pub fn assert_contains(text: &str, expected: &str) {
 /// from the configured model, so hierarchy/weight mistakes cannot confirm themselves.
 pub fn mixed_native_desktop(scenario: &Scenario) -> Value {
     let window = |id, layout_id: &str, rectangle| {
-        wayland_window(id, &selector_value(scenario, layout_id), rectangle)
+        wayland_window(id, &configured_app_id(scenario, layout_id), rectangle)
     };
     let mut singleton = group(
         32,

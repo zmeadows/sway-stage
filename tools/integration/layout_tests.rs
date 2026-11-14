@@ -1,8 +1,8 @@
 use super::*;
 use crate::fixtures::{
-    TARGET_WORKSPACE_ID, accepted_windows, assert_contains, check_message, desktop, find, group,
-    node_mut, parse_tree, rect, selector_value, set_focus, standard_scenario, uncertain_message,
-    wayland_window, xwayland_window,
+    TARGET_WORKSPACE_ID, accepted_windows, assert_contains, check_message, configured_app_id,
+    desktop, find, group, node_mut, parse_tree, rect, set_focus, standard_scenario,
+    uncertain_message, wayland_window, xwayland_window,
 };
 use serde_json::{Value, json};
 
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 /// Windows 20..=24 are window1..=window5; window4 is focused.
 fn deep_nesting_desktop(scenario: &Scenario) -> Value {
     let window = |id: i64, layout_id: &str, rect: Value| {
-        wayland_window(id, &selector_value(scenario, layout_id), rect)
+        wayland_window(id, &configured_app_id(scenario, layout_id), rect)
     };
     let column = group(
         33,
@@ -65,12 +65,12 @@ fn horizontal_pair_desktop(
         vec![
             wayland_window(
                 20,
-                &selector_value(scenario, "window1"),
+                &configured_app_id(scenario, "window1"),
                 rect(0, 0, first_width_pixels, 1080),
             ),
             wayland_window(
                 21,
-                &selector_value(scenario, "window2"),
+                &configured_app_id(scenario, "window2"),
                 rect(first_width_pixels, 0, second_width_pixels, 1080),
             ),
         ],
@@ -496,8 +496,9 @@ fn outline_names_identities_and_layouts_without_titles() {
 #[test]
 fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
     let scenario = standard_scenario("sibling-nested-groups");
-    let window =
-        |id, name: &str, rectangle| wayland_window(id, &selector_value(&scenario, name), rectangle);
+    let window = |id, name: &str, rectangle| {
+        wayland_window(id, &configured_app_id(&scenario, name), rectangle)
+    };
     let left = group(
         30,
         "splitv",
@@ -563,12 +564,12 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
         vec![
             wayland_window(
                 20,
-                &selector_value(&scenario, "window1"),
+                &configured_app_id(&scenario, "window1"),
                 rect(0, 0, 600, 400),
             ),
             wayland_window(
                 21,
-                &selector_value(&scenario, "window2"),
+                &configured_app_id(&scenario, "window2"),
                 rect(0, 400, 600, 600),
             ),
         ],
@@ -579,7 +580,7 @@ fn sibling_groups_verify_both_levels_and_default_focus_uses_first_leaf() {
             column,
             wayland_window(
                 22,
-                &selector_value(&scenario, "window3"),
+                &configured_app_id(&scenario, "window3"),
                 rect(600, 0, 400, 1000),
             ),
         ],
@@ -639,7 +640,7 @@ fn root_header_groups_check_selection_without_split_geometry() {
             .map(|id| {
                 wayland_window(
                     id,
-                    &selector_value(&scenario, &format!("window{}", id - 19)),
+                    &configured_app_id(&scenario, &format!("window{}", id - 19)),
                     rect(0, 0, 0, 0),
                 )
             })
@@ -735,7 +736,7 @@ fn nested_and_independent_non_first_selections_survive_capture_replay() {
     let window = |id, layout_id: &str| {
         wayland_window(
             id,
-            &selector_value(&scenario, layout_id),
+            &configured_app_id(&scenario, layout_id),
             rect(0, 0, 600, 1000),
         )
     };

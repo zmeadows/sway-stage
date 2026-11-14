@@ -42,8 +42,8 @@ fn fixtures_use_unique_selectors_preserve_argv_and_render_ordered_profiles() {
             let yaml = configuration_yaml(scenario);
             assert!(yaml.contains("/private path/record.sh"));
             for leaf in scenario.layout.leaves() {
-                assert!(selectors.insert(leaf.selector.value().to_owned()));
-                assert!(leaf.selector.value().contains(RUN_ID));
+                assert!(selectors.insert(leaf.app_id.clone()));
+                assert!(leaf.app_id.as_str().contains(RUN_ID));
                 assert_eq!(&leaf.command[..2], &["/bin/sh", "/private path/record.sh"]);
                 assert_eq!(leaf.command[3], "/private path/launches");
                 if case == Case::Partial && scenario.name == "profile-second" {
@@ -53,7 +53,7 @@ fn fixtures_use_unique_selectors_preserve_argv_and_render_ordered_profiles() {
                     assert_eq!(leaf.command[4], FOOT);
                     assert_eq!(
                         leaf.command[5],
-                        format!("--app-id={}", leaf.selector.value())
+                        format!("--app-id={}", leaf.app_id.as_str())
                     );
                 }
             }
@@ -69,8 +69,8 @@ fn launch_events(scenario: &Scenario, first_id: i64) -> Vec<WindowEvent> {
     let mut events = Vec::new();
     for (index, leaf) in scenario.layout.leaves().iter().enumerate() {
         let id = first_id + index as i64;
-        events.push(window_event("new", id, Some(leaf.selector.value())));
-        events.push(window_event("focus", id, Some(leaf.selector.value())));
+        events.push(window_event("new", id, Some(leaf.app_id.as_str())));
+        events.push(window_event("focus", id, Some(leaf.app_id.as_str())));
     }
     let focused_index = scenario
         .layout

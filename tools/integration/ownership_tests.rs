@@ -1,8 +1,8 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, SCRATCHPAD_WORKSPACE_ID, TARGET_WORKSPACE_ID,
-    accepted_windows, assert_contains, container_ids, desktop, node_mut, parse_tree, rect,
-    selector_value, standard_scenario, uncertain_message, wayland_window, window_event,
+    accepted_windows, assert_contains, configured_app_id, container_ids, desktop, node_mut,
+    parse_tree, rect, standard_scenario, uncertain_message, wayland_window, window_event,
 };
 use crate::scenarios::Scenario;
 use serde_json::{Value, json};
@@ -24,12 +24,12 @@ fn loaded_pair_tree(scenario: &Scenario) -> Value {
         vec![
             wayland_window(
                 20,
-                &selector_value(scenario, "window1"),
+                &configured_app_id(scenario, "window1"),
                 rect(0, 0, 1152, 1080),
             ),
             wayland_window(
                 21,
-                &selector_value(scenario, "window2"),
+                &configured_app_id(scenario, "window2"),
                 rect(1152, 0, 768, 1080),
             ),
         ],
@@ -59,7 +59,7 @@ fn verify_recorded_ownership(
 #[test]
 fn ordered_new_events_bind_launches_to_leaves() {
     let scenario = standard_scenario("horizontal-pair");
-    let second_window_app_id = selector_value(&scenario, "window2");
+    let second_window_app_id = configured_app_id(&scenario, "window2");
     // The first window's app ID arrives after its new event, which is not a mismatch.
     let events = [
         window_event("new", 20, None),
@@ -116,8 +116,8 @@ fn binding_rejects_preexisting_repeated_missing_or_extra_new_windows() {
 #[test]
 fn binding_rejects_structural_activity_and_contradicting_identities() {
     let scenario = standard_scenario("horizontal-pair");
-    let first_window_app_id = selector_value(&scenario, "window1");
-    let second_window_app_id = selector_value(&scenario, "window2");
+    let first_window_app_id = configured_app_id(&scenario, "window1");
+    let second_window_app_id = configured_app_id(&scenario, "window2");
     let launches = || vec![window_event("new", 20, None), window_event("new", 21, None)];
 
     for (change, container_id) in [
@@ -202,8 +202,8 @@ fn ownership_accepts_exactly_the_owned_windows() {
 #[test]
 fn ownership_rejects_uncertain_windows_anywhere() {
     let scenario = standard_scenario("horizontal-pair");
-    let first_window_app_id = selector_value(&scenario, "window1");
-    let second_window_app_id = selector_value(&scenario, "window2");
+    let first_window_app_id = configured_app_id(&scenario, "window1");
+    let second_window_app_id = configured_app_id(&scenario, "window2");
     let placement = "ownership/placement uncertain";
     let mut cases: Vec<(Value, String)> = Vec::new();
 
@@ -419,7 +419,7 @@ fn process_evidence_reads_the_windows_process_arguments() {
 #[test]
 fn ownership_requires_process_evidence_for_repeated_app_ids() {
     let scenario = standard_scenario("duplicate-foot-ids");
-    let shared = selector_value(&scenario, "window1");
+    let shared = configured_app_id(&scenario, "window1");
     let mut loaded = desktop(
         "splith",
         vec![

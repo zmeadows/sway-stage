@@ -52,27 +52,6 @@ impl GroupLayout {
     }
 }
 
-/// An exact window selector: a native Wayland app ID.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Selector {
-    AppId(String),
-}
-
-impl Selector {
-    /// The selector's YAML key, which also names it in diagnostics.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Selector::AppId(_) => "app_id",
-        }
-    }
-
-    pub fn value(&self) -> &str {
-        match self {
-            Selector::AppId(value) => value,
-        }
-    }
-}
-
 /// A configured group or window: what a scenario asks sway-stage to build. Distinct from
 /// `ipc::TreeNode`, an observed Sway container.
 #[derive(Clone, Debug)]
@@ -97,12 +76,13 @@ pub struct ConfiguredWindow {
     pub weight: u32,
     /// The executable, then literal arguments.
     pub command: Vec<String>,
-    pub selector: Selector,
+    /// The exact native Wayland app ID that `match` selects this window by.
+    pub app_id: String,
     /// Environment overrides for this window's process only, in configuration order.
     pub env: Vec<(String, String)>,
     /// Optional absolute YAML working directory.
     pub cwd: Option<String>,
-    /// The selector alone cannot attribute the window to this launch, so ownership also
+    /// The app ID alone cannot attribute the window to this launch, so ownership also
     /// requires Sway's PID to show the expected application's literal arguments.
     pub requires_process_evidence: bool,
 }
@@ -450,14 +430,14 @@ pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenar
     scenario
 }
 
-/// A leaf named `window{number}`. Its command and selector are placeholders that the
+/// A leaf named `window{number}`. Its command and app ID are placeholders that the
 /// scenario definition replaces before returning the scenario.
 fn window(number: u32, weight: u32) -> ConfiguredNode {
     ConfiguredNode::Window(ConfiguredWindow {
         layout_id: format!("window{number}"),
         weight,
         command: Vec::new(),
-        selector: Selector::AppId(String::new()),
+        app_id: String::new(),
         env: Vec::new(),
         cwd: None,
         requires_process_evidence: false,
@@ -490,19 +470,19 @@ fn use_unique_foot_windows(scenario: &mut Scenario, run_id: &str, foot: &str, sl
             scenario.name, leaf.layout_id
         );
         leaf.command = foot_command(foot, &app_id, None, sleep);
-        leaf.selector = Selector::AppId(app_id);
+        leaf.app_id = app_id;
     }
 }
 
 /// Gives every Foot window one app ID. A distinct literal `--title` argument per leaf is
-/// independent launch evidence even though the selectors are identical; the title Sway
+/// independent launch evidence even though the app IDs are identical; the title Sway
 /// reports is never an ownership key.
 fn use_shared_foot_app_id(scenario: &mut Scenario, run_id: &str, foot: &str, sleep: &str) {
     let shared_app_id = format!("sway-stage-it-{run_id}-duplicate-foot");
     for leaf in scenario.layout.leaves_mut() {
         let title = format!("{shared_app_id}-{}", leaf.layout_id);
         leaf.command = foot_command(foot, &shared_app_id, Some(&title), sleep);
-        leaf.selector = Selector::AppId(shared_app_id.clone());
+        leaf.app_id = shared_app_id.clone();
         leaf.requires_process_evidence = true;
     }
 }
@@ -631,11 +611,7 @@ fn emit_node(
             };
             fields.push(format!("command: {command}"));
             fields.push("match:".to_owned());
-            fields.push(format!(
-                "  {}: {}",
-                window.selector.kind(),
-                window.selector.value()
-            ));
+            fields.push(format!("  app_id: {}", window.app_id));
             if matches!(rendering, Rendering::Configuration)
                 && let Some(cwd) = &window.cwd
             {

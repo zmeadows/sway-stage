@@ -169,7 +169,7 @@ fn foot_windows_have_unique_identifiers_and_bounded_lifetimes() {
             assert_eq!(leaf.command, expected_command);
             assert!(leaf.env.is_empty());
             assert!(!leaf.requires_process_evidence);
-            assert_eq!(leaf.selector, Selector::AppId(app_id.clone()));
+            assert_eq!(leaf.app_id, app_id);
             assert!(app_ids.insert(app_id), "repeated app ID");
         }
     }
@@ -192,7 +192,7 @@ fn duplicate_foot_ids_share_a_selector_but_not_launch_arguments() {
             "300",
         ];
         assert_eq!(leaf.command, expected_command);
-        assert_eq!(leaf.selector, Selector::AppId(shared_app_id.clone()));
+        assert_eq!(leaf.app_id, shared_app_id);
         assert!(leaf.requires_process_evidence);
     }
     assert_ne!(leaves[0].command, leaves[1].command);

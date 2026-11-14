@@ -6,7 +6,7 @@
 //! Recovered command arguments never appear in messages.
 
 use crate::layout::LayoutMeasurements;
-use crate::scenarios::{ConfiguredNode, Scenario, Selector, expected_draft, json_sequence};
+use crate::scenarios::{ConfiguredNode, Scenario, expected_draft, json_sequence};
 
 /// A captured weight is the measured share rounded to hundredths.
 const WEIGHT_TOLERANCE: f64 = 0.02;
@@ -194,7 +194,7 @@ fn strip_quotes(scalar: &str) -> &str {
 /// serializer's flow and block command sequences are recognized; with each replaced by
 /// `command: null`, the drafts must agree exactly, so inference changed no hierarchy, order,
 /// sizing, selector, ID, or focus. Each recovered Foot command must carry its leaf's app ID,
-/// as `--app-id=ID` or as `--app-id ID`. Shared selectors also require the corresponding
+/// as `--app-id=ID` or as `--app-id ID`. Shared app IDs also require the corresponding
 /// literal title option from the independently configured launch, never Sway's title.
 pub fn verify_inferred_capture(
     inferred_draft: &str,
@@ -208,19 +208,18 @@ pub fn verify_inferred_capture(
         return Err("inferred command count differs".into());
     }
     for (arguments, leaf) in commands.iter().zip(&leaves) {
-        let Selector::AppId(app_id) = &leaf.selector;
-        if option_values(arguments, "--app-id") != [app_id.as_str()] {
+        if option_values(arguments, "--app-id") != [leaf.app_id.as_str()] {
             return Err(format!(
                 "inferred command does not identify the correct Foot window: {}",
                 leaf.layout_id
             ));
         }
-        let shared_selector = leaves
+        let shared_app_id = leaves
             .iter()
-            .filter(|other| other.selector == leaf.selector)
+            .filter(|other| other.app_id == leaf.app_id)
             .count()
             > 1;
-        if shared_selector {
+        if shared_app_id {
             let expected_titles = option_values(&leaf.command, "--title");
             let titles = option_values(arguments, "--title");
             if expected_titles.len() != 1 || titles != expected_titles {

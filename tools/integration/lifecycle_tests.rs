@@ -1,9 +1,8 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, TARGET_WORKSPACE_ID, accepted_windows,
-    assert_contains, container_ids, desktop, find, group, node_mut, parse_tree, rect,
-    selector_value, standard_scenario, uncertain_message, wayland_window, window_event,
-    workspaces_reply,
+    assert_contains, configured_app_id, container_ids, desktop, find, group, node_mut, parse_tree,
+    rect, standard_scenario, uncertain_message, wayland_window, window_event, workspaces_reply,
 };
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -246,12 +245,12 @@ fn loaded_pair_snapshot(scenario: &Scenario) -> Snapshot {
             vec![
                 wayland_window(
                     20,
-                    &selector_value(scenario, "window1"),
+                    &configured_app_id(scenario, "window1"),
                     rect(0, 0, 1152, 1080),
                 ),
                 wayland_window(
                     21,
-                    &selector_value(scenario, "window2"),
+                    &configured_app_id(scenario, "window2"),
                     rect(1152, 0, 768, 1080),
                 ),
             ],
@@ -298,7 +297,7 @@ fn cleanup_plan_revalidates_ownership_and_calculates_the_remaining_hierarchy() {
             "splith",
             vec![wayland_window(
                 21,
-                &selector_value(&scenario, "window2"),
+                &configured_app_id(&scenario, "window2"),
                 rect(0, 0, 1920, 1080),
             )],
             21,
@@ -463,7 +462,7 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
                 "splith",
                 vec![wayland_window(
                     21,
-                    &selector_value(&scenario, "window2"),
+                    &configured_app_id(&scenario, "window2"),
                     rect(0, 0, 1920, 1080),
                 )],
                 21,
@@ -847,20 +846,20 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
     );
 
     let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
-    let selector = selector_value(&scenario, "window1");
+    let fixture_app_id = configured_app_id(&scenario, "window1");
     let preexisting_container_ids = container_ids(&starting_snapshot().tree);
     let mut loaded = recorded_snapshot(
         desktop(
             "splith",
-            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            vec![wayland_window(20, &fixture_app_id, rect(0, 0, 1920, 1080))],
             20,
         ),
         "9",
         TARGET_WORKSPACE_ID,
     );
     loaded.window_events = vec![
-        window_event("new", 20, Some(&selector)),
-        window_event("focus", 20, Some(&selector)),
+        window_event("new", 20, Some(&fixture_app_id)),
+        window_event("focus", 20, Some(&fixture_app_id)),
     ];
     let owned_windows = bind_launches(
         &loaded.window_events,
@@ -925,7 +924,7 @@ fn foreign_fixture_requires_two_safe_workspaces_and_its_own_launch_evidence_for_
     let mut changed_foreign = recorded_snapshot(
         desktop(
             "splith",
-            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            vec![wayland_window(20, &fixture_app_id, rect(0, 0, 1920, 1080))],
             20,
         ),
         "9",
@@ -995,11 +994,11 @@ fn interrupted_or_incomplete_second_invocation_never_authorizes_cleanup_or_resto
 fn fixture_creation_evidence_survives_expected_focus_changes_but_never_changed_state() {
     use crate::fixtures::{FOOT, SLEEP};
     let scenario = foreign_fixture_scenario(RUN_ID, FOOT, SLEEP);
-    let selector = selector_value(&scenario, "window1");
+    let fixture_app_id = configured_app_id(&scenario, "window1");
     let make_tree = |focus| {
         desktop(
             "splith",
-            vec![wayland_window(20, &selector, rect(0, 0, 1920, 1080))],
+            vec![wayland_window(20, &fixture_app_id, rect(0, 0, 1920, 1080))],
             focus,
         )
     };

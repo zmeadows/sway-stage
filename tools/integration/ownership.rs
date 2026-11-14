@@ -1,6 +1,6 @@
 //! Independent evidence that this run owns exactly the windows it launched.
 //!
-//! Ordered `window::new` events bind sequential launches to layout leaves; selectors alone
+//! Ordered `window::new` events bind sequential launches to layout leaves; app IDs alone
 //! never establish ownership. Later checks require those container IDs on the target
 //! workspace in safe tiled state, as native Wayland windows with the exact app ID, and,
 //! where the leaf requires it, the literal launch arguments in `/proc/PID/cmdline`.
@@ -11,10 +11,10 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use crate::ipc::{EventContainer, Shell, TreeNode, WindowChange, WindowEvent};
-use crate::layout::{class, is_window, observed_identifier, outline};
+use crate::ipc::{Shell, TreeNode, WindowChange, WindowEvent};
+use crate::layout::{class, is_window, outline};
 use crate::observation::{Failure, walk};
-use crate::scenarios::{ConfiguredNode, ConfiguredWindow, Selector};
+use crate::scenarios::{ConfiguredNode, ConfiguredWindow};
 
 /// Sway container ID → configured layout ID, for windows this run launched and accepted.
 pub type AcceptedWindows = BTreeMap<i64, String>;
@@ -62,11 +62,11 @@ pub fn require_quiet(
     Ok(())
 }
 
-/// Binds launches to layout leaves by the order of `window::new` events, never by selector
+/// Binds launches to layout leaves by the order of `window::new` events, never by app ID
 /// uniqueness: sway-stage launches one leaf at a time and snapshots global window identities
 /// before each spawn, so the nth new window belongs to the nth leaf. Each new window must
 /// be globally new. Every other event during the load must be harmless, or a new or focus
-/// event of an accepted window whose reported identity, if any, matches its selector.
+/// event of an accepted window whose reported app ID, if any, matches its leaf.
 /// `verify_ownership` then checks tree identities and any required process arguments.
 pub fn bind_launches(
     window_events: &[WindowEvent],
@@ -113,13 +113,12 @@ pub fn bind_launches(
             }
         };
         // Identities may arrive after the new event, so an absent one is not a mismatch.
-        let reported_identifier = event_identifier(&event.container, &leaf.selector);
-        if reported_identifier.is_some_and(|identifier| identifier != leaf.selector.value()) {
+        let reported_app_id = event.container.app_id.as_deref();
+        if reported_app_id.is_some_and(|app_id| app_id != leaf.app_id) {
             return Err(Failure::Uncertain(format!(
-                "event identity differs: id={container_id} {}={reported_identifier:?}, \
+                "event identity differs: id={container_id} app_id={reported_app_id:?}, \
                  expected {:?}",
-                leaf.selector.kind(),
-                leaf.selector.value()
+                leaf.app_id
             )));
         }
     }
@@ -131,17 +130,10 @@ pub fn bind_launches(
     Ok(accepted)
 }
 
-/// `observed_identifier` for a window event's container.
-fn event_identifier<'a>(container: &'a EventContainer, selector: &Selector) -> Option<&'a str> {
-    match selector {
-        Selector::AppId(_) => container.app_id.as_deref(),
-    }
-}
-
 /// Requires the whole tree to show exactly the `accepted` windows, each still identified as
 /// its leaf, on the target workspace in safe tiled state, with process evidence where its
 /// leaf requires it. Candidates are accepted IDs, any window anywhere matching one of the
-/// layout's selectors, and any window on the target; any candidate that is not such an
+/// layout's app IDs, and any window on the target; any candidate that is not such an
 /// owned window is fatal. Preexisting windows elsewhere, such as the user's other windows,
 /// are expected and ignored.
 pub fn verify_ownership(
@@ -164,11 +156,12 @@ pub fn verify_ownership(
             continue;
         }
 
-        let matches_a_selector = leaves
+        let observed_app_id = node.app_id.as_deref();
+        let matches_an_app_id = leaves
             .iter()
-            .any(|leaf| observed_identifier(node, &leaf.selector) == Some(leaf.selector.value()));
+            .any(|leaf| observed_app_id == Some(leaf.app_id.as_str()));
         let is_candidate = accepted.contains_key(&container_id)
-            || matches_a_selector
+            || matches_an_app_id
             || (on_target_workspace && is_window(node));
         if !is_candidate {
             continue;
@@ -204,11 +197,10 @@ pub fn verify_ownership(
             )));
         };
 
-        if observed_identifier(node, &leaf.selector) != Some(leaf.selector.value()) {
+        if observed_app_id != Some(leaf.app_id.as_str()) {
             return Err(Failure::Uncertain(format!(
-                "owned identity changed: id={container_id} expected {} {:?}",
-                leaf.selector.kind(),
-                leaf.selector.value()
+                "owned identity changed: id={container_id} expected app_id {:?}",
+                leaf.app_id
             )));
         }
         let is_native_wayland = node.shell == Some(Shell::XdgShell) && node.window.is_none();
