@@ -7,12 +7,13 @@
 //! descendant keeps an output stream open.
 //!
 //! The only signal sent is SIGKILL to one of the harness's own direct children, to stop
-//! the event helper or an overdue run. It never reaches that child's descendants, such as
-//! applications started by `sway-stage load`, and never targets a window.
+//! the event helper, an overdue run, or a private headless compositor. It never reaches
+//! that child's descendants, such as applications started by `sway-stage load`, and never
+//! targets a window.
 
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{ErrorKind, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
@@ -193,6 +194,24 @@ pub fn spawn_with_output(
         .stderr(Stdio::null());
     let child = spawn(command, operation, false)?;
     Ok((child, output))
+}
+
+/// Starts a long-running helper whose stdout and stderr both append to `log`. Its stdin is
+/// null. The caller owns the child and stops it with `kill_and_reap`.
+#[allow(
+    dead_code,
+    reason = "used by the headless session, not yet by the live harness"
+)]
+pub fn spawn_with_log(mut command: Command, operation: &str, log: &File) -> Result<Child, String> {
+    let clone_log = || {
+        log.try_clone()
+            .map_err(|error| format!("{operation}: duplicate log file: {error}"))
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(clone_log()?)
+        .stderr(clone_log()?);
+    spawn(command, operation, false)
 }
 
 /// Sends SIGKILL to one of the harness's own direct children and reaps it within a bound.

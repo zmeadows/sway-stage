@@ -8,11 +8,12 @@
 
 #![allow(
     dead_code,
-    reason = "IPC, process, and preparation code is exercised only by the live harness"
+    reason = "IPC, process, session, and preparation code is exercised only by user-run executables"
 )]
 
 mod capture;
 mod fixtures;
+mod headless;
 mod ipc;
 mod layout;
 mod lifecycle;

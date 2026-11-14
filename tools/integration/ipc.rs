@@ -47,6 +47,20 @@ impl Swaymsg {
         Ok(Self { executable, socket })
     }
 
+    /// A socket the caller created privately, such as a headless compositor's. Never
+    /// consults `SWAYSOCK`, so a missing private socket cannot fall back to another session.
+    #[allow(
+        dead_code,
+        reason = "used by the headless session, not yet by the live harness"
+    )]
+    pub fn at_socket(socket: PathBuf) -> Result<Self, String> {
+        if !fs::metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            return Err(format!("no Sway IPC socket at {}", socket.display()));
+        }
+        let executable = process::find_executable("swaymsg")?;
+        Ok(Self { executable, socket })
+    }
+
     pub fn get_tree(&self) -> Result<TreeNode, String> {
         self.query("get_tree", None)
     }
@@ -102,6 +116,14 @@ impl Swaymsg {
 
     pub fn get_workspaces(&self) -> Result<Vec<Workspace>, String> {
         self.query("get_workspaces", None)
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the headless session, not yet by the live harness"
+    )]
+    pub fn get_outputs(&self) -> Result<Vec<Output>, String> {
+        self.query("get_outputs", None)
     }
 
     pub fn seat_names(&self) -> Result<Vec<String>, String> {
@@ -428,6 +450,21 @@ pub struct Workspace {
     pub num: i32,
     pub name: String,
     pub focused: bool,
+}
+
+/// A `get_outputs` entry.
+#[allow(
+    dead_code,
+    reason = "used by the headless session, not yet by the live harness"
+)]
+#[derive(Debug, Deserialize)]
+pub struct Output {
+    pub name: String,
+    pub active: bool,
+    /// The output's logical area in the global layout.
+    pub rect: Rect,
+    /// The visible workspace's name; null for a disabled output.
+    pub current_workspace: Option<String>,
 }
 
 #[derive(Debug)]

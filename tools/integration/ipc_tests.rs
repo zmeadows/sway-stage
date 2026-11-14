@@ -154,6 +154,35 @@ fn tree_child_focus_history_is_required_and_distinct_from_global_focus() {
 }
 
 #[test]
+fn outputs_decode_active_and_disabled_entries() {
+    let reply = r#"[
+        {"id": 4, "type": "output", "name": "HEADLESS-1", "make": "headless",
+         "model": "headless", "active": true, "scale": 1.0, "current_workspace": "1",
+         "rect": {"x": 0, "y": 0, "width": 2560, "height": 1440},
+         "current_mode": {"width": 2560, "height": 1440, "refresh": 60000}},
+        {"type": "output", "name": "HEADLESS-2", "active": false,
+         "current_workspace": null, "rect": {"x": 0, "y": 0, "width": 0, "height": 0}}
+    ]"#;
+    let outputs: Vec<Output> = serde_json::from_str(reply).unwrap();
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].name, "HEADLESS-1");
+    assert!(outputs[0].active);
+    assert_eq!(
+        outputs[0].rect,
+        Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440
+        }
+    );
+    assert_eq!(outputs[0].current_workspace.as_deref(), Some("1"));
+    assert!(!outputs[1].active);
+    assert_eq!(outputs[1].current_workspace, None);
+}
+
+#[test]
 fn empty_workspace_layout_commands_use_native_sway_spelling() {
     assert_eq!(InitialWorkspaceLayout::Tabbed.command(), "layout tabbed");
     assert_eq!(
