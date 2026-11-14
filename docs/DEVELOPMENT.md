@@ -32,106 +32,75 @@ Some CLI fixtures bind temporary Unix sockets, which restrictive sandboxes may f
 `cargo test --locked --test integration_harness`; it has no harness entry point and must
 never read `SWAYSOCK`, connect to Sway, or start processes.
 
-## Live testing: user only
+## Integration harness: user only
 
-**AI agents must never execute the live integration harness or the headless launcher, even
-with `--help`, partial runs, or trial runs.** Agents may compile them, inspect them, and run
-their offline tests only.
-Agents must never issue commands that mutate the user's live Sway desktop, including
-loads, application launches/termination, focus changes, or window moves/resizes.
-All live commands below are exclusively for the user's manual execution.
+**AI agents must never execute the integration harness: neither `tools/integration/run.sh`
+nor the `integration` example binary, including `--filter`, help, partial, or trial runs.**
+Agents may compile them, inspect them, and run their offline tests only. Agents must never
+issue commands that mutate the user's live Sway desktop, including loads, application
+launches/termination, focus changes, or window moves/resizes. Everything below is
+exclusively for the user's manual execution.
 
-Use disposable workspaces in the existing Sway session, with `SWAYSOCK` pointing to it.
-A disposable workspace is **not compositor isolation**: rules, outputs, focus, and events
-are shared with the rest of the session. Leave input idle during harness runs; do not rely
-on guards for transactional protection. No nested compositor, VNC, or virtual monitor is
-required. Only one Sway seat is supported by the harness.
-
-## Headless smoke test
-
-User only. This temporary check prepares the move of the integration scenarios into a
-private headless compositor. Prerequisites: `sway`, `swaymsg`, Foot, and `setpriv`
-(util-linux) on `PATH`. From the repository root, run:
+Prerequisites: `sway`, `swaymsg`, Foot, `sleep`, and `setpriv` (util-linux) on `PATH`, plus
+`/bin/sh` and a Linux `/proc` that exposes process arguments. Foot is the only application
+the harness launches. From the repository root:
 
 ```sh
-tools/integration/run.sh
+tools/integration/run.sh                  # all 25 scenarios
+tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
-It builds `sway-stage` and the `headless_smoke` example, then starts a separate Sway on the
-wlroots headless backend with one 2560×1440 `HEADLESS-1` output and no Xwayland, bar,
-decorations, or startup applications. Everything runs in a new owner-only directory under
-`$TMPDIR` (default `/tmp`), with an environment built from nothing but `PATH`: private
-runtime, home, XDG, and temporary directories, and a deliberately nonexistent D-Bus bus.
-It never connects to your session's compositor, notification daemon, or launch log, so it
-is safe to start from a terminal inside your Sway session. Before anything runs, it
-verifies the private IPC and Wayland sockets and the single virtual output. It then loads a
-two-Foot `splith` layout with the real `sway-stage` and checks both app IDs, the exact
-half-output geometry, and left-window focus over the headless IPC socket.
+`run.sh` builds `sway-stage` and the `integration` example in release mode, then runs the
+harness. `--filter` is a case-sensitive substring match over every scenario name, including
+the profile scenarios, and keeps suite order: `--filter single-window` runs one scenario and
+`--filter profile` the four profile scenarios. Any other argument, a missing or empty TEXT,
+or a filter that matches no scenario fails with exit status 2 before anything starts. A run
+exits 0 only when every selected scenario passed and the compositor stopped cleanly.
 
-Expect a ready line, `PASS  headless two-Foot smoke test: …`, and
-`Headless Sway stopped; session files removed.` with exit status 0. Shutdown sends `exit`
-to the private socket, waits up to five seconds, then kills only that compositor process;
-its Foot clients must exit with it. On failure, or after Ctrl-C, the compositor is stopped
-and the session directory is preserved and printed: inspect `sway.log`, `layouts/`, and
-`home/.local/state/sway-stage/last-run.log`. If the launcher itself is killed, the kernel
-kills the compositor (`setpriv --pdeathsig`). The 2560×1440 mode and this launcher have not
-yet been run; the existing live harness below is unchanged.
+Every run starts its own Sway on the wlroots headless backend, whether it selects one
+scenario or all 25. It has one 2560×1440 `HEADLESS-1` output and no Xwayland, bar,
+decorations, input devices, or startup applications. Everything lives in a new owner-only
+directory under `$TMPDIR` (default `/tmp`), with an environment built from nothing but
+`PATH`: private runtime, home, XDG, and temporary directories, and a deliberately
+nonexistent D-Bus bus. The harness never connects to your session's compositor,
+notification daemon, or launch log, so it is safe to start from a terminal inside your Sway
+session. The launcher first verifies the private IPC and Wayland sockets and the single
+virtual output. It then runs the scenario runner as its child with only that private
+environment, so sway-stage and every Foot window it launches see only the private
+compositor. The runner checks the virtual output again and requires a fresh compositor
+(only workspace `1`, focused and empty, with no windows) before its first command.
 
-## Integration harness
+The runner establishes its workspaces explicitly:
 
-Prerequisites: `swaymsg`, Foot, and `sleep` on `PATH`, plus the two release executables.
-Foot is the only GUI application the harness launches. Linux `/proc` must expose process
-arguments for the process-execution and repeated-app-ID ownership checks. Profile scenarios
-also use `/bin/sh` to record launches before executing each configured command with its
-original argument boundaries.
-From the repository root, build (agents may perform these build steps):
-
-```sh
-cargo build --release --locked
-cargo build --release --locked --example integration
-```
-
-Before running, start on an existing workspace other than either disposable workspace.
-Choose two distinct explicit positive decimal workspace numbers (at most nine digits each),
-using `--workspace` for the layout target and `--foreign-workspace` for the foreign fixture.
-Both must be absent or completely empty, including floating windows and empty containers.
-A number belonging to a differently named workspace is refused. The starting workspace name must begin with an ASCII letter/digit
-and contain only ASCII letters/digits, spaces, or `_ . : + -`, allowing safe restoration.
-Preflight is repeated immediately before switching; the harness never selects an alternate
-target or fixture. Never designate a workspace containing user windows as the fixture.
-
-Run manually, one invocation at a time:
-
-```sh
-./target/release/examples/integration --workspace 9 --foreign-workspace 8
-```
-
-To include multi-workspace profiles, reserve a third disposable workspace and launch
-from another workspace, outside **all three** targets:
-
-```sh
-./target/release/examples/integration \
-  --workspace 8 \
-  --foreign-workspace 9 \
-  --profile-workspace 10
-```
-
-All three numbers must be distinct and obey the same restrictions above. The additional
-profile target is preflighted before any desktop mutation and rechecked before each profile.
-It must be absent or completely empty; the harness never clears occupied workspaces.
-Omitting `--profile-workspace` keeps the two-workspace suite and reports four profile
-SKIPs.
-
-| Option | Meaning |
+| Workspace | Role |
 | --- | --- |
-| `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
-| `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
-| `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables four profile scenarios after the other scenarios, while the foreign fixture stays alive. |
-| `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
+| `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. |
+| `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
+| `3` | The second target of the successful and partial profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
 
-The standard run covers twenty-one Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
-uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
-groups, process execution, default final focus, occupied-workspace refusal, and capture/reload
+Expect a ready line, one `PASS` line per selected scenario, `N of N selected scenarios
+passed.`, and `Headless Sway stopped; session files removed.` Shutdown sends `exit` to the
+private socket, waits up to five seconds, then kills only that compositor process. Its Foot
+clients must exit with it; they are observed, never signalled.
+
+The first failure stops the run. It prints `FAIL  STAGE: reason`, runs no further
+scenarios, closes nothing, and leaves remaining windows to the compositor's shutdown. The
+session directory is then kept and its path printed. Inspect `sway.log`;
+`tmp/sway-stage-integration-*/` for the generated layouts, profiles, and captures; and
+`home/.local/state/sway-stage/last-run.log` for the last sway-stage load. Ctrl-C reaches
+both the launcher and the runner. The runner records it and fails at its next check, then
+the compositor is killed. The launcher kills the runner by PID if it has not stopped ten
+seconds after Ctrl-C, or if it outlasts a generous backstop of five minutes plus five per
+selected scenario. If the launcher itself is killed, the kernel kills the compositor
+(`setpriv --pdeathsig`). The harness kills only its own direct children, never process
+groups or applications.
+
+### Scenarios
+
+The suite runs twenty-one standard Foot scenarios, then four profile scenarios. The
+original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
+siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested groups,
+process execution, default final focus, occupied-workspace refusal, and capture/reload
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
 capture, and guarded cleanup. The nine native-group additions are listed below; the
 twenty-first, `duplicate-foot-ids`, gives two windows one shared app ID (described below).
@@ -150,8 +119,8 @@ twenty-first, `duplicate-foot-ids`, gives two windows one shared app ID (describ
 
 The `initially-tabbed` and `initially-stacked` cases recheck the selected target's identity,
 focus, output, and emptiness, apply `layout tabbed` or `layout stacking`, check the reply,
-then require a fresh fenced tree to report `tabbed` or `stacked` while still empty. Unexpected workspace/window
-activity fails preparation without a load or restoration; observation history is retained.
+then require a fresh fenced tree to report `tabbed` or `stacked` while still empty. Unexpected
+workspace/window activity fails preparation without a load; observation history is retained.
 Both reuse ordinary hierarchy, sizing, selection, capture, preservation, and success-only
 cleanup checks. Their requested split root leaves an ordinary split workspace after success;
 no layout reset or placeholder windows are used. Sway's
@@ -159,12 +128,8 @@ no layout reset or placeholder windows are used. Sway's
 updates the empty workspace directly.
 
 Single-window, horizontal-pair, and duplicate-foot-ids cases also check inferred commands.
-Expect twenty-one passes and four profile SKIPs for the two-workspace suite, plus the
-separate foreign fixture.
 
-With `--profile-workspace`, add four passes (twenty-five total) and remove the four
-profile SKIPs. Expected failures count as passes only after
-independent verification, and the summary reports profile scenarios separately:
+Expected profile failures count as passes only after independent verification:
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -173,38 +138,34 @@ independent verification, and the summary reports profile scenarios separately:
 | `profile-partial-failure` | Complete the first Foot layout, then run `sleep 0` with a 500 ms matching-window timeout on the second target. Require exit 1, completed/failed workspace diagnostics, an intact first layout, an empty focused second target, and no observed rollback. |
 | `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. Capture both the inactive named target and focused numeric target with the same independent draft/reference and preservation checks. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
 
-The named scenario reuses the primary reserved slot; no fourth workspace is required.
-It accepts exactly one expected rename event per rename and retains the existing event
-subscription. Any unexpected result or interruption stops the run without name restoration,
-window cleanup, or focus restoration; the printed disposable ID and old/new names identify
-what the user should inspect. It never renames an occupied workspace. The new named case
-has offline coverage and awaits user-run live acceptance.
+The named scenario reuses workspace `2`; no fourth workspace is required. It accepts exactly
+one expected rename event per rename and retains the existing event subscription. Any
+unexpected result or interruption stops the run without renaming the workspace back or
+closing windows. It never renames an occupied workspace.
 
-Both success cases capture with inference disabled into additional private directories, using
-only the two explicit reserved targets; the harness never runs live `--all`. All four use
-private layout/profile directories, explicit directory overrides, and the pinned
-Sway socket. Private launch records cover commands that produce no windows; ordered window
-events on either side of the single expected transition independently establish launch
-bindings. The inactive first workspace is checked through its saved child-focus path.
-The foreign fixture and unrelated windows retain their usual preservation checks. Intentional
-profile errors use a private no-op notification stub on the child PATH, like the ordinary
-occupied refusal; stderr and exit status remain checked.
+Both success cases capture with inference disabled into additional private directories,
+using only the two explicit targets; the harness never runs `--all`. All four use private
+layout/profile directories, explicit directory overrides, and the pinned Sway socket.
+Private launch records cover commands that produce no windows; ordered window events on
+either side of the single expected transition independently establish launch bindings. The
+inactive first workspace is checked through its saved child-focus path. The foreign fixture
+and unrelated windows retain their usual preservation checks. Intentional profile errors
+still attempt sway-stage's error notification, which cannot reach any notification daemon
+through the session's nonexistent D-Bus bus; stderr and exit status remain checked.
 
 If the second target is absent at scenario start, the profile must create it. If it already
 exists empty, its identity/output must survive. The harness never destroys a workspace to
 force creation. Natural removal of an empty unfocused workspace is allowed after cleanup.
 On independently verified success or expected failure, cleanup closes the second target's
 owned windows first, returns to the primary, then establishes fresh evidence before closing
-its windows. Unexpected or ambiguous outcomes leave remaining windows untouched and forbid
-restoration; diagnostics report both targets, last known owned IDs, and remaining
-run-specific window candidates. The short-lived timeout command has no window to close.
+its windows. Unexpected or ambiguous outcomes leave remaining windows untouched. The
+short-lived timeout command has no window to close.
 
-Targets may naturally share an output or occupy different outputs. The harness checks actual
-placement and rejects migration, without assigning or rearranging outputs. Explicit
-cross-output coverage requires the user's existing Sway workspace rules; it is not guaranteed
-by the harness. Record outputs and Sway version with live results. The event/snapshot limits
-described below still apply; an unchanged tree cannot prove that an unobservable no-op IPC
-command was never attempted.
+With one virtual output, every target shares `HEADLESS-1`. The harness still checks actual
+output placement and rejects migration, without assigning or rearranging outputs, but it
+does not cover multiple outputs. Record `sway --version` with results. The event/snapshot
+limits described below still apply; an unchanged tree cannot prove that an unobservable
+no-op IPC command was never attempted.
 
 The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and
@@ -260,20 +221,16 @@ Sway transitions.
 
 For native-group manual acceptance:
 
-1. Build both release executables with the commands above and record `sway --version`.
-2. From a third workspace, run the standard command above with two absent/empty disposable
-   workspace numbers. Leave input idle until it finishes; expect twenty-one passes, including
-   all four capture/reload scenarios. Preserve output on failure and inspect reported
-   remaining windows manually before another run. Do not rerun into a partially populated target.
-3. On a separate disposable workspace, visually check tab/stack header order and singleton
-   headers with a trusted local native-group layout. Confirm default first-child selection,
-   configured non-first selections in nested and inactive groups, and explicit global focus
-   taking precedence along its ancestry. Capture from a delayed command on another workspace
-   and compare the draft; fill only its null commands, check it, then load on another empty
-   target. Do not interact with windows during the harness itself: it deliberately treats
-   interference as failure.
-4. Repeat the interference/interrupt procedures below as separate runs; a standard pass
-   alone does not establish those guards live.
+1. Record `sway --version`, then run `tools/integration/run.sh` and expect twenty-five
+   passes, including all four capture/reload scenarios. Keep the output and the preserved
+   session directory on failure.
+2. On a separate disposable workspace in your own session, visually check tab/stack header
+   order and singleton headers with a trusted local native-group layout. Confirm default
+   first-child selection, configured non-first selections in nested and inactive groups,
+   and explicit global focus taking precedence along its ancestry. Capture from a delayed
+   command on another workspace and compare the draft; fill only its null commands, check
+   it, then load on another empty target.
+3. Test interruption as described below; a passing run alone does not exercise it.
 
 In `duplicate-foot-ids`, both Foot windows share one run-specific app ID and differ only in
 a literal `--title` launch argument. Ownership therefore also requires each window's
@@ -291,22 +248,14 @@ then attempts a different valid layout on that occupied target. It requires exit
 specific occupied-workspace prelaunch diagnostic. Synchronized trees must preserve every
 modeled container ID, identity, wrapper, ordering, geometry, and focus across the refusal;
 unexpected window or non-urgent workspace events fail it. A timeout, interruption, or
-unrelated error never counts as an expected refusal. The suite reports this verification
-separately from successful layouts and profile SKIPs. Only this expected-refusal invocation
-uses a private no-op `notify-send` stub on its child `PATH`, suppressing the intentional
-error notification while preserving stderr and exit-status checks. Other invocations retain
-normal notifications and the harness's environment is unchanged.
+unrelated error never counts as an expected refusal.
 
-Before the primary target is selected, the harness switches to the separately preflighted
-fixture workspace and loads a single Foot window with a run-unique app ID. Ordered new-window
-events and independent tree/layout checks establish ownership. It then makes an expected,
-fenced switch to the primary target. The fixture stays present throughout the suite; its
-terminal expires after 3600 seconds if left behind. It is an additional setup load, not an
-extra counted layout scenario. Its identity and location are printed on creation and failure.
-On complete scenario success, the harness verifies the fixture again, performs an expected
-switch back, and applies the ordinary exact-ID, freshly verified cleanup procedure before
-attempting original-workspace restoration. Every switch retains continuous focus history;
-there is no switch back or fixture cleanup after uncertain failures.
+The foreign fixture is loaded before any scenario: a single Foot window with a run-unique
+app ID on workspace `1`. Ordered new-window events and independent tree/layout checks
+establish ownership; then the harness makes an expected, fenced switch to workspace `2`. The
+fixture must stay present and unchanged through every scenario and is verified once more
+after the last one. It is never closed; compositor shutdown ends it. It is a setup load, not
+a counted scenario.
 
 Immediately before each load, the harness records every foreign window, including scratchpad
 windows. After load and capture, before each close, during close observation, and after cleanup,
@@ -315,7 +264,7 @@ inside workspaces, geometry, and floating/fullscreen/scratchpad state. The fixtu
 its original creation evidence across all scenarios. Titles, urgency, marks, and incidental
 focus metadata are excluded from preservation comparisons; focus and global structural
 activity retain their separate strict event checks. Any preservation uncertainty fails the
-run and stops further closes, launches, and restoration. A preservation baseline alone never
+run and stops further closes and launches. A preservation baseline alone never
 authorizes closing a preexisting window.
 
 Snapshots and tick fences do not provide transactional isolation. Relevant unexpected events
@@ -325,29 +274,19 @@ cannot be ruled out; a pass establishes unchanged observed state plus accepted e
 
 Sizing above 1 percentage point is diagnostic; above 5 fails a harness scenario.
 
-Scenario Foot terminals normally expire within five minutes of launch.
-
 Cleanup is an explicit success phase, never a failure handler. Each exact-ID close requires
 fresh independent ownership, event-history, state, and hierarchy evidence. Selectors alone
 are insufficient; the process-execution and repeated-app-ID Foot windows additionally require
-literal process-argument evidence.
-Failure stops subsequent scenarios and closes, leaving remaining windows alone.
-Read reported container IDs, selectors, and PIDs before manual intervention;
-diagnostic candidates do not imply ownership. Rules, gaps, minimum sizes, desktop activity,
-or version differences can explain conservative failures.
+literal process-argument evidence. Failure stops subsequent scenarios and closes, leaving
+remaining windows to the compositor's shutdown. Gaps, minimum sizes, or version differences
+can explain conservative failures.
 
-Restoration is separate from cleanup. It requires trusted focus history, a recorded disposable
-workspace still focused (the primary target or fixture workspace), and the original workspace's
-exact identity/name still present. Otherwise it is skipped; a destroyed original workspace is
-not recreated. An ordinary check failure may permit guarded restoration; uncertain ownership/control or interruption does not.
-
-After harness safety changes, manually test separate runs interrupted during load, capture,
-and cleanup with Ctrl-C or SIGINT to the harness PID only. Expect failure, remaining-window
-diagnostics, no subsequent closes/scenarios, and no restoration once
-interruption is observed. An already dispatched close may complete. The harness reaps only
-its direct children by PID; it must not signal application descendants or process groups.
-Also test away-and-back workspace focus, a foreign window, and an owned-window state change:
-each must stop conservatively. These exercise harness guards, not the loader's abort behavior.
+After harness safety changes, interrupt separate runs during a load, a capture, and a
+cleanup with Ctrl-C. Expect a `FAIL` line naming the interrupted stage, no subsequent
+scenarios or closes, a killed compositor, and a preserved session directory. An already
+dispatched close may complete. The harness's guards against unexpected focus changes,
+foreign-window changes, and owned-window state changes are covered by its offline tests;
+nothing else connects to the private compositor during a run.
 
 ## Manual application acceptance
 
@@ -445,9 +384,9 @@ Replace the example targets with unused disposable numbers and names in your exi
 Use harmless applications with distinct, verified selectors; keep all targets empty and input
 idle. Build first, run `sway-stage profile check work` with your directory overrides, and use
 those same overrides for `sway-stage profile load work` in each independent run below.
-The profile coordinator selects the targets itself. The optional harness profile scenarios
-above automate the basic two-target cases; these separate manual checks cover additional
-conditions and interference.
+The profile coordinator selects the targets itself. The harness's profile scenarios above
+automate the basic two-target cases in a private compositor; these separate manual checks
+cover additional conditions and interference in your own session.
 
 1. **Normal loading:** include an existing empty numbered workspace with a descriptive name,
    an existing true named workspace (`num = -1`), and a missing named target containing
@@ -485,10 +424,10 @@ conditions and interference.
    edited. Repeat an existing name: it must fail without replacing files or the launch log.
    Use offline fixtures for `--all`; do not include unrelated real workspaces in live tests.
 
-The user has successfully run the earlier complete harness, including its since-removed
-optional application scenarios and the original three numeric profile scenarios, in their
-live Sway session. The reduced Foot-only suite and the new profile-capture harness steps have
-not yet been run live. The additional manual variants above remain unverified;
+The user ran the earlier live-desktop harness, including its since-removed optional
+application scenarios and the original three numeric profile scenarios, in their own Sway
+session, and the temporary two-Foot headless smoke test. The 25-scenario headless suite has
+not yet been run. The additional manual variants above remain unverified;
 cross-monitor and interference runs provide optional further coverage. A successful run does
 not establish broader compositor compatibility or transactional isolation.
 

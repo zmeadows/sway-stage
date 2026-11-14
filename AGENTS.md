@@ -157,8 +157,8 @@ Each kind of information has one home:
 - `docs/PLAN.md`: outstanding release work and explicitly undecided ideas only.
 - `examples/`: user-facing illustrative YAML configurations, linked to the specification.
 - `tools/`: development-only Rust diagnostics and the integration harness, registered in
-  `Cargo.toml` as Cargo examples, plus the headless launcher `tools/integration/run.sh`.
-  The harness's offline tests are a separate `integration_harness` test target.
+  `Cargo.toml` as Cargo examples. The harness runs only through `tools/integration/run.sh`;
+  its offline tests are a separate `integration_harness` test target.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help describes current commands.
   Keep it consistent with the specification.
@@ -173,28 +173,25 @@ compositor. All live-desktop behavioral verification must be performed manually 
 workspaces in their existing Sway session, following [development](docs/DEVELOPMENT.md).
 A disposable workspace does not isolate the compositor or other workspaces.
 
-The integration harness, the `integration` Cargo example in `tools/integration/`, is
-exclusively for the user's manual execution on a disposable workspace. Agents must never
-execute it, including `--help`, partial runs, or trial runs: never run
-`cargo run --example integration` or the built example binary, and never connect it to a
-live compositor. Validate it only by compilation, static inspection, and the offline
-`integration_harness` tests. That test target is a separate crate root without the harness
-entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
-processes. The harness's explicit switch to a disposable workspace and its owned-window
-cleanup are development-harness exceptions to the ordinary loader's no-switch policy and
-the CLI's no-close policy, not permission for agents to perform desktop operations.
-
-The headless launcher, `tools/integration/run.sh`, and the temporary `headless_smoke`
-Cargo example it runs are likewise exclusively for the user's manual execution. Agents must
-never execute either, including partial or trial runs; validate them only by compilation,
-static inspection, and the offline `integration_harness` tests. The launcher starts a
-private headless Sway with an environment built from nothing, never connects to the user's
-compositor, and signals only its own compositor process.
+The integration harness, the `integration` Cargo example in `tools/integration/`, runs only
+through `tools/integration/run.sh`, which builds it and runs the selected scenarios in a
+private headless Sway started for that run. Both are exclusively for the user's manual
+execution. Agents must never execute either, including `--help`, `--filter`, partial runs,
+or trial runs: never run `run.sh`, `cargo run --example integration`, or the built example
+binary, and never connect the harness to any compositor. Validate it only by compilation,
+static inspection, and the offline `integration_harness` tests. That test target is a
+separate crate root without the harness entry point; its tests must never read `SWAYSOCK`,
+connect to a compositor, or start processes. The launcher gives the compositor and the
+scenario runner an environment built from nothing, never connects to the user's compositor,
+and signals only its own direct children. The harness's workspace switches and owned-window
+cleanup inside that private compositor are development-harness exceptions to the ordinary
+loader's no-switch policy and the CLI's no-close policy, not permission for agents to
+perform desktop operations.
 
 Window cleanup must remain an explicit verified success phase that closes only windows
 independently proven to belong to the run, never a destructor or failure handler. SIGINT
-only records a request; ordinary control flow invalidates focus history, stops further
-mutations, and skips restoration. Child process groups isolate terminal interrupts, but
+only records a request; ordinary control flow invalidates focus history and stops further
+mutations. Child process groups isolate launched applications from terminal interrupts, but
 termination must target only a harness-owned direct child by PID, never a process group,
 descendant application, or process discovered through `/proc`.
 
