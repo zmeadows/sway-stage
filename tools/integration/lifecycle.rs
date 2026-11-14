@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::capture::{executable_capture, verify_capture, verify_inferred_capture};
-use crate::headless::verify_virtual_output;
+use crate::headless::{is_session_ipc_socket, verify_virtual_output};
 use crate::ipc::{IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, Workspace};
 use crate::layout::{
     Shape, Signature, is_window, outline, remove_from_shape, shape, signature, verify_layout,
@@ -207,10 +207,18 @@ impl Harness {
         process::install_sigint_handler()?;
         process::check_interruption()?;
 
-        // The headless session sets SWAYSOCK to its private socket. Prove that it reaches
-        // the virtual output before anything else: a real desktop fails here, before any
-        // event subscription or command.
-        let sway = Swaymsg::from_environment()?;
+        // The headless session sets SWAYSOCK to its private socket. A desktop session's
+        // socket is refused here, before any connection; the private socket must then
+        // prove that it reaches the virtual output before any subscription or command.
+        let socket = PathBuf::from(env::var_os("SWAYSOCK").unwrap_or_default());
+        if !is_session_ipc_socket(&socket) {
+            return Err(format!(
+                "not started by tools/integration/run.sh: SWAYSOCK {} is not a private \
+                 headless session socket",
+                socket.display()
+            ));
+        }
+        let sway = Swaymsg::at_socket(socket)?;
         verify_virtual_output(&sway.get_outputs()?)
             .map_err(|error| format!("not the private headless compositor: {error}"))?;
         if sway.seat_names()?.len() != 1 {

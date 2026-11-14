@@ -5,7 +5,6 @@
 //! Identities, structure, focus, and geometry are required. `Option` fields accept an
 //! absent or null value; Sway reports view properties only for views, for example.
 
-use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::FileTypeExt;
@@ -33,23 +32,9 @@ pub struct Swaymsg {
 }
 
 impl Swaymsg {
-    /// Uses `SWAYSOCK` only, which the scenario runner receives from the headless session's
-    /// environment. Never fall back to `I3SOCK` or socket discovery, which could reach a
-    /// compositor other than the private session.
-    pub fn from_environment() -> Result<Self, String> {
-        let socket = env::var_os("SWAYSOCK")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .filter(|path| {
-                fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_socket())
-            })
-            .ok_or("SWAYSOCK must identify an existing Unix socket")?;
-        let executable = process::find_executable("swaymsg")?;
-        Ok(Self { executable, socket })
-    }
-
-    /// A socket the caller created privately, such as a headless compositor's. Never
-    /// consults `SWAYSOCK`, so a missing private socket cannot fall back to another session.
+    /// The headless session's private socket, named by the caller: the launcher creates it,
+    /// and the runner checks that its `SWAYSOCK` names one. Never consults `I3SOCK` or
+    /// socket discovery, so a missing private socket cannot fall back to another session.
     pub fn at_socket(socket: PathBuf) -> Result<Self, String> {
         if !fs::metadata(&socket).is_ok_and(|metadata| metadata.file_type().is_socket()) {
             return Err(format!("no Sway IPC socket at {}", socket.display()));

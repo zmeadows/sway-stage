@@ -242,3 +242,23 @@ fn session_clients_include_every_tiled_and_floating_view() {
         .collect();
     assert_eq!(session_client_pids(&parse_tree(tree)), expected);
 }
+
+#[test]
+fn the_runner_accepts_only_a_session_directory_ipc_socket() {
+    assert!(is_session_ipc_socket(&session_directory().ipc_socket()));
+
+    for refused in [
+        // A desktop session's own socket.
+        "/run/user/1000/sway-ipc.1000.4242.sock",
+        // The right file and runtime names, but not inside a session directory.
+        "/tmp/elsewhere/runtime/sway-ipc.sock",
+        "/runtime/sway-ipc.sock",
+        "/tmp/sway-stage-headless-1-2/sway-ipc.sock",
+        "/tmp/sway-stage-headless-1-2/runtime/other.sock",
+        "/tmp/sway-stage-headless-1-2/runtime/../runtime/sway-ipc.sock",
+        "sway-stage-headless-1-2/runtime/sway-ipc.sock",
+        "",
+    ] {
+        assert!(!is_session_ipc_socket(Path::new(refused)), "{refused:?}");
+    }
+}

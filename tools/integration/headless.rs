@@ -39,6 +39,11 @@ pub const VIRTUAL_OUTPUT_RECT: Rect = Rect {
     height: 1440,
 };
 
+/// Every session directory's name starts with this; `is_session_ipc_socket` relies on it.
+const SESSION_DIRECTORY_PREFIX: &str = "sway-stage-headless-";
+const RUNTIME_DIRECTORY_NAME: &str = "runtime";
+const IPC_SOCKET_NAME: &str = "sway-ipc.sock";
+
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Clients normally exit as soon as their compositor connection closes.
@@ -70,7 +75,7 @@ impl SessionDirectory {
             .as_secs();
         let directory = Self {
             root: parent.join(format!(
-                "sway-stage-headless-{started_seconds}-{}",
+                "{SESSION_DIRECTORY_PREFIX}{started_seconds}-{}",
                 std::process::id()
             )),
         };
@@ -95,7 +100,7 @@ impl SessionDirectory {
 
     /// `XDG_RUNTIME_DIR`, holding the IPC and Wayland sockets.
     fn runtime(&self) -> PathBuf {
-        self.root.join("runtime")
+        self.root.join(RUNTIME_DIRECTORY_NAME)
     }
 
     /// `HOME` and every XDG base directory, so the real Foot configuration and sway-stage
@@ -110,7 +115,7 @@ impl SessionDirectory {
     }
 
     fn ipc_socket(&self) -> PathBuf {
-        self.runtime().join("sway-ipc.sock")
+        self.runtime().join(IPC_SOCKET_NAME)
     }
 
     fn configuration(&self) -> PathBuf {
@@ -446,6 +451,22 @@ pub fn verify_virtual_output(outputs: &[Output]) -> Result<(), String> {
         return Err(format!("{OUTPUT_NAME} has no workspace yet"));
     }
     Ok(())
+}
+
+/// Whether `socket` is shaped like a session directory's IPC socket path. The scenario
+/// runner requires this of `SWAYSOCK` before its first connection, so a runner started by
+/// hand with a desktop session's environment refuses without reaching that compositor.
+pub fn is_session_ipc_socket(socket: &Path) -> bool {
+    let runtime = socket.parent();
+    let session_directory_name = runtime
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str);
+
+    socket.is_absolute()
+        && socket.file_name() == Some(OsStr::new(IPC_SOCKET_NAME))
+        && runtime.and_then(Path::file_name) == Some(OsStr::new(RUNTIME_DIRECTORY_NAME))
+        && session_directory_name.is_some_and(|name| name.starts_with(SESSION_DIRECTORY_PREFIX))
 }
 
 /// Sway chooses its own `wayland-N` name, so discover it rather than assume one.

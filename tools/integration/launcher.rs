@@ -169,6 +169,11 @@ fn run_scenario_runner(
     // Deliberately not `process::spawn`, which isolates a child's process group: the runner
     // stays in this group, so Ctrl-C reaches it directly and it reports the interrupted
     // stage itself. sway-stage and its applications remain isolated in their own groups.
+    // That also bypasses `spawn`'s interruption check, so repeat it: a runner started after
+    // Ctrl-C never received that signal and would keep running scenarios.
+    if process::interruption_requested() {
+        return Err("interrupted before the scenario runner started".into());
+    }
     let mut runner = command
         .spawn()
         .map_err(|error| format!("start scenario runner: {error}"))?;
