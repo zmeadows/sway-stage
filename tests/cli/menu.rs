@@ -33,7 +33,7 @@ done
 test "$keep_open" = 1 || exit 95
 printf '%s\n' "$output" >> "$MENU_DIRECTORY/outputs"
 case "$prompt" in
-  '--prompt-only=Capture layout as: '|'--prompt-only=Capture profile as: ')
+  '--prompt-only=Layout name: '|'--prompt-only=Profile name: ')
     test "$width" = 80 || exit 96
     test "$no_sort" = 0 || exit 96
     test -f "$MENU_DIRECTORY/snapshot-ready" || exit 91
@@ -58,7 +58,7 @@ case "$prompt" in
     fi
     exit 2
     ;;
-  '--prompt=Launch in: ')
+  '--prompt=Directory: ')
     test "$width" = 0 || exit 96
     test "$return_index" = 1 || exit 96
     test "$no_sort" = 1 || exit 96
@@ -70,7 +70,7 @@ case "$prompt" in
     printf '%b' "$DIRECTORY_OUTPUT"
     exit "$DIRECTORY_STATUS"
     ;;
-  '--prompt=Sway Stage: ')
+  '--prompt=> ')
     test "$return_index" = 1 || exit 96
     test "$width" = 0 || exit 96
     test "$no_sort" = 1 || exit 96
@@ -517,7 +517,7 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "Capture current workspace…\n"
+            "Capture workspace layout…\n"
         );
         let path = config_home.join("sway-stage/layouts/development.yaml");
         let draft = fs::read_to_string(&path).unwrap();
@@ -530,8 +530,8 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
         assert_eq!(
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=Sway Stage: \n",
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=> \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Layout name: \n",
             )
         );
         if infer_commands {
@@ -722,12 +722,7 @@ fn repeated_name_retries_save_the_original_snapshot() {
         "original"
     );
     let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
-    assert_eq!(
-        arguments
-            .matches("--prompt-only=Capture layout as: ")
-            .count(),
-        4
-    );
+    assert_eq!(arguments.matches("--prompt-only=Layout name: ").count(), 4);
     assert_eq!(arguments.matches("--width=80\n").count(), 4);
     assert_eq!(arguments.matches("--placeholder\n").count(), 3);
     assert!(arguments.contains("--placeholder\nMy Workspace is invalid — use [A-Za-z0-9][A-Za-z0-9_-]* without spaces or an extension\n"));
@@ -763,7 +758,7 @@ fn explicit_relative_layouts_dir_receives_captures_regardless_of_config_bases() 
 
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "Capture current workspace…\n"
+            "Capture workspace layout…\n"
         );
         let path = layouts.join("development.yaml");
         let saved = fs::read_to_string(&path).unwrap();
@@ -1225,7 +1220,7 @@ fn directory_prompt_lists_only_safe_immediate_directories_in_lexical_order() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("directories")).unwrap(),
-            format!("Base directory ({configured_path})\nAlpha\ngon\nlink\ntwo words\nzebra\n")
+            format!("Default ({configured_path})\nAlpha\ngon\nlink\ntwo words\nzebra\n")
         );
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),
@@ -1243,7 +1238,7 @@ fn directory_cancellation_and_errors_preserve_the_launch_log() {
         (" gon\n", "0", "not offered"),
         ("-1\n", "0", "not offered"),
         ("2\n", "0", "not offered"),
-        ("Base directory (~/projects)\n", "0", "not offered"),
+        ("Default (~/projects)\n", "0", "not offered"),
         ("gon", "0", "newline-terminated"),
         ("gon\nextra\n", "0", "single line"),
         ("gon\r\n", "0", "control characters"),
@@ -1312,7 +1307,7 @@ fn root_without_eligible_children_still_opens_the_picker_and_can_cancel() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.path.join("directories")).unwrap(),
-        "Base directory (~/projects)\n"
+        "Default (~/projects)\n"
     );
     assert_log_preserved(&fixture);
     assert!(!fixture.path.join("notification").exists());
@@ -1347,7 +1342,7 @@ fn successful_menu_load_is_silent_and_preserves_window_directory_precedence() {
         ("0", None, true),
         ("1", Some("gon"), false),
         ("1", Some("gon"), true),
-        ("1", Some("Base directory (~projects)"), false),
+        ("1", Some("Default (~projects)"), false),
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -1518,15 +1513,15 @@ fn capture_action_skips_layout_discovery() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "Capture current workspace…\n"
+            "Capture workspace layout…\n"
         );
         assert!(fixture.path.join("name-opened").exists());
         assert_eq!(fixture.path.join("saved.yaml").exists(), status == "0");
         assert_eq!(
             fs::read_to_string(fixture.path.join("arguments")).unwrap(),
             concat!(
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=Sway Stage: \n",
-                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Capture layout as: \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=DP-1\n--prompt=> \n",
+                "--dmenu\n--no-exit-on-keyboard-focus-loss\n--width=80\n--output=DP-1\n--prompt-only=Layout name: \n",
             )
         );
     }
@@ -1625,7 +1620,7 @@ fn unified_actions_follow_workspace_eligibility_and_name_order() {
                 tree = empty_tree();
                 "Layout: shared\nLayout: zebra\nProfile: shared\nProfile: zebra\n"
             }
-            "capturable" => "Capture current workspace…\nProfile: shared\nProfile: zebra\n",
+            "capturable" => "Capture workspace layout…\nProfile: shared\nProfile: zebra\n",
             "unsupported" => {
                 tree["nodes"][0]["nodes"][0]["nodes"][0]["fullscreen_mode"] = json!(1);
                 "Profile: shared\nProfile: zebra\n"
@@ -1824,7 +1819,7 @@ fn unusable_profile_directories_do_not_suppress_layouts_or_capture() {
             assert_eq!(
                 fs::read_to_string(fixture.path.join("options")).unwrap(),
                 if populated {
-                    "Capture current workspace…\n"
+                    "Capture workspace layout…\n"
                 } else {
                     "Layout: shared\n"
                 }
@@ -1925,7 +1920,7 @@ fn capture_selection_with_profiles_preserves_inference_flag_and_original_snapsho
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "Capture current workspace…\nProfile: work\n"
+            "Capture workspace layout…\nProfile: work\n"
         );
         let saved = fs::read_to_string(fixture.path.join("saved.yaml")).unwrap();
         assert_eq!(
@@ -1989,9 +1984,9 @@ fn profile_capture_eligibility_keeps_flat_order_and_independent_loading_choices(
         assert_eq!(
             options,
             if focused_empty {
-                "Capture all populated workspaces…\nLayout: shared\nProfile: work\n"
+                "Capture session profile…\nLayout: shared\nProfile: work\n"
             } else {
-                "Capture current workspace…\nCapture all populated workspaces…\nProfile: work\n"
+                "Capture workspace layout…\nCapture session profile…\nProfile: work\n"
             }
         );
         assert!(!fixture.path.join("notification").exists());
@@ -2066,12 +2061,7 @@ fn profile_capture_retries_only_invalid_names_and_preflight_conflicts() {
         assert!(fixture.path.join("profiles/saved.yaml").exists());
         assert!(!fixture.path.join("layouts/taken-001.yaml").exists());
         let arguments = fs::read_to_string(fixture.path.join("arguments")).unwrap();
-        assert_eq!(
-            arguments
-                .matches("--prompt-only=Capture profile as: ")
-                .count(),
-            4
-        );
+        assert_eq!(arguments.matches("--prompt-only=Profile name: ").count(), 4);
         assert!(arguments.contains("at most 246"));
         assert!(arguments.contains("already exists — enter another name"));
     }
@@ -2131,7 +2121,7 @@ fn unsupported_profile_capture_keeps_unrelated_actions_and_never_skips_workspace
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             fs::read_to_string(fixture.path.join("options")).unwrap(),
-            "Capture current workspace…\n[invalid] Profile: work\n"
+            "Capture workspace layout…\n[invalid] Profile: work\n"
         );
         assert!(!fixture.path.join("name-opened").exists());
         assert!(!fixture.path.join("notification").exists());

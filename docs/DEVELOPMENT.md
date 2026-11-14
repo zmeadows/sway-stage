@@ -514,7 +514,7 @@ covered by the existing round-trip scenarios and can also be checked manually if
 For optional unified-menu acceptance, use one `sway-stage menu` keybinding with temporary
 layout and profile directories and trusted applications on disposable workspaces:
 
-1. On an empty workspace, confirm `Sway Stage: ` lists `Layout: NAME` then `Profile: NAME`,
+1. On an empty workspace, confirm `> ` lists `Layout: NAME` then `Profile: NAME`,
    each in lexical order. Include equal names and an invalid configuration; verify labels
    stay distinct and invalid selections give the appropriate check command.
 2. On a tiled capturable workspace, confirm capture appears first, followed by profiles.
@@ -540,7 +540,7 @@ offline fake-Fuzzel and IPC transcripts provide the primary automated menu cover
 
 For project-directory selection, use a trusted test layout with `cwd: ~/Projects` and
 `cwd_select: true`, with at least two non-hidden child directories. On an empty disposable
-workspace, run `menu`, select the layout, and confirm the sorted `Launch in: ` basenames.
+workspace, run `menu`, select the layout, and confirm the sorted `Directory: ` basenames.
 Choose a project and inspect the terminal's `pwd`; repeat with a window-level `cwd` override.
 Check Escape at each prompt preserves the previous launch log. In separate runs, remove a
 listed directory while its prompt is open, type an unoffered name, and switch workspaces

@@ -604,7 +604,7 @@ through the menu. Fill all remaining null placeholders and run `check` before lo
 ## Fuzzel menu
 
 `menu` requires Fuzzel 1.11+ on `PATH`. One read-only workspace snapshot is saved
-**before the first prompt**. A single flat selector, `Sway Stage: `, offers:
+**before the first prompt**. A single flat selector, `> `, offers:
 
 | Initial workspace state | Actions |
 | --- | --- |
@@ -613,8 +613,8 @@ through the menu. Fill all remaining null placeholders and run `check` before lo
 | Populated and noncapturable | Profiles |
 | Snapshot unavailable or inconsistent | Profiles |
 
-Capture appears first as `Capture current workspace…`, followed by
-`Capture all populated workspaces…` when eligible. Layouts follow as `Layout: NAME`,
+Capture appears first as `Capture workspace layout…`, followed by
+`Capture session profile…` when eligible. Layouts follow as `Layout: NAME`,
 then profiles as `Profile: NAME`, each category in lexical name order. Equal layout and
 profile names remain distinct. Only offered row indices are accepted; arbitrary typed
 selection text is an error. There are no separate menu modes or navigation levels.
@@ -656,7 +656,7 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   changes while the menu is open need not be detected; construction then uses the normal
   continuous focus/output safeguards.
   With `cwd_select: true`, validation is followed by a second Fuzzel prompt,
-  `Launch in: `, before loading. The first option, `Base directory (PATH)`, uses the
+  `Directory: `, before loading. The first option, `Default (PATH)`, uses the
   configured top-level `cwd`, preserving its configured spelling (such as `~/projects`).
   Immediate child directories follow, using filesystem directory reads without recursive scanning.
   Names beginning with `.`, files, non-directory entries, non-UTF-8 names, and names
@@ -687,7 +687,7 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   stops the whole profile, preserves earlier and partial layouts, and reports progress with
   at most one fatal notification.
 - **Capture:** render only the pre-menu snapshot, then ask for a draft name with
-  `Capture layout as: ` in prompt-only mode.
+  `Layout name: ` in prompt-only mode.
   Invalid names and existing-name conflicts reopen the same prompt with an error placeholder
   identifying the rejected input (abbreviated when long). Type another name or Escape to cancel;
   input is never prepopulated. Retries reuse the original rendered draft without further Sway
@@ -698,7 +698,7 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   may have changed since the snapshot.
 
 - **Profile capture:** render all selected workspaces from the same pre-menu snapshot,
-  then ask `Capture profile as: ` in prompt-only mode. No further Sway query or desktop
+  then ask `Profile name: ` in prompt-only mode. No further Sway query or desktop
   mutation occurs. Reuse rendered drafts and inferred commands across name retries.
   Names use the profile-capture grammar and maximum of 246 ASCII characters, without
   an extension. Invalid names and known pre-publication conflicts at the profile or any

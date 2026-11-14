@@ -165,8 +165,8 @@ pub fn select_action(
             input.push_str("[invalid] ");
         }
         match action {
-            MenuAction::Capture => input.push_str("Capture current workspace…"),
-            MenuAction::CaptureProfile => input.push_str("Capture all populated workspaces…"),
+            MenuAction::Capture => input.push_str("Capture workspace layout…"),
+            MenuAction::CaptureProfile => input.push_str("Capture session profile…"),
             MenuAction::Layout(name) => input.push_str(&format!("Layout: {name}")),
             MenuAction::Profile(name) => input.push_str(&format!("Profile: {name}")),
         }
@@ -174,14 +174,7 @@ pub fn select_action(
     }
 
     let output_name = snapshot.ok().and_then(capture::Snapshot::output_name);
-    let Some(selection) = fuzzel(
-        "--prompt=Sway Stage: ",
-        Some(&input),
-        output_name,
-        None,
-        true,
-    )?
-    else {
+    let Some(selection) = fuzzel("--prompt=> ", Some(&input), output_name, None, true)? else {
         return Ok(None);
     };
     let selected_index = selection.parse::<usize>().ok();
@@ -237,7 +230,7 @@ pub fn select_directory(
     output_name: Option<&str>,
 ) -> Result<Option<DirectorySelection>, Error> {
     let mut choices = vec![(
-        format!("Base directory ({})", display_path.display()),
+        format!("Default ({})", display_path.display()),
         DirectorySelection::Base,
     )];
     for (name, path) in directory_choices(root)? {
@@ -258,7 +251,7 @@ pub fn select_directory(
     }
 
     let Some(selection) = fuzzel(
-        "--prompt=Launch in: ",
+        "--prompt=Directory: ",
         Some(&input),
         output_name,
         None,
@@ -338,7 +331,7 @@ pub fn capture_draft(
     let mut placeholder = None;
     loop {
         let Some(name) = fuzzel(
-            "--prompt-only=Capture layout as: ",
+            "--prompt-only=Layout name: ",
             None,
             snapshot.output_name(),
             placeholder.as_deref(),
@@ -381,7 +374,7 @@ pub fn capture_profile(
     let mut placeholder = None;
     loop {
         let Some(name) = fuzzel(
-            "--prompt-only=Capture profile as: ",
+            "--prompt-only=Profile name: ",
             None,
             snapshot.output_name(),
             placeholder.as_deref(),

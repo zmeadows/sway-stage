@@ -89,7 +89,7 @@ profiles; populated workspaces offer capture when supported, plus profiles. Entr
 `Layout:` and `Profile:` labels; invalid configurations are marked `[invalid]` and cannot
 load. Use `check NAME` or `profile check NAME` for details. `menu --no-infer-commands`
 disables command inference for both workspace and profile capture.
-`Capture all populated workspaces…` prompts for a new profile name and saves its layout
+`Capture session profile…` prompts for a new profile name and saves its layout
 drafts, including when the focused workspace is empty.
 
 Use `--layouts-dir PATH` to read layouts and save captures elsewhere.
