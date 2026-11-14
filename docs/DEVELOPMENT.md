@@ -286,9 +286,19 @@ can explain conservative failures.
 After harness safety changes, interrupt separate runs during a load, a capture, and a
 cleanup with Ctrl-C. Expect a `FAIL` line naming the interrupted stage, no subsequent
 scenarios or closes, a killed compositor, and a preserved session directory. An already
-dispatched close may complete. The harness's guards against unexpected focus changes,
-foreign-window changes, and owned-window state changes are covered by its offline tests;
-nothing else connects to the private compositor during a run.
+dispatched close may complete. Repeat once by killing the launcher from another terminal
+with `kill -KILL "$(pgrep -o -x integration)"` (the oldest `integration` process); the
+kernel then kills the compositor, and the runner fails on its own. A few seconds after each
+run, this must print nothing, showing that no compositor, Foot window, or other process
+still carries the session's environment:
+
+```sh
+grep -l sway-stage-headless /proc/[0-9]*/environ 2>/dev/null
+```
+
+The harness's guards against unexpected focus changes, foreign-window changes, and
+owned-window state changes are covered by its offline tests; nothing else connects to the
+private compositor during a run.
 
 ## Manual application acceptance
 
@@ -428,10 +438,12 @@ cover additional conditions and interference in your own session.
 
 The user ran the earlier live-desktop harness, including its since-removed optional
 application scenarios and the original three numeric profile scenarios, in their own Sway
-session, and the temporary two-Foot headless smoke test. The 25-scenario headless suite has
-not yet been run. The additional manual variants above remain unverified;
-cross-monitor and interference runs provide optional further coverage. A successful run does
-not establish broader compositor compatibility or transactional isolation.
+session, and the temporary two-Foot headless smoke test. On 2026-11-14 the user ran the
+25-scenario headless suite with `tools/integration/run.sh`, and all 25 scenarios passed.
+Its interruption and launcher-termination checks remain unverified, as do the additional
+manual variants above; cross-monitor and interference runs provide optional further
+coverage. A successful run does not establish broader compositor compatibility or
+transactional isolation.
 
 ## Maintainer notes
 

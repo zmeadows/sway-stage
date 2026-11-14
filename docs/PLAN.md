@@ -18,11 +18,9 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   installation on the chosen baseline, including understandable failures for missing
   optional tools. Record the Sway version actually verified without implying broader
   compatibility.
-- **Headless integration suite runtime validation.** Run all 25 scenarios with
-  `tools/integration/run.sh` in its private headless Sway, including the two-target
-  successful and named profile scenarios with their captures, and harden whatever the first
-  runs expose. Offline coverage is implemented; the headless suite remains user-only and
-  unverified.
+- **Headless harness interruption checks.** All 25 scenarios pass in the private headless
+  Sway. Interrupt runs with Ctrl-C and kill the launcher as the developer guide describes,
+  confirming that no compositor or Foot process outlives a run.
 - **Final acceptance.** Complete the optional unified-menu acceptance procedure, keybinding
   launch-context and loader interference checks (including in-workspace focus restoration),
   and additional manual profile variants in the developer guide. Real multi-monitor
