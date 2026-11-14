@@ -522,6 +522,13 @@ fn preflight_refuses_occupied_later_targets_and_insufficient_observations() {
         ) {
             let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
             assert!(notification.contains("All profile targets must be empty"));
+            assert!(
+                notification.contains(
+                    "Profile preflight stopped at workspace 1 (0 of 3 layouts completed)."
+                ),
+                "{notification}"
+            );
+            assert!(!notification.contains("Applications started"));
         }
         assert!(!fixture.path.join("launches").exists());
     }
@@ -577,6 +584,10 @@ fn profile_window_placement_notifications_distinguish_other_workspaces_and_scrat
             "A window for this layout opened on another workspace. Check Sway's window assignment rules."
         };
         assert!(notification.contains(expected), "{notification}");
+        assert!(
+            notification.contains("Profile stopped at workspace 3 (0 of 3 layouts completed).")
+        );
+        assert!(notification.contains("Applications started; windows may remain"));
         assert!(!notification.contains("profile-test"));
         assert!(!notification.contains(fixture.path.to_str().unwrap()));
     }
@@ -627,6 +638,17 @@ fn selection_rejection_malformed_replies_and_timeout_never_retry() {
                 false,
             );
             assert_failure(&fixture, &output, expected, 0);
+            let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+            assert!(
+                notification.contains(if named {
+                    "Profile stopped at entry 1 (0 of 3 layouts completed)."
+                } else {
+                    "Profile stopped at workspace 3 (0 of 3 layouts completed)."
+                }),
+                "{notification}"
+            );
+            assert!(!notification.contains("Applications started"));
+            assert!(!notification.contains("music player"));
             assert!(String::from_utf8_lossy(&output.stderr).contains("workspace selection"));
             assert!(!fixture.path.join("launches").exists());
         }
@@ -770,6 +792,16 @@ fn failure_on_second_layout_retains_first_and_partial_windows_without_selecting_
         assert_failure(&fixture, &output, "layout construction", 1);
         let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
         assert!(notification.contains("Multiple new windows match the expected application."));
+        assert!(
+            notification.contains(if named {
+                "Profile stopped at entry 2 (1 of 3 layouts completed)."
+            } else {
+                "Profile stopped at workspace 1 (1 of 3 layouts completed)."
+            }),
+            "{notification}"
+        );
+        assert!(notification.contains("windows may remain on earlier or current workspaces"));
+        assert!(!notification.contains("music player"));
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
             error.contains(if named {
@@ -854,7 +886,18 @@ fn coordinator_history_across_a_completed_load_prevents_the_next_switch() {
             steps
         };
         let output = run(&fixture, steps, false);
-        assert_failure(&fixture, &output, "unexpected workspace change", 1);
+        assert_failure(&fixture, &output, "unexpected workspace change", 0);
+        let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+        assert!(
+            notification.contains(if named {
+                "Profile stopped at entry 1 (0 of 3 layouts completed)."
+            } else {
+                "Profile stopped at workspace 3 (0 of 3 layouts completed)."
+            }),
+            "{notification}"
+        );
+        assert!(notification.contains("Applications started; windows may remain"));
+        assert!(!notification.contains("music"));
         assert_eq!(
             fs::read_to_string(fixture.path.join("launches")).unwrap(),
             "first\n"

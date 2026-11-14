@@ -749,6 +749,13 @@ including operations selected through Fuzzel; failures of the menu itself use `M
 Recognized failures explain window placement (including scratchpad placement), matching,
 tiled-state requirements, focus/output changes, profile preflight refusals, or unsupported
 capture arrangements without copying raw diagnostic text into notifications.
+After a successful application spawn, failure notifications warn that windows may remain
+and advise inspection before retrying; a spawn does not prove a window appeared. Profile
+failures after validation include the completed layout count and, when known, the current
+numeric workspace or the entry position for a named workspace. Completion counts advance
+only after the coordinator's final workspace history and focus verification. Preflight
+failures are labeled separately; failures before an entry is known do not name a workspace.
+Workspace names and detailed progress lists remain in stderr and the log.
 Pre-load menu failures identify unavailable layouts/profiles, invalid selections, capture, or Fuzzel problems,
 save failures, or working-directory selection problems without exposing paths or technical
 error chains. Successful loads do not notify; saved menu captures retain their save

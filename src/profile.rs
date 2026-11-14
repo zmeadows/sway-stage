@@ -200,6 +200,7 @@ pub fn read_named(
 /// All files have already been validated. Only this coordinator selects workspaces;
 /// each construction gets the ordinary loader's fresh, frozen observer.
 pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result<(), String> {
+    diagnostics.profile_started(prepared.workspaces.len());
     diagnostics.stage("workspace preflight");
     let socket_path = observation::sway_socket()?;
     let mut observer = Observer::subscribe(
@@ -216,16 +217,15 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
 
     // Examine every target before selecting even the first one. Missing workspaces
     // remain absent until their own entry is selected.
-    for entry in &prepared.workspaces {
-        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &[]);
+    for (entry_index, entry) in prepared.workspaces.iter().enumerate() {
+        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, entry_index + 1);
         empty_target(&initial, &entry.workspace)?;
         verify_output(&initial, &entry.workspace, entry.output.as_deref())?;
     }
 
     let mut previous_snapshot = initial;
-    let mut completed = Vec::new();
-    for entry in &prepared.workspaces {
-        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &completed);
+    for (entry_index, entry) in prepared.workspaces.iter().enumerate() {
+        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, entry_index + 1);
         diagnostics.stage("workspace selection");
         let selected = select_workspace(
             &mut observer,
@@ -246,8 +246,6 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         ));
         launch::load(&entry.config, Some(selected.id), diagnostics)
             .map_err(|error| format!("layout construction: {error}"))?;
-        completed.push((entry.workspace.clone(), selected.id));
-        diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, &completed);
 
         // The coordinator stayed subscribed during construction. Check that history,
         // including the gap before the loader subscribed, before another switch.
@@ -263,6 +261,8 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
                 "workspace completion: focused workspace identity or output changed".into(),
             );
         }
+
+        diagnostics.profile_workspace_completed(selected.id);
         previous_snapshot = finished;
     }
 

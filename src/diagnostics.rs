@@ -21,11 +21,68 @@ pub struct Diagnostics {
     log_path: Option<PathBuf>,
     started_at: Instant,
     current_stage: String,
-    profile_context: Option<String>,
+    profile_context: Option<ProfileProgress>,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
     application_spawned: bool,
     /// Set only when returning a window timeout, for its concise notification.
     timeout_process_status: Option<ExitStatus>,
+}
+
+// Owned by diagnostics for the entire profile attempt. Only the coordinator updates
+// the current entry and records completion, after its final history/focus verification.
+struct ProfileProgress {
+    total: usize,
+    current: Option<ProfileEntry>,
+    completed: Vec<(crate::profile::WorkspaceTarget, i64)>,
+}
+
+struct ProfileEntry {
+    target: crate::profile::WorkspaceTarget,
+    layout: String,
+    position: usize,
+}
+
+impl ProfileProgress {
+    fn detail(&self) -> String {
+        let completed_targets = self
+            .completed
+            .iter()
+            .map(|(target, id)| format!("({target}, {id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let current = match &self.current {
+            Some(entry) => format!("workspace {}, layout {:?}; ", entry.target, entry.layout),
+            None => String::new(),
+        };
+        format!(
+            "{current}completed {} workspaces [{completed_targets}]",
+            self.completed.len()
+        )
+    }
+
+    fn notification(&self, preflight: bool) -> String {
+        let Some(entry) = &self.current else {
+            return format!(
+                "Profile preflight stopped (0 of {} layouts completed).",
+                self.total
+            );
+        };
+        // Even validated names can contain sensitive information. Use their YAML position.
+        let location = match &entry.target {
+            crate::profile::WorkspaceTarget::Number(number) => format!("workspace {number}"),
+            crate::profile::WorkspaceTarget::Name(_) => format!("entry {}", entry.position),
+        };
+        let phase = if preflight {
+            "Profile preflight stopped at"
+        } else {
+            "Profile stopped at"
+        };
+        format!(
+            "{phase} {location} ({} of {} layouts completed).",
+            self.completed.len(),
+            self.total
+        )
+    }
 }
 
 impl Diagnostics {
@@ -69,22 +126,35 @@ impl Diagnostics {
         diagnostics
     }
 
+    pub fn profile_started(&mut self, total: usize) {
+        self.profile_context = Some(ProfileProgress {
+            total,
+            current: None,
+            completed: Vec::new(),
+        });
+    }
+
     pub fn profile_workspace(
         &mut self,
         target: &crate::profile::WorkspaceTarget,
         layout: &str,
-        completed: &[(crate::profile::WorkspaceTarget, i64)],
+        entry_position: usize,
     ) {
-        let completed_targets = completed
-            .iter()
-            .map(|(target, id)| format!("({target}, {id})"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let progress = self.profile_context.as_mut().expect("profile started");
+        progress.current = Some(ProfileEntry {
+            target: target.clone(),
+            layout: layout.to_owned(),
+            position: entry_position,
+        });
+        self.record("profile progress");
+    }
 
-        self.profile_context = Some(format!(
-            "workspace {target}, layout {layout:?}; completed {} workspaces [{completed_targets}]",
-            completed.len()
-        ));
+    pub fn profile_workspace_completed(&mut self, workspace_id: i64) {
+        let progress = self.profile_context.as_mut().expect("profile started");
+        let entry = progress.current.as_ref().expect("profile entry selected");
+        progress
+            .completed
+            .push((entry.target.clone(), workspace_id));
         self.record("profile progress");
     }
 
@@ -106,7 +176,7 @@ impl Diagnostics {
             self.current_stage.escape_debug(),
             self.profile_context
                 .as_ref()
-                .map(|context| format!("{}: ", context.escape_debug()))
+                .map(|context| format!("{}: ", context.detail().escape_debug()))
                 .unwrap_or_default(),
             message.escape_debug(),
         );
@@ -150,8 +220,9 @@ impl Diagnostics {
             message = format!(
                 "profile load: {}; {message}",
                 self.profile_context
-                    .as_deref()
-                    .unwrap_or("completed 0 workspaces []")
+                    .as_ref()
+                    .map(ProfileProgress::detail)
+                    .unwrap_or_else(|| "completed 0 workspaces []".into())
             );
         }
         // Advice follows launches across the whole session, including earlier profile entries.
@@ -186,6 +257,18 @@ impl Diagnostics {
             && let Some(context) = launch_exit_context(status)
         {
             notification.push_str(&format!(" {context}"));
+        }
+        if let Some(progress) = &self.profile_context {
+            notification.push('\n');
+            notification
+                .push_str(&progress.notification(self.current_stage == "workspace preflight"));
+        }
+        if self.application_spawned {
+            notification.push_str(if self.profile_context.is_some() {
+                "\nApplications started; windows may remain on earlier or current workspaces. Inspect them before retrying."
+            } else {
+                "\nApplications started; windows may remain. Inspect the workspace before retrying."
+            });
         }
         with_log_reference(notification, self.log_file.is_some())
     }
@@ -345,8 +428,8 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
     }
 
     let summary = recognized_failure_summary(cause).unwrap_or(match operation {
-        "load" => "Unable to finish loading the layout.",
-        "profile load" => "Unable to finish loading the profile.",
+        "load" => "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
+        "profile load" => "Unable to finish loading the profile. Inspect workspace state and diagnostics before retrying.",
         "capture" => "Unable to capture the workspace.",
         "profile capture" => "Unable to capture the profile.",
         _ => "Unable to complete the menu action.",
@@ -363,9 +446,9 @@ fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
     } else if cause.starts_with("placement failure: wrong workspace: ") {
         "A window for this layout opened on another workspace. Check Sway's window assignment rules."
     } else if cause.starts_with("matching window was in the scratchpad: ") {
-        "A window for this layout opened in the scratchpad instead of the target workspace."
+        "A window for this layout opened in the scratchpad instead of the target workspace. Check Sway's scratchpad rules."
     } else if cause.starts_with("placement failure: unknown workspace: ") {
-        "A matching window's workspace could not be determined. Loading stopped because its placement is uncertain."
+        "A matching window's workspace could not be determined. Loading stopped because its placement is uncertain. Inspect Sway's workspace state before retrying."
     } else if cause.starts_with("ambiguous new windows id=") {
         "Multiple new windows match the expected application. Use a more specific app ID/class or a command that opens one window."
     } else if cause.starts_with("matching window was floating/fullscreen: ")
@@ -617,6 +700,89 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn without_log(operation: &'static str) -> Diagnostics {
+        Diagnostics {
+            operation,
+            log_file: None,
+            log_path: None,
+            started_at: Instant::now(),
+            current_stage: "runtime".into(),
+            profile_context: None,
+            application_spawned: false,
+            timeout_process_status: None,
+        }
+    }
+
+    #[test]
+    fn partial_layout_advice_requires_a_successful_spawn_and_no_log() {
+        let mut diagnostics = without_log("load");
+        let failed_spawn = diagnostics.failure_notification("spawn application: private command");
+        assert!(failed_spawn.contains("Check its executable"));
+        assert!(!failed_spawn.contains("Applications started"));
+        assert!(!failed_spawn.contains("nothing changed"));
+
+        diagnostics.spawned(42);
+        let body = diagnostics.failure_notification("window timeout: private selector");
+        assert!(body.contains(
+            "Applications started; windows may remain. Inspect the workspace before retrying."
+        ));
+        assert!(!body.contains("last-run.log"));
+        assert!(!body.contains("private"));
+    }
+
+    #[test]
+    fn profile_progress_keeps_names_private_and_survives_loader_stages() {
+        use crate::profile::WorkspaceTarget;
+
+        let mut diagnostics = without_log("profile load");
+        diagnostics.stage("profile: validation");
+        let validation = diagnostics.failure_notification("private YAML");
+        assert!(!validation.contains("Profile stopped"));
+        assert!(!validation.contains("completed"));
+
+        diagnostics.profile_started(3);
+        diagnostics.stage("workspace preflight");
+        let initial = diagnostics.failure_notification("get tree: failed");
+        assert!(initial.contains("Profile preflight stopped (0 of 3 layouts completed)."));
+        diagnostics.profile_workspace(
+            &WorkspaceTarget::Name("<b>private</b>\n".into()),
+            "secret",
+            3,
+        );
+        let preflight = diagnostics.failure_notification("profile target occupied: private");
+        assert!(
+            preflight.contains("Profile preflight stopped at entry 3 (0 of 3 layouts completed).")
+        );
+        assert!(!preflight.contains("Applications started"));
+        assert!(!preflight.contains("private"));
+        assert!(!preflight.contains("secret"));
+
+        diagnostics.profile_workspace(&WorkspaceTarget::Number(4), "secret", 1);
+        diagnostics.stage("workspace selection");
+        let selection = diagnostics.failure_notification("workspace command rejected: private");
+        assert!(selection.contains("Profile stopped at workspace 4 (0 of 3 layouts completed)."));
+        assert!(!selection.contains("Applications started"));
+        assert!(!selection.contains("nothing changed"));
+
+        diagnostics.spawned(42);
+        diagnostics.stage("workspace completion verification");
+        let unverified = diagnostics.failure_notification("unexpected workspace change Focus");
+        assert!(unverified.contains("0 of 3 layouts completed"));
+        diagnostics.profile_workspace_completed(104);
+        diagnostics.profile_workspace(&WorkspaceTarget::Name("sensitive name".into()), "secret", 2);
+        diagnostics.stage("launch leaf=private workspace=105");
+        let partial = diagnostics.failure_notification("spawn application: private");
+        assert!(partial.contains("Profile stopped at entry 2 (1 of 3 layouts completed)."));
+        assert!(partial.contains(
+            "windows may remain on earlier or current workspaces. Inspect them before retrying."
+        ));
+        assert!(!partial.contains("sensitive"));
+        assert!(!partial.contains("private"));
+        assert!(!partial.contains("secret"));
+        assert!(!partial.contains("last-run.log"));
+        assert!(partial.len() < 400, "{partial}");
+    }
+
     #[test]
     fn timeout_diagnostics_and_notifications_use_only_known_exit_status() {
         for (status, expected_detail, expected_notification) in [
@@ -675,7 +841,7 @@ mod tests {
                     body.contains("See last-run.log for details."),
                     log_available
                 );
-                assert!(body.len() < 240, "{body}");
+                assert!(body.len() < 360, "{body}");
                 assert!(!body.contains("leaf="));
             }
         }
@@ -714,7 +880,7 @@ mod tests {
             ),
             (
                 "unexpected failure: window timeout: untrusted text",
-                "Unable to finish loading the layout.",
+                "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
             ),
         ] {
             assert_eq!(failure_body("load", error, "wait", false), expected);
@@ -882,10 +1048,9 @@ mod tests {
         assert!(terminal.contains(error));
         assert!(terminal.contains("inspect windows before retrying"));
         assert!(diagnostics.log_file.is_none());
-        assert!(
-            !failure_body("load", error, "wait", diagnostics.log_file.is_some())
-                .contains("last-run.log")
-        );
+        let notification = diagnostics.failure_notification(error);
+        assert!(!notification.contains("last-run.log"));
+        assert!(notification.contains("Applications started; windows may remain"));
     }
 
     #[test]
