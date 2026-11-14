@@ -126,6 +126,12 @@ impl SessionDirectory {
         self.root.join("sway.log")
     }
 
+    /// The last tree observed before shutdown; after a failure, the only remaining record
+    /// of the invisible compositor's windows.
+    fn final_tree(&self) -> PathBuf {
+        self.root.join("final-tree.json")
+    }
+
     /// The IPC socket path is longer than any `wayland-N` path Sway chooses beside it.
     fn require_socket_paths_fit(&self) -> Result<(), String> {
         let socket_path_bytes = self.ipc_socket().as_os_str().len();
@@ -144,6 +150,7 @@ pub struct HeadlessSession {
     /// Our direct child. `Drop` stops it if `stop` was never reached.
     compositor: Child,
     compositor_log: PathBuf,
+    final_tree: PathBuf,
     swaymsg_executable: PathBuf,
     ipc_socket: PathBuf,
     sway: Swaymsg,
@@ -196,6 +203,7 @@ impl HeadlessSession {
         Ok(Self {
             compositor,
             compositor_log: directory.compositor_log(),
+            final_tree: directory.final_tree(),
             swaymsg_executable,
             ipc_socket: directory.ipc_socket(),
             sway,
@@ -229,13 +237,18 @@ impl HeadlessSession {
     pub fn stop(mut self) -> Result<(), String> {
         let mut problems = Vec::new();
 
-        // Record the clients first: once the compositor is gone, nothing can name them.
-        // After an interrupt no new query may start, so they go unverified.
+        // Record the clients first: once the compositor is gone, nothing can name them. The
+        // same reply is kept as the final tree. After an interrupt no new query may start,
+        // so neither is recorded and the clients go unverified.
         let client_pids = if process::interruption_requested() {
             BTreeSet::new()
         } else {
-            match self.sway.get_tree() {
-                Ok(tree) => session_client_pids(&tree),
+            let recorded = self
+                .sway
+                .get_tree_json()
+                .and_then(|tree_json| record_final_tree(&tree_json, &self.final_tree));
+            match recorded {
+                Ok(client_pids) => client_pids,
                 Err(error) => {
                     problems.push(format!("record session clients: {error}"));
                     BTreeSet::new()
@@ -524,6 +537,23 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitStat
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Saves the raw `get_tree` reply, then returns the session clients it names. Saving is
+/// best-effort: a file that cannot be written is only reported, so it never fails a run,
+/// hides the failure being diagnosed, or stops client verification and shutdown.
+fn record_final_tree(tree_json: &str, final_tree_path: &Path) -> Result<BTreeSet<i32>, String> {
+    let saved = create_private_file(final_tree_path).and_then(|mut file| {
+        file.write_all(tree_json.as_bytes())
+            .map_err(|error| format!("write {}: {error}", final_tree_path.display()))
+    });
+    if let Err(error) = saved {
+        eprintln!("      final tree not saved: {error}");
+    }
+
+    let tree: TreeNode = serde_json::from_str(tree_json)
+        .map_err(|error| format!("Sway get_tree: invalid reply: {error}"))?;
+    Ok(session_client_pids(&tree))
 }
 
 /// Every client process Sway reports for a view, tiled or floating.

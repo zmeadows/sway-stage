@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
 
@@ -261,4 +262,47 @@ fn the_runner_accepts_only_a_session_directory_ipc_socket() {
     ] {
         assert!(!is_session_ipc_socket(Path::new(refused)), "{refused:?}");
     }
+}
+
+#[test]
+fn the_final_tree_is_saved_best_effort_and_names_the_session_clients() {
+    let directory =
+        env::temp_dir().join(format!("sway-stage-final-tree-test-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let final_tree_path = directory.join("final-tree.json");
+    let tree_json = desktop(
+        "splith",
+        vec![wayland_window(20, "owned", rect(0, 0, 960, 1080))],
+        20,
+    )
+    .to_string();
+    let expected: BTreeSet<i32> = [PREEXISTING_WINDOW_ID, 20]
+        .into_iter()
+        .map(|container_id| i32::try_from(UNUSED_PID_BASE + container_id).unwrap())
+        .collect();
+
+    assert_eq!(
+        record_final_tree(&tree_json, &final_tree_path).unwrap(),
+        expected
+    );
+    assert_eq!(fs::read_to_string(&final_tree_path).unwrap(), tree_json);
+    let final_tree_mode = fs::metadata(&final_tree_path).unwrap().permissions().mode();
+    assert_eq!(final_tree_mode & 0o777, 0o600);
+
+    // The file now exists, so this save fails; the clients are still recorded.
+    assert_eq!(
+        record_final_tree(&tree_json, &final_tree_path).unwrap(),
+        expected
+    );
+
+    // An unparsable reply is still kept for diagnosis, but cannot name the clients.
+    let invalid_tree_path = directory.join("invalid-tree.json");
+    let error = record_final_tree("not a tree", &invalid_tree_path).unwrap_err();
+    assert!(error.contains("get_tree"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&invalid_tree_path).unwrap(),
+        "not a tree"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
 }

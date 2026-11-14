@@ -47,6 +47,11 @@ impl Swaymsg {
         self.query("get_tree", None)
     }
 
+    /// The unparsed reply, for a caller that keeps it as a diagnostic.
+    pub fn get_tree_json(&self) -> Result<String, String> {
+        self.raw_query("get_tree", None)
+    }
+
     /// Pin sway-stage children to the socket used for our independent observations.
     pub fn select_socket(&self, command: &mut Command) {
         command.env("SWAYSOCK", &self.socket);
@@ -141,16 +146,19 @@ impl Swaymsg {
         message_type: &str,
         payload: Option<&str>,
     ) -> Result<T, String> {
+        let output = self.raw_query(message_type, payload)?;
+        serde_json::from_str(&output)
+            .map_err(|error| format!("Sway {message_type}: invalid reply: {error}"))
+    }
+
+    fn raw_query(&self, message_type: &str, payload: Option<&str>) -> Result<String, String> {
         let mut command = self.invocation();
         command.args(["-t", message_type]);
         if let Some(payload) = payload {
             command.arg(payload);
         }
 
-        let operation = format!("Sway {message_type}");
-        let output = process::run(command, &operation, IPC_TIMEOUT)?;
-        serde_json::from_str(&output)
-            .map_err(|error| format!("{operation}: invalid reply: {error}"))
+        process::run(command, &format!("Sway {message_type}"), IPC_TIMEOUT)
     }
 }
 

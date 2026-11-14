@@ -86,6 +86,7 @@ clients must exit with it; they are observed, never signalled.
 The first failure stops the run. It prints `FAIL  STAGE: reason`, runs no further
 scenarios, closes nothing, and leaves remaining windows to the compositor's shutdown. The
 session directory is then kept and its path printed. Inspect `sway.log`;
+`final-tree.json`, the raw tree recorded just before shutdown (absent after Ctrl-C);
 `tmp/sway-stage-integration-*/` for the generated layouts, profiles, and captures; and
 `home/.local/state/sway-stage/last-run.log` for the last sway-stage load. Ctrl-C reaches
 both the launcher and the runner. The runner records it and fails at its next check, then

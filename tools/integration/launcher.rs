@@ -101,8 +101,9 @@ pub fn run(arguments: &[OsString]) -> ExitCode {
     if let Err(error) = session_result {
         eprintln!("FAIL  {error}");
         eprintln!(
-            "Diagnostics preserved in {}: sway.log, tmp/sway-stage-integration-*/ (scenario \
-             YAML), and home/.local/state/sway-stage/last-run.log",
+            "Diagnostics preserved in {}: sway.log, final-tree.json, \
+             tmp/sway-stage-integration-*/ (scenario YAML), and \
+             home/.local/state/sway-stage/last-run.log",
             directory.path().display()
         );
         return ExitCode::FAILURE;
