@@ -563,6 +563,8 @@ fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
         || cause.starts_with("focused workspace id=")
     {
         "The target workspace lost focus. Keep it focused while loading."
+    } else if cause.starts_with("focus did not stay on container id=") {
+        "Focus kept moving between windows on the target workspace. Avoid moving the pointer or focus there until loading finishes."
     } else if cause.starts_with("target workspace id=") {
         "The target workspace changed outputs. Keep it on its original output while loading."
     } else if cause.starts_with("target workspace was destroyed")
@@ -1200,6 +1202,7 @@ mod tests {
             ("unexpected floating/fullscreen/scratchpad window id=20", "An unexpected window appeared"),
             ("preexisting window id=20 entered target workspace", "A preexisting window entered"),
             ("snapshot: focused workspace id=11 differs from pre-menu workspace id=10", "target workspace lost focus"),
+            ("focus did not stay on container id=21 after 3 restorations within the target workspace", "Focus kept moving between windows"),
             ("target workspace id=10 moved to another output", "target workspace changed outputs"),
             ("snapshot: target workspace id=10 changed output from id=2 to id=3", "target workspace changed outputs"),
             ("target workspace was destroyed", "target workspace is no longer available"),

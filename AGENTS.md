@@ -111,6 +111,14 @@ Do not add dependencies for stylistic reasons.
   Stop the whole profile on failure, leaving earlier and partial layouts untouched. Use one
   diagnostics session and at most one fatal notification, retaining workspace progress even
   when the individual loader changes diagnostic stages.
+- Focus moving between containers inside the target workspace is not a workspace switch
+  and may be recovered. Restore it only by an explicit con_id focus of the container the
+  next step requires, immediately after an observation verified the complete owned target
+  hierarchy (during a launch wait, an unchanged one), and verify the result with a fresh
+  observation. Bound restorations per focus request or launch; never extend window
+  deadlines, restore focus across workspaces or outputs, or repair placement or selections.
+  A criteria-free command that depends on workspace focus must establish that focus earlier
+  in the same command request; still check every reply and the resulting hierarchy.
 - Snapshot existing window identities across the tree before launching, and before each
   subsequent launch. Only newly observed, unclaimed windows with the explicit expected
   app ID or Xwayland class can be accepted. Launch one application at a time and bound

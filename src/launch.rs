@@ -32,6 +32,10 @@ const SIZING_TOLERANCE: f64 = 0.05 + f64::EPSILON;
 const MAX_SIZING_PASSES: usize = 3;
 // Less than a tenth of a percentage point of improvement is not worth another pass.
 const MIN_SIZING_PROGRESS: f64 = 0.001;
+// Focus that moves between this run's containers inside the target workspace, as with
+// focus_follows_mouse, is restored at most this many times per focus request or launch.
+// Continued movement then stops the run instead of fighting the user's input.
+const MAX_FOCUS_RESTORATIONS: usize = 3;
 
 pub fn load(
     config: &Config,
@@ -316,32 +320,17 @@ impl<'a> Construction<'a> {
         }
     }
 
-    /// Runs one command between settled, fully verified snapshots and requires the result
-    /// to match `expected_after`. `require_focused` names the container a command's effect
-    /// depends on being focused, such as a criteria-free split. Commands with exact con_id
-    /// criteria pass `None`.
+    /// Runs one command request between settled, fully verified snapshots and requires the
+    /// result to match `expected_after`. A command whose effect depends on focus must
+    /// establish that focus earlier in the same request; see `with_workspace_focus`.
     fn guarded_command(
         &mut self,
         command: String,
-        require_focused: Option<i64>,
         expected_after: ExpectedHierarchy,
     ) -> Result<Snapshot, String> {
         self.diagnostics.stage(format!("command {command}"));
-        let before_command = self.settled_snapshot()?;
-        if let Some(required_focus_id) = require_focused
-            && !is_focused(&before_command.tree, required_focus_id)
-        {
-            return Err(format!(
-                "command {command:?} requires focused container id={required_focus_id}; observed focus is elsewhere, refusing to run it"
-            ));
-        }
-
-        let replies = run_command((self.connect)()?, command, Instant::now() + IPC_TIMEOUT)?;
-        self.diagnostics
-            .record(&format!("command replies: {replies:?}"));
-        if replies.is_empty() || replies.iter().any(Result::is_err) {
-            return Err(format!("Sway command failed: {replies:?}"));
-        }
+        self.settled_snapshot()?;
+        run_checked_command(self.connect, self.diagnostics, command)?;
 
         self.expected_hierarchy = expected_after;
         let after_command = self.settled_snapshot()?;
@@ -353,33 +342,39 @@ impl<'a> Construction<'a> {
         Ok(after_command)
     }
 
+    /// Focuses an owned container and returns a settled snapshot that shows it focused.
     fn focus_container(&mut self, path: &[usize]) -> Result<Snapshot, String> {
         let container_id = self.expected_hierarchy.subtree_mut(path).id();
-        let after_command = self.guarded_command(
+        let mut after_command = self.guarded_command(
             format!("[con_id={container_id}] focus"),
-            None,
             self.expected_hierarchy.clone(),
         )?;
 
-        if !is_focused(&after_command.tree, container_id) {
-            return Err(format!("explicit focus id={container_id} was not observed"));
+        let mut focus_restorations = 0;
+        while !is_focused(&after_command.tree, container_id) {
+            restore_focus(
+                self.connect,
+                self.diagnostics,
+                container_id,
+                &mut focus_restorations,
+            )?;
+            after_command = self.settled_snapshot()?;
         }
 
         Ok(after_command)
     }
 
-    // Workspace IDs cannot be selected with con_id criteria. Reach the frozen workspace
-    // through its verified direct child; callers fence the workspace focus before use.
-    fn focus_workspace(&mut self) -> Result<(), String> {
-        self.focus_container(&[0])?;
+    /// Prefixes a criteria-free command so that it acts on the frozen workspace itself.
+    /// Workspace IDs cannot be selected with con_id criteria; reach the workspace through
+    /// its verified direct child. Sway runs one request's commands in order without
+    /// handling input between them, so pointer focus cannot redirect the final command.
+    /// This narrows a race but is not atomic: a failed criteria command does not stop
+    /// later ones, so every reply and the resulting hierarchy are still verified.
+    fn with_workspace_focus(&mut self, criteria_free_command: &str) -> String {
         let direct_child_id = self.expected_hierarchy.subtree_mut(&[0]).id();
-        self.guarded_command(
-            format!("[con_id={direct_child_id}] focus parent"),
-            None,
-            self.expected_hierarchy.clone(),
-        )?;
-
-        Ok(())
+        format!(
+            "[con_id={direct_child_id}] focus; [con_id={direct_child_id}] focus parent; {criteria_free_command}"
+        )
     }
 
     fn initialize_group_selection(
@@ -554,7 +549,6 @@ impl<'a> Construction<'a> {
                 let child_id = self.expected_hierarchy.subtree_mut(&child_path).id();
                 snapshot = self.guarded_command(
                     format!("[con_id={child_id}] resize set {axis} {target_extent_pixels:.0} px"),
-                    None,
                     self.expected_hierarchy.clone(),
                 )?;
 
@@ -643,15 +637,10 @@ impl<'a> Construction<'a> {
         let mut expected_after = self.expected_hierarchy.clone();
         let group_path;
         let command;
-        let require_focused;
         if first_path.is_empty() {
             // The first completed child occupies the workspace. workspace_split wraps
             // its populated children, preserving even equal-axis meaningful groups.
-            // Select its direct owned child and explicitly focus its known parent. The
-            // split has no criteria and acts on the focused node, so it requires the
-            // workspace to be focused on its own settled fence.
-            self.focus_workspace()?;
-
+            // The split has no criteria and acts on the focused workspace.
             let ExpectedHierarchy::Group {
                 layout: old_layout,
                 children: old_children,
@@ -670,8 +659,7 @@ impl<'a> Construction<'a> {
                 layout: split_layout,
                 children: vec![wrapped_children],
             };
-            command = split_command.to_owned();
-            require_focused = Some(self.target_workspace_id);
+            command = self.with_workspace_focus(split_command);
             group_path = Vec::new();
         } else {
             let first_id = self.expected_hierarchy.subtree_mut(&first_path).id();
@@ -695,11 +683,8 @@ impl<'a> Construction<'a> {
                 group_path = parent_path.to_vec();
                 if parent_is_split && matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV) {
                     command = format!("[con_id={first_id}] {split_command}");
-                    require_focused = None;
                 } else {
-                    self.focus_workspace()?;
-                    command = format!("layout {layout_command}");
-                    require_focused = Some(self.target_workspace_id);
+                    command = self.with_workspace_focus(&format!("layout {layout_command}"));
                 }
             } else {
                 let first_child_hierarchy = expected_after.subtree_mut(&first_path).clone();
@@ -710,7 +695,6 @@ impl<'a> Construction<'a> {
                 };
                 group_path = first_path;
                 command = format!("[con_id={first_id}] {split_command}");
-                require_focused = None;
             }
         }
 
@@ -718,7 +702,7 @@ impl<'a> Construction<'a> {
             "expected group/reparent transition {:?} -> {expected_after:?}",
             self.expected_hierarchy
         ));
-        self.guarded_command(command, require_focused, expected_after)?;
+        self.guarded_command(command, expected_after)?;
 
         let ExpectedHierarchy::Group {
             layout: observed_layout,
@@ -732,20 +716,13 @@ impl<'a> Construction<'a> {
             // child's parent. This parent's siblings number at least two, preventing
             // layout.c's singleton-grandparent flattening. At the root, operate on the
             // workspace itself so layout cannot introduce an extra workspace wrapper.
-            let (command, require_focused) = if group_path.is_empty() {
-                self.focus_workspace()?;
-                (
-                    format!("layout {layout_command}"),
-                    Some(self.target_workspace_id),
-                )
+            let command = if group_path.is_empty() {
+                self.with_workspace_focus(&format!("layout {layout_command}"))
             } else {
                 let mut first_child_path = group_path.clone();
                 first_child_path.push(0);
                 let first_child_id = self.expected_hierarchy.subtree_mut(&first_child_path).id();
-                (
-                    format!("[con_id={first_child_id}] layout {layout_command}"),
-                    None,
-                )
+                format!("[con_id={first_child_id}] layout {layout_command}")
             };
 
             let mut expected_after = self.expected_hierarchy.clone();
@@ -754,7 +731,7 @@ impl<'a> Construction<'a> {
                 unreachable!("constructed group");
             };
             *layout = group_layout;
-            self.guarded_command(command, require_focused, expected_after)?;
+            self.guarded_command(command, expected_after)?;
         }
 
         for (child_index, child) in children.iter().enumerate().skip(1) {
@@ -784,21 +761,34 @@ impl<'a> Construction<'a> {
             unreachable!()
         };
 
+        // Sway maps a new window beside whichever container is focused at that moment, so
+        // insertion focus must hold from the prelaunch fence until the window appears.
+        // One restoration budget covers that fence and the whole wait.
+        let insertion_container_id = insert_after
+            .as_ref()
+            .map(|previous_path| self.expected_hierarchy.subtree_mut(previous_path).id());
         if let Some(previous_path) = &insert_after {
             self.focus_container(previous_path)?;
         }
 
-        self.diagnostics.stage(format!(
-            "prelaunch leaf={configured_window_id:?} workspace={}",
-            self.target_workspace_id
-        ));
-        let prelaunch_snapshot = self.settled_snapshot()?;
-        if let Some(previous_path) = &insert_after {
-            let previous_sibling_id = self.expected_hierarchy.subtree_mut(previous_path).id();
-            if !is_focused(&prelaunch_snapshot.tree, previous_sibling_id) {
-                return Err(format!(
-                    "insertion focus left explicitly selected container id={previous_sibling_id} before launch"
-                ));
+        let mut insertion_focus_restorations = 0;
+        loop {
+            self.diagnostics.stage(format!(
+                "prelaunch leaf={configured_window_id:?} workspace={}",
+                self.target_workspace_id
+            ));
+            let prelaunch_snapshot = self.settled_snapshot()?;
+            if let Some(insertion_id) = insertion_container_id
+                && !is_focused(&prelaunch_snapshot.tree, insertion_id)
+            {
+                restore_focus(
+                    self.connect,
+                    self.diagnostics,
+                    insertion_id,
+                    &mut insertion_focus_restorations,
+                )?;
+            } else {
+                break;
             }
         }
 
@@ -922,10 +912,39 @@ impl<'a> Construction<'a> {
                 }
             }
 
+            if provisional_window_id.is_none()
+                && let Some(insertion_id) = insertion_container_id
+                && !is_focused(&snapshot.tree, insertion_id)
+            {
+                // An unchanged target hierarchy proves both that the new window has not
+                // mapped there yet and that the newly focused node belongs to this run.
+                // Any difference is left to reconciliation and hierarchy verification.
+                let workspace = snapshot
+                    .tree
+                    .find_as_ref(|node| node.id == self.target_workspace_id)
+                    .ok_or("target missing")?;
+                if self.expected_hierarchy.clone().verify(workspace).is_ok() {
+                    restore_focus(
+                        self.connect,
+                        self.diagnostics,
+                        insertion_id,
+                        &mut insertion_focus_restorations,
+                    )?;
+                    continue;
+                }
+            }
+
             reap_if_exited(&mut process, &mut process_exit_status, self.diagnostics)?;
             let poll_until = window_deadline.min(Instant::now() + POLL_INTERVAL);
             while let Some(event) = self.observer.next_until(poll_until)? {
                 new_windows.observe_event(&event, self.diagnostics)?;
+                // Observe again at once rather than finishing the poll, so moved
+                // insertion focus can be restored before the window maps.
+                if insertion_container_id.is_some()
+                    && matches!(&event, Event::Window(window) if window.change == WindowChange::Focus)
+                {
+                    break;
+                }
             }
         }
     }
@@ -1112,6 +1131,48 @@ pub(crate) fn run_command(
         Ok(Err(error)) => Err(error),
         Err(error) => Err(format!("command deadline/channel failure: {error}")),
     }
+}
+
+/// Sends one command request and requires a success reply for every command in it.
+fn run_checked_command(
+    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    diagnostics: &mut Diagnostics,
+    command: String,
+) -> Result<(), String> {
+    let replies = run_command(connect()?, command, Instant::now() + IPC_TIMEOUT)?;
+    diagnostics.record(&format!("command replies: {replies:?}"));
+    if replies.is_empty() || replies.iter().any(Result::is_err) {
+        return Err(format!("Sway command failed: {replies:?}"));
+    }
+
+    Ok(())
+}
+
+/// Refocuses `container_id` after focus moved to another node inside the target workspace,
+/// as focus_follows_mouse does. Call only right after a snapshot verified the complete,
+/// owned target hierarchy, so the newly focused node also belongs to this run; the
+/// observer has already failed on any workspace switch. The caller verifies the result
+/// with a fresh snapshot. Exhausting the restoration budget is fatal.
+fn restore_focus(
+    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    diagnostics: &mut Diagnostics,
+    container_id: i64,
+    focus_restorations: &mut usize,
+) -> Result<(), String> {
+    if *focus_restorations == MAX_FOCUS_RESTORATIONS {
+        return Err(format!(
+            "focus did not stay on container id={container_id} after {MAX_FOCUS_RESTORATIONS} restorations within the target workspace"
+        ));
+    }
+    *focus_restorations += 1;
+
+    let command = format!("[con_id={container_id}] focus");
+    diagnostics.stage(format!("restore focus {command}"));
+    diagnostics.record(&format!(
+        "focus moved within the target workspace; restoring id={container_id} (restoration {} of {MAX_FOCUS_RESTORATIONS})",
+        *focus_restorations
+    ));
+    run_checked_command(connect, diagnostics, command)
 }
 
 fn is_focused(tree: &Node, container_id: i64) -> bool {

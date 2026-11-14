@@ -911,6 +911,85 @@ fn coordinator_history_across_a_completed_load_prevents_the_next_switch() {
 }
 
 #[test]
+fn in_workspace_focus_restoration_keeps_profile_transition_checks() {
+    for switch_during_restoration in [false, true] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: 3, layout: first}, {workspace: 1, layout: second}]\n",
+        );
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+
+        // Replace the final focus command's after-fence: focus has moved to the target
+        // workspace node itself. The loader restores it before the coordinator's check.
+        let (mut construction, first_done) = construction_steps(&selected, 3, 20);
+        let coordinator_completion = construction.pop().unwrap();
+        let _replaced_final_focus_fence = construction.pop();
+        construction.push(snapshot(&focus_workspace(&first_done, 3)));
+        let mut restoration = command("[con_id=20] focus".into());
+        if let Step::Command { events, .. } = &mut restoration {
+            events.push((
+                WINDOW_EVENT,
+                json!({"change": "focus", "container": window(20, true)}),
+            ));
+            if switch_during_restoration {
+                // The user switched away and back as focus was restored: still fatal.
+                events.extend([focus_event(90, 3), focus_event(3, 90)]);
+            }
+        }
+        construction.push(restoration);
+        steps.extend(construction);
+
+        if switch_during_restoration {
+            steps.push(snapshot(&first_done));
+            let output = run(&fixture, steps, false);
+            assert_failure(&fixture, &output, "focus changed from target", 0);
+            assert_eq!(
+                fs::read_to_string(fixture.path.join("launches")).unwrap(),
+                "first\n"
+            );
+            continue;
+        }
+
+        steps.extend([
+            snapshot(&first_done),
+            snapshot(&first_done),
+            coordinator_completion,
+        ]);
+        let mut second_selected = first_done.clone();
+        second_selected["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(workspace(1, false));
+        second_selected = focus_workspace(&second_selected, 1);
+        steps.extend(selection_steps(&first_done, &second_selected, 1, 3, true));
+        let (construction, _) = construction_steps(&second_selected, 1, 21);
+        steps.extend(construction);
+        let output = run(&fixture, steps, false);
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\nsecond\n"
+        );
+        let log =
+            fs::read_to_string(fixture.path.join(".local/state/sway-stage/last-run.log")).unwrap();
+        assert!(
+            log.contains("restoring id=20 (restoration 1 of 3)"),
+            "{log}"
+        );
+        assert!(
+            log.contains("completed 2 workspaces [(3, 103), (1, 101)]"),
+            "{log}"
+        );
+    }
+}
+
+#[test]
 fn selecting_from_an_empty_workspace_allows_sway_to_destroy_only_that_workspace() {
     let fixture = fixture();
     fixture.file(

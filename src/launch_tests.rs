@@ -1332,10 +1332,44 @@ fn command_step(command: &str) -> IpcStep {
 }
 
 fn append_command_steps(steps: &mut Vec<IpcStep>, command: &str, before: &Value, after: &Value) {
+    append_command_steps_with_events(steps, command, focus_events(before, after), before, after);
+}
+
+// One request focuses the workspace's first child, then the workspace itself, then runs
+// the criteria-free command. Only that first focus can move focus to a different view.
+fn append_workspace_command_steps(
+    steps: &mut Vec<IpcStep>,
+    criteria_free_command: &str,
+    before: &Value,
+    after: &Value,
+) {
+    let child_id = before["nodes"][0]["nodes"][0]["nodes"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let mut child_focused = before.clone();
+    focus_only(&mut child_focused, child_id);
+    append_command_steps_with_events(
+        steps,
+        &format!(
+            "[con_id={child_id}] focus; [con_id={child_id}] focus parent; {criteria_free_command}"
+        ),
+        focus_events(before, &child_focused),
+        before,
+        after,
+    );
+}
+
+fn append_command_steps_with_events(
+    steps: &mut Vec<IpcStep>,
+    command: &str,
+    events: Vec<(u32, Value)>,
+    before: &Value,
+    after: &Value,
+) {
     // Sway emits a command's events before its reply, so they fall in the next fence.
     // That tree cannot authorize anything further until a quiet fence follows.
     let mut command = command_step(command);
-    command.events = focus_events(before, after);
+    command.events = events;
     let resettle = !command.events.is_empty();
     steps.extend([
         snapshot_step(before.clone()),
@@ -1626,10 +1660,6 @@ fn nested_first_child_wraps_populated_workspace_and_preserves_equal_axis_groups(
         let first_split_tree = arranged_tree(layout, vec![expected_window(20)], 20);
         let first_pair_tree =
             arranged_tree(layout, vec![expected_window(20), expected_window(21)], 21);
-        let first_window_focused_tree =
-            arranged_tree(layout, vec![expected_window(20), expected_window(21)], 20);
-        let workspace_focused_tree =
-            arranged_tree(layout, vec![expected_window(20), expected_window(21)], 10);
         let wrapped_pair_tree = arranged_tree(
             "splith",
             vec![group(
@@ -1682,24 +1712,7 @@ fn nested_first_child_wraps_populated_workspace_and_preserves_equal_axis_groups(
             &first_split_tree,
         );
         append_launch_steps(&mut steps, &first_split_tree, &first_pair_tree);
-        append_command_steps(
-            &mut steps,
-            "[con_id=20] focus",
-            &first_pair_tree,
-            &first_window_focused_tree,
-        );
-        append_command_steps(
-            &mut steps,
-            "[con_id=20] focus parent",
-            &first_window_focused_tree,
-            &workspace_focused_tree,
-        );
-        append_command_steps(
-            &mut steps,
-            "splith",
-            &workspace_focused_tree,
-            &wrapped_pair_tree,
-        );
+        append_workspace_command_steps(&mut steps, "splith", &first_pair_tree, &wrapped_pair_tree);
         append_command_steps(
             &mut steps,
             "[con_id=100] focus",
@@ -2099,10 +2112,7 @@ fn initial_tabbed_and_stacked_workspaces_change_layout_without_extra_wrappers() 
         let complete = arranged_tree("splitv", vec![expected_window(20), expected_window(21)], 21);
         let mut steps = vec![snapshot_step(initial.clone())];
         append_launch_steps(&mut steps, &initial, &first);
-        workspace_focus_steps(&mut steps, &first);
-        let mut workspace_focused = first.clone();
-        focus_only(&mut workspace_focused, 10);
-        append_command_steps(&mut steps, "layout splitv", &workspace_focused, &oriented);
+        append_workspace_command_steps(&mut steps, "layout splitv", &first, &oriented);
         append_final_focus_steps(&mut steps, &oriented, 20);
         let mut insertion = oriented.clone();
         focus_only(&mut insertion, 20);
@@ -2135,22 +2145,59 @@ fn malformed_command_frames_fail_closed() {
     }
 }
 
-#[test]
-fn insertion_focus_interference_is_detected_before_spawning() {
-    let fixture = LaunchFixture::new();
-    let config = layout_config(
-        &fixture,
+// The pointer moves focus to `pointer_id` within the target, as focus_follows_mouse does.
+// Returns the resulting tree; settled observations still need a quiet fence after it.
+fn append_pointer_focus(steps: &mut Vec<IpcStep>, before: &Value, pointer_id: i64) -> Value {
+    let mut moved = before.clone();
+    focus_only(&mut moved, pointer_id);
+    let mut fence = snapshot_step(moved.clone());
+    fence.events = focus_events(before, &moved);
+    steps.push(fence);
+    moved
+}
+
+// The loader's explicit restoration command. Its focus event lands in the next fence.
+fn append_focus_restoration(steps: &mut Vec<IpcStep>, moved: &Value, container_id: i64) -> Value {
+    let mut restored = moved.clone();
+    focus_only(&mut restored, container_id);
+    let mut command = command_step(&format!("[con_id={container_id}] focus"));
+    command.events = focus_events(moved, &restored);
+    steps.push(command);
+    restored
+}
+
+// A restoration that the pointer immediately undoes, so later trees still show `moved`.
+fn append_undone_focus_restoration(steps: &mut Vec<IpcStep>, moved: &Value, container_id: i64) {
+    let restored = append_focus_restoration(steps, moved, container_id);
+    let pointer_events = focus_events(&restored, moved);
+    steps.last_mut().unwrap().events.extend(pointer_events);
+}
+
+fn wait_for_launch_total(fixture: &LaunchFixture, count: usize) {
+    let limit = ipc_deadline();
+    while fixture.wait_for_launch_count() != count {
+        assert!(Instant::now() < limit);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn three_window_split_config(fixture: &LaunchFixture) -> Config {
+    layout_config(
+        fixture,
         &format!(
             "{{group: splith, children: [{}, {}, {}]}}",
-            configured_window_yaml(&fixture, 0),
-            configured_window_yaml(&fixture, 1),
-            configured_window_yaml(&fixture, 2)
+            configured_window_yaml(fixture, 0),
+            configured_window_yaml(fixture, 1),
+            configured_window_yaml(fixture, 2)
         ),
-    );
+    )
+}
+
+// Two launched windows with window 21 explicitly focused for inserting the third.
+fn steps_through_second_insertion_focus() -> (Vec<IpcStep>, Value) {
     let first_window_tree = arranged_tree("splith", vec![expected_window(20)], 20);
     let second_window_tree =
         arranged_tree("splith", vec![expected_window(20), expected_window(21)], 21);
-    let interfered = arranged_tree("splith", vec![expected_window(20), expected_window(21)], 20);
     let mut steps = vec![snapshot_step(empty_workspace_tree())];
     append_launch_steps(&mut steps, &empty_workspace_tree(), &first_window_tree);
     append_command_steps(
@@ -2172,17 +2219,133 @@ fn insertion_focus_interference_is_detected_before_spawning() {
         &second_window_tree,
         &second_window_tree,
     );
-    // A click on the first window emits focus; the quiet fence after it is authoritative.
-    let mut clicked = snapshot_step(interfered.clone());
-    clicked.events = focus_events(&second_window_tree, &interfered);
-    steps.extend([clicked, snapshot_step(interfered)]);
-    let error = fixture.run(&config, steps).unwrap_err();
+    (steps, second_window_tree)
+}
 
-    assert!(error.contains("insertion focus left"), "{error}");
-    let limit = ipc_deadline();
-    while fixture.wait_for_launch_count() != 2 {
-        assert!(Instant::now() < limit);
-        thread::sleep(Duration::from_millis(5));
+#[test]
+fn insertion_focus_moved_before_spawning_is_restored_within_a_bounded_budget() {
+    for exhaust_budget in [false, true] {
+        let fixture = LaunchFixture::new();
+        let config = three_window_split_config(&fixture);
+        let (mut steps, insertion_tree) = steps_through_second_insertion_focus();
+        let third_window_tree =
+            arranged_tree("splith", (20..=22).map(expected_window).collect(), 22);
+
+        // The pointer focuses the first window just before the prelaunch fence.
+        let moved = append_pointer_focus(&mut steps, &insertion_tree, 20);
+        steps.push(snapshot_step(moved.clone()));
+        if exhaust_budget {
+            for _ in 0..MAX_FOCUS_RESTORATIONS {
+                append_undone_focus_restoration(&mut steps, &moved, 21);
+                steps.extend([snapshot_step(moved.clone()), snapshot_step(moved.clone())]);
+            }
+            let error = fixture.run(&config, steps).unwrap_err();
+
+            assert!(
+                error.contains("focus did not stay on container id=21 after 3 restorations"),
+                "{error}"
+            );
+            wait_for_launch_total(&fixture, 2);
+        } else {
+            let restored = append_focus_restoration(&mut steps, &moved, 21);
+            steps.extend([snapshot_step(restored.clone()), snapshot_step(restored)]);
+            steps.extend([
+                launched(&insertion_tree, &third_window_tree),
+                snapshot_step(third_window_tree),
+            ]);
+
+            assert_completed_launches(&fixture, &config, steps, 3);
+            let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+            assert!(
+                log.contains("restoring id=21 (restoration 1 of 3)"),
+                "{log}"
+            );
+        }
+    }
+}
+
+#[test]
+fn insertion_focus_moved_during_the_window_wait_is_restored_only_while_safe() {
+    for scenario in [
+        "restored",
+        "exhausted",
+        "workspace-away-and-back",
+        "unexpected-window",
+        "rejected-restoration",
+    ] {
+        let fixture = LaunchFixture::new();
+        let config = three_window_split_config(&fixture);
+        let (mut steps, insertion_tree) = steps_through_second_insertion_focus();
+        let third_window_tree =
+            arranged_tree("splith", (20..=22).map(expected_window).collect(), 22);
+        steps.push(snapshot_step(insertion_tree.clone())); // Quiet prelaunch fence.
+
+        // The first wait observation after spawning shows the pointer's focus change.
+        let moved = append_pointer_focus(&mut steps, &insertion_tree, 20);
+        let expected = match scenario {
+            "restored" => {
+                let restored = append_focus_restoration(&mut steps, &moved, 21);
+                steps.extend([
+                    snapshot_step(restored),
+                    launched(&insertion_tree, &third_window_tree),
+                    snapshot_step(third_window_tree.clone()),
+                ]);
+                assert_completed_launches(&fixture, &config, steps, 3);
+                let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+                assert!(
+                    log.contains("restoring id=21 (restoration 1 of 3)"),
+                    "{log}"
+                );
+                continue;
+            }
+            "exhausted" => {
+                for _ in 0..MAX_FOCUS_RESTORATIONS {
+                    append_undone_focus_restoration(&mut steps, &moved, 21);
+                    steps.push(snapshot_step(moved.clone()));
+                }
+                "focus did not stay on container id=21 after 3 restorations"
+            }
+            "workspace-away-and-back" => {
+                // The same fence also records a switch away and back: never restore.
+                steps.last_mut().unwrap().events.extend([
+                    (WORKSPACE_EVENT, workspace_focus_event(11, 10)),
+                    (WORKSPACE_EVENT, workspace_focus_event(10, 11)),
+                ]);
+                "focus changed"
+            }
+            "unexpected-window" => {
+                // An unexpected target window changes the owned hierarchy: never restore.
+                let mut occupied = moved.clone();
+                occupied["nodes"][0]["nodes"][0]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(wayland_window(99, Some("intruder")));
+                focus_only(&mut occupied, 20);
+                steps.last_mut().unwrap().tree = occupied;
+                "unexpected target-workspace window id=99"
+            }
+            _ => {
+                append_focus_restoration(&mut steps, &moved, 21);
+                steps.last_mut().unwrap().command.as_mut().unwrap().1 =
+                    json!([{"success": false, "error": "restoration rejected"}]);
+                "restoration rejected"
+            }
+        };
+        let error = fixture.run(&config, steps).unwrap_err();
+
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
+        wait_for_launch_total(&fixture, 3);
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        let observed_restorations = log.matches("restoring id=21").count();
+        let expected_restorations = match scenario {
+            "exhausted" => MAX_FOCUS_RESTORATIONS,
+            "rejected-restoration" => 1,
+            _ => 0,
+        };
+        assert_eq!(
+            observed_restorations, expected_restorations,
+            "scenario={scenario}: {log}"
+        );
     }
 }
 
@@ -2244,8 +2407,8 @@ fn harmless_window_events_require_another_fence_before_continuing() {
 }
 
 #[test]
-fn workspace_split_requires_workspace_focus_on_its_settled_fence() {
-    for clicked in [false, true] {
+fn pointer_focus_around_a_workspace_split_needs_no_restoration() {
+    for pointer_moves_before_request in [true, false] {
         let fixture = LaunchFixture::new();
         let window_yaml = (0..3)
             .map(|i| configured_window_yaml(&fixture, i))
@@ -2261,10 +2424,29 @@ fn workspace_split_requires_workspace_focus_on_its_settled_fence() {
         let vertical_split_tree = arranged_tree("splitv", vec![expected_window(20)], 20);
         let second_window_tree =
             arranged_tree("splitv", vec![expected_window(20), expected_window(21)], 21);
-        let first_window_focused_tree =
-            arranged_tree("splitv", vec![expected_window(20), expected_window(21)], 20);
-        let workspace_focused_tree =
-            arranged_tree("splitv", vec![expected_window(20), expected_window(21)], 10);
+        let wrapped_pair_tree = |focused_id| {
+            arranged_tree(
+                "splith",
+                vec![group(
+                    100,
+                    "splitv",
+                    vec![expected_window(20), expected_window(21)],
+                )],
+                focused_id,
+            )
+        };
+        let third_window_tree = arranged_tree(
+            "splith",
+            vec![
+                group(
+                    100,
+                    "splitv",
+                    vec![expected_window(20), expected_window(21)],
+                ),
+                expected_window(22),
+            ],
+            22,
+        );
         let mut steps = vec![snapshot_step(empty_workspace_tree())];
         append_launch_steps(&mut steps, &empty_workspace_tree(), &first_window_tree);
         append_command_steps(
@@ -2280,45 +2462,36 @@ fn workspace_split_requires_workspace_focus_on_its_settled_fence() {
             &vertical_split_tree,
         );
         append_launch_steps(&mut steps, &vertical_split_tree, &second_window_tree);
+
+        // The criteria-free split establishes workspace focus within its own request, so
+        // pointer focus before or after that request cannot redirect it.
+        let after_split = if pointer_moves_before_request {
+            let moved = append_pointer_focus(&mut steps, &second_window_tree, 20);
+            append_workspace_command_steps(&mut steps, "splith", &moved, &wrapped_pair_tree(100));
+            wrapped_pair_tree(100)
+        } else {
+            let command_index = steps.len() + 1;
+            append_workspace_command_steps(
+                &mut steps,
+                "splith",
+                &second_window_tree,
+                &wrapped_pair_tree(21),
+            );
+            let pointer_events = focus_events(&wrapped_pair_tree(100), &wrapped_pair_tree(21));
+            steps[command_index].events.extend(pointer_events);
+            wrapped_pair_tree(21)
+        };
         append_command_steps(
             &mut steps,
-            "[con_id=20] focus",
-            &second_window_tree,
-            &first_window_focused_tree,
+            "[con_id=100] focus",
+            &after_split,
+            &wrapped_pair_tree(100),
         );
-        if clicked {
-            // Focus parent succeeds, then a click on a window emits focus. Only the
-            // fence after that event shows the workspace has lost focus.
-            append_command_steps(
-                &mut steps,
-                "[con_id=20] focus parent",
-                &first_window_focused_tree,
-                &workspace_focused_tree,
-            );
-            let mut click = snapshot_step(workspace_focused_tree.clone());
-            click.events = focus_events(&workspace_focused_tree, &second_window_tree);
-            steps.extend([click, snapshot_step(second_window_tree)]);
-        } else {
-            // Sway accepts focus parent, but the workspace never becomes focused.
-            append_command_steps(
-                &mut steps,
-                "[con_id=20] focus parent",
-                &first_window_focused_tree,
-                &first_window_focused_tree,
-            );
-            steps.push(snapshot_step(first_window_focused_tree));
-        }
-        // A split request would meet the repeated final snapshot step and fail the fixture.
-        let error = fixture.run(&config, steps).unwrap_err();
-        assert!(
-            error.contains("\"splith\" requires focused container id=10"),
-            "clicked={clicked}: {error}"
-        );
-        let limit = ipc_deadline();
-        while fixture.wait_for_launch_count() != 2 {
-            assert!(Instant::now() < limit);
-            thread::sleep(Duration::from_millis(5));
-        }
+        append_launch_steps(&mut steps, &wrapped_pair_tree(100), &third_window_tree);
+
+        assert_completed_launches(&fixture, &config, steps, 3);
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        assert!(!log.contains("restoring id="), "{log}");
     }
 }
 
@@ -3079,7 +3252,7 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
             }
             "unobserved-focus" => {
                 after.tree = loaded_tree.clone();
-                "was not observed"
+                "focus did not stay on container id=20 after 3 restorations"
             }
             _ => {
                 after.events = vec![
@@ -3089,40 +3262,27 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
                 "focus changed"
             }
         };
-        let steps = vec![
-            snapshot_step(loaded_tree),
+        let mut steps = vec![
+            snapshot_step(loaded_tree.clone()),
             before,
             command_step("[con_id=20] focus"),
             after,
         ];
+        if scenario == "unobserved-focus" {
+            // Sway accepts each explicit focus, but focus never reaches the window.
+            for _ in 0..MAX_FOCUS_RESTORATIONS {
+                steps.extend([
+                    command_step("[con_id=20] focus"),
+                    snapshot_step(loaded_tree.clone()),
+                ]);
+            }
+        }
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.focus_container(&[0]).map(|_| ())
         })
         .unwrap_err();
         assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
-}
-
-fn workspace_focus_steps(steps: &mut Vec<IpcStep>, before: &Value) {
-    let child_id = before["nodes"][0]["nodes"][0]["nodes"][0]["id"]
-        .as_i64()
-        .unwrap();
-    let mut child_focused = before.clone();
-    focus_only(&mut child_focused, child_id);
-    append_command_steps(
-        steps,
-        &format!("[con_id={child_id}] focus"),
-        before,
-        &child_focused,
-    );
-    let mut workspace_focused = before.clone();
-    focus_only(&mut workspace_focused, 10);
-    append_command_steps(
-        steps,
-        &format!("[con_id={child_id}] focus parent"),
-        &child_focused,
-        &workspace_focused,
-    );
 }
 
 #[test]
@@ -3151,11 +3311,8 @@ fn root_tabs_and_stacks_preserve_singletons_order_and_initial_workspace_layout()
         let first = arranged_tree(initial_layout, vec![expected_window(20)], 20);
         let mut steps = vec![snapshot_step(initial.clone())];
         append_launch_steps(&mut steps, &initial, &first);
-        workspace_focus_steps(&mut steps, &first);
-        let mut before = first.clone();
-        focus_only(&mut before, 10);
         let mut current = arranged_tree(layout, vec![expected_window(20)], 10);
-        append_command_steps(&mut steps, &format!("layout {command}"), &before, &current);
+        append_workspace_command_steps(&mut steps, &format!("layout {command}"), &first, &current);
         for child_index in 1..count {
             let previous_id = 19 + child_index as i64;
             let mut insertion = current.clone();
@@ -3370,20 +3527,15 @@ fn singleton_tab_stack_ancestry_preserves_first_split_group_and_later_sibling() 
     append_command_steps(&mut steps, "[con_id=20] splitv", &first, &vertical);
     append_command_steps(&mut steps, "[con_id=20] focus", &vertical, &vertical);
     append_launch_steps(&mut steps, &vertical, &split_complete);
-    workspace_focus_steps(&mut steps, &split_complete);
-    let mut before = split_complete.clone();
-    focus_only(&mut before, 10);
-    append_command_steps(&mut steps, "splith", &before, &staged_stack);
-    workspace_focus_steps(&mut steps, &staged_stack);
-    before = staged_stack.clone();
-    focus_only(&mut before, 10);
-    append_command_steps(&mut steps, "layout stacking", &before, &stack_complete);
-    workspace_focus_steps(&mut steps, &stack_complete);
-    append_command_steps(&mut steps, "splith", &stack_complete, &staged_tabs);
-    workspace_focus_steps(&mut steps, &staged_tabs);
-    before = staged_tabs.clone();
-    focus_only(&mut before, 10);
-    append_command_steps(&mut steps, "layout tabbed", &before, &tabs_complete);
+    append_workspace_command_steps(&mut steps, "splith", &split_complete, &staged_stack);
+    append_workspace_command_steps(
+        &mut steps,
+        "layout stacking",
+        &staged_stack,
+        &stack_complete,
+    );
+    append_workspace_command_steps(&mut steps, "splith", &stack_complete, &staged_tabs);
+    append_workspace_command_steps(&mut steps, "layout tabbed", &staged_tabs, &tabs_complete);
     append_command_steps(&mut steps, "[con_id=101] focus", &tabs_complete, &insertion);
     append_launch_steps(&mut steps, &insertion, &complete);
 
@@ -3431,10 +3583,7 @@ fn split_inside_stack_after_a_window_uses_a_new_container() {
     );
     let mut steps = vec![snapshot_step(empty_workspace_tree())];
     append_launch_steps(&mut steps, &empty_workspace_tree(), &first);
-    workspace_focus_steps(&mut steps, &first);
-    let mut before = first.clone();
-    focus_only(&mut before, 10);
-    append_command_steps(&mut steps, "layout stacking", &before, &stack);
+    append_workspace_command_steps(&mut steps, "layout stacking", &first, &stack);
     let mut insertion = stack.clone();
     focus_only(&mut insertion, 20);
     append_command_steps(&mut steps, "[con_id=20] focus", &stack, &insertion);
@@ -3584,8 +3733,8 @@ fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_laun
 }
 
 #[test]
-fn workspace_tab_layout_requires_workspace_focus_at_the_command_fence() {
-    for wrong_focus in [true, false] {
+fn workspace_layout_request_still_verifies_target_replies_and_result() {
+    for scenario in ["target-moved", "rejected-focus", "redirected-layout"] {
         let fixture = LaunchFixture::new();
         let config = layout_config(
             &fixture,
@@ -3596,27 +3745,46 @@ fn workspace_tab_layout_requires_workspace_focus_at_the_command_fence() {
             ),
         );
         let first = arranged_tree("splith", vec![expected_window(20)], 20);
+        let mut before = snapshot_step(first.clone());
+        let mut command =
+            command_step("[con_id=20] focus; [con_id=20] focus parent; layout tabbed");
+        let mut after = snapshot_step(arranged_tree("tabbed", vec![expected_window(20)], 10));
+        let expected = match scenario {
+            "target-moved" => {
+                before
+                    .events
+                    .push((WORKSPACE_EVENT, workspace_move_event(10)));
+                "moved to another output"
+            }
+            "rejected-focus" => {
+                // Sway continues after a failed criteria command, so a successful final
+                // reply cannot hide the failed focus that it depended on.
+                command.command.as_mut().unwrap().1 = json!([
+                    {"success": false, "error": "No matching node."},
+                    {"success": false, "error": "No matching node."},
+                    {"success": true}
+                ]);
+                "No matching node"
+            }
+            _ => {
+                // Sway accepted the request, but the layout reached a window's new
+                // wrapper instead of the workspace.
+                after.tree = arranged_tree(
+                    "splith",
+                    vec![group(100, "tabbed", vec![expected_window(20)])],
+                    20,
+                );
+                "unexpected hierarchy"
+            }
+        };
         let mut steps = vec![snapshot_step(empty_workspace_tree())];
         append_launch_steps(&mut steps, &empty_workspace_tree(), &first);
-        workspace_focus_steps(&mut steps, &first);
-        let mut before = first;
-        focus_only(&mut before, if wrong_focus { 20 } else { 10 });
-        let mut fence = snapshot_step(before);
-        if !wrong_focus {
-            fence
-                .events
-                .push((WORKSPACE_EVENT, workspace_move_event(10)));
+        steps.push(before);
+        if scenario != "target-moved" {
+            steps.extend([command, after]);
         }
-        steps.push(fence);
         let error = fixture.run(&config, steps).unwrap_err();
-        assert!(
-            error.contains(if wrong_focus {
-                "requires focused container id=10"
-            } else {
-                "moved to another output"
-            }),
-            "{error}"
-        );
+        assert!(error.contains(expected), "scenario={scenario}: {error}");
         assert_eq!(fixture.wait_for_launch_count(), 1);
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         assert!(!log.contains("launch leaf=\\\"w1\\\""), "{log}");
@@ -3736,12 +3904,8 @@ fn nested_singleton_groups_after_a_completed_tab_group_keep_every_wrapper() {
     );
     let mut steps = vec![snapshot_step(empty_workspace_tree())];
     append_launch_steps(&mut steps, &empty_workspace_tree(), &first);
-    workspace_focus_steps(&mut steps, &first);
-    let mut before = first.clone();
-    focus_only(&mut before, 10);
-    append_command_steps(&mut steps, "layout tabbed", &before, &first_tab);
-    workspace_focus_steps(&mut steps, &first_tab);
-    append_command_steps(&mut steps, "splith", &first_tab, &wrapped_first);
+    append_workspace_command_steps(&mut steps, "layout tabbed", &first, &first_tab);
+    append_workspace_command_steps(&mut steps, "splith", &first_tab, &wrapped_first);
     append_command_steps(
         &mut steps,
         "[con_id=100] focus",
@@ -3932,7 +4096,7 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
             }
             "unobserved-focus" => {
                 after.tree = initial.clone();
-                "was not observed"
+                "focus did not stay on container id=20 after 3 restorations"
             }
             "wrong-selection" | "missing-selection" => {
                 let history = if scenario == "wrong-selection" {
@@ -3967,11 +4131,20 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
             }
         };
         // No later command is supplied: any attempted continuation fails the transcript.
-        let steps = if scenario == "rejected-selection" {
-            vec![snapshot_step(initial), before, command]
+        let mut steps = if scenario == "rejected-selection" {
+            vec![snapshot_step(initial.clone()), before, command]
         } else {
-            vec![snapshot_step(initial), before, command, after]
+            vec![snapshot_step(initial.clone()), before, command, after]
         };
+        if scenario == "unobserved-focus" {
+            // Bounded restorations are the only permitted continuation.
+            for _ in 0..MAX_FOCUS_RESTORATIONS {
+                steps.extend([
+                    command_step("[con_id=20] focus"),
+                    snapshot_step(initial.clone()),
+                ]);
+            }
+        }
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.initialize_group_selection(&config.layout.value, &[])?;
             session.focus_container(&[0, 0]).map(|_| ())
@@ -4233,5 +4406,236 @@ fn final_selection_verification_rejects_changed_inactive_and_ancestor_history() 
             error.contains(&format!("group selection id={changed_group}:")),
             "{error}"
         );
+    }
+}
+
+#[test]
+fn repeated_pointer_focus_changes_across_a_nested_construction_are_each_restored() {
+    let fixture = LaunchFixture::new();
+    let window_yaml = (0..4)
+        .map(|i| configured_window_yaml(&fixture, i))
+        .collect::<Vec<_>>();
+    let config = layout_config(
+        &fixture,
+        &format!(
+            "{{group: splith, children: [{{group: splitv, children: [{}, {}]}}, {}, {}]}}",
+            window_yaml[0], window_yaml[1], window_yaml[2], window_yaml[3]
+        ),
+    );
+    let first_window_tree = arranged_tree("splith", vec![expected_window(20)], 20);
+    let vertical_split_tree = arranged_tree("splitv", vec![expected_window(20)], 20);
+    let pair_tree = arranged_tree("splitv", vec![expected_window(20), expected_window(21)], 21);
+    let pair_group = || {
+        group(
+            100,
+            "splitv",
+            vec![expected_window(20), expected_window(21)],
+        )
+    };
+    let wrapped_tree = arranged_tree("splith", vec![pair_group()], 100);
+    let three_tree = arranged_tree("splith", vec![pair_group(), expected_window(22)], 22);
+    let four_tree = arranged_tree(
+        "splith",
+        vec![pair_group(), expected_window(22), expected_window(23)],
+        23,
+    );
+
+    let mut steps = vec![snapshot_step(empty_workspace_tree())];
+    append_launch_steps(&mut steps, &empty_workspace_tree(), &first_window_tree);
+    append_command_steps(
+        &mut steps,
+        "[con_id=20] splitv",
+        &first_window_tree,
+        &vertical_split_tree,
+    );
+    append_command_steps(
+        &mut steps,
+        "[con_id=20] focus",
+        &vertical_split_tree,
+        &vertical_split_tree,
+    );
+    append_launch_steps(&mut steps, &vertical_split_tree, &pair_tree);
+    append_workspace_command_steps(&mut steps, "splith", &pair_tree, &wrapped_tree);
+    append_command_steps(
+        &mut steps,
+        "[con_id=100] focus",
+        &wrapped_tree,
+        &wrapped_tree,
+    );
+
+    // Waiting for the third window, the pointer twice focuses windows inside the nested
+    // group. Each restoration targets the group itself, the window's insertion sibling.
+    steps.push(snapshot_step(wrapped_tree.clone())); // Quiet prelaunch fence.
+    for pointer_id in [21, 20] {
+        let moved = append_pointer_focus(&mut steps, &wrapped_tree, pointer_id);
+        let restored = append_focus_restoration(&mut steps, &moved, 100);
+        steps.push(snapshot_step(restored));
+    }
+    steps.extend([
+        launched(&wrapped_tree, &three_tree),
+        snapshot_step(three_tree.clone()),
+    ]);
+
+    // Before the fourth launch, the pointer moves at the prelaunch fence.
+    append_command_steps(&mut steps, "[con_id=22] focus", &three_tree, &three_tree);
+    let moved = append_pointer_focus(&mut steps, &three_tree, 20);
+    steps.push(snapshot_step(moved.clone()));
+    let restored = append_focus_restoration(&mut steps, &moved, 22);
+    steps.extend([snapshot_step(restored.clone()), snapshot_step(restored)]);
+    steps.extend([
+        launched(&three_tree, &four_tree),
+        snapshot_step(four_tree.clone()),
+    ]);
+
+    // One sizing observation per split, then final focus moves away once more.
+    steps.extend([
+        snapshot_step(four_tree.clone()),
+        snapshot_step(four_tree.clone()),
+    ]);
+    let mut final_tree = four_tree.clone();
+    focus_only(&mut final_tree, 20);
+    let mut final_focus = command_step("[con_id=20] focus");
+    final_focus.events = focus_events(&four_tree, &final_tree);
+    final_focus
+        .events
+        .extend(focus_events(&final_tree, &four_tree));
+    steps.extend([
+        snapshot_step(four_tree.clone()),
+        final_focus,
+        snapshot_step(four_tree.clone()),
+        snapshot_step(four_tree.clone()),
+    ]);
+    let restored = append_focus_restoration(&mut steps, &four_tree, 20);
+    steps.extend([snapshot_step(restored.clone()), snapshot_step(restored)]);
+
+    fixture.run(&config, steps).unwrap();
+
+    wait_for_launch_total(&fixture, 4);
+    let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+    for (container_id, expected_restorations) in [(100, 2), (22, 1), (20, 1)] {
+        let restoration_record = format!("restoring id={container_id} ");
+        assert_eq!(
+            log.matches(&restoration_record).count(),
+            expected_restorations,
+            "{log}"
+        );
+    }
+    assert!(log.contains("restoration 2 of 3"), "{log}");
+}
+
+#[test]
+fn focus_restoration_keeps_tab_selections_but_never_repairs_another_groups_selection() {
+    for click_other_group in [false, true] {
+        let fixture = LaunchFixture::new();
+        let config = layout_config(
+            &fixture,
+            &format!(
+                "{{group: splith, children: [{{group: tabbed, active: 2, children: [{}, {}]}}, {{group: tabbed, children: [{}, {}]}}]}}",
+                configured_window_yaml(&fixture, 0),
+                configured_window_yaml(&fixture, 1),
+                configured_window_yaml(&fixture, 2),
+                configured_window_yaml(&fixture, 3)
+            ),
+        );
+        let loaded_tree = arranged_tree(
+            "splith",
+            vec![
+                group(
+                    100,
+                    "tabbed",
+                    vec![expected_window(20), expected_window(21)],
+                ),
+                group(
+                    101,
+                    "tabbed",
+                    vec![expected_window(22), expected_window(23)],
+                ),
+            ],
+            23,
+        );
+        let focus_leaf = |tree: &Value, id: i64| {
+            let mut focused = tree.clone();
+            focus_only(&mut focused, id);
+            focused
+        };
+
+        // Initialize the first group's second tab.
+        let mut steps = vec![snapshot_step(loaded_tree.clone())];
+        append_final_focus_steps(&mut steps, &loaded_tree, 21);
+        let first_selected = focus_leaf(&loaded_tree, 21);
+
+        // While initializing the second group, the pointer hovers the visible tab of the
+        // first group. Hover cannot change a tab selection, and focus is restored.
+        let second_selected = focus_leaf(&first_selected, 22);
+        let hovered = focus_leaf(&second_selected, 21);
+        let mut select_second = command_step("[con_id=22] focus");
+        select_second.events = focus_events(&first_selected, &second_selected);
+        select_second
+            .events
+            .extend(focus_events(&second_selected, &hovered));
+        steps.extend([
+            snapshot_step(first_selected.clone()),
+            select_second,
+            snapshot_step(hovered.clone()),
+            snapshot_step(hovered.clone()),
+        ]);
+        let restored = append_focus_restoration(&mut steps, &hovered, 22);
+        steps.extend([
+            snapshot_step(restored.clone()),
+            snapshot_step(restored.clone()),
+        ]);
+
+        // Final focus returns to the configured active tab. A click on the other group's
+        // second tab changes that group's selection; restoring global focus cannot
+        // repair it, so final verification refuses it.
+        let final_tree = focus_leaf(&restored, 21);
+        let after_final = if click_other_group {
+            focus_leaf(&final_tree, 23)
+        } else {
+            final_tree.clone()
+        };
+        let mut final_focus = command_step("[con_id=21] focus");
+        final_focus.events = focus_events(&restored, &final_tree);
+        final_focus
+            .events
+            .extend(focus_events(&final_tree, &after_final));
+        steps.extend([
+            snapshot_step(restored.clone()),
+            final_focus,
+            snapshot_step(after_final.clone()),
+            snapshot_step(after_final.clone()),
+        ]);
+        if click_other_group {
+            let restored_after_click = append_focus_restoration(&mut steps, &after_final, 21);
+            steps.extend([
+                snapshot_step(restored_after_click.clone()),
+                snapshot_step(restored_after_click),
+            ]);
+        }
+
+        let result = with_completed_session(&fixture, &config, steps, |session| {
+            session.initialize_group_selection(&config.layout.value, &[])?;
+            session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &[])
+        });
+
+        let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
+        assert!(
+            log.contains("restoring id=22 (restoration 1 of 3)"),
+            "{log}"
+        );
+        if click_other_group {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("group selection id=101: expected child 1 id=22"),
+                "{error}"
+            );
+            assert!(
+                log.contains("restoring id=21 (restoration 1 of 3)"),
+                "{log}"
+            );
+        } else {
+            result.unwrap();
+            assert!(log.contains("group selections verified"), "{log}");
+        }
     }
 }

@@ -552,6 +552,13 @@ unexpected window, and change an accepted window's state. Expect no further laun
 layout mutations, with partial results left in place. Verify real keybinding launch context
 as well as delayed-terminal invocation; harness interference checks do not substitute.
 
+For in-workspace focus restoration, enable `focus_follows_mouse` and load a layout with a
+slow-starting application. In separate runs, briefly move the pointer across the target's
+windows while that application starts, just before a later launch, and during final focus.
+Expect completion with restorations recorded in `last-run.log`. Continued movement must
+stop the run after three restorations of one step, and moving the pointer onto another
+output must abort without returning focus. This live behavior remains unverified.
+
 When two outputs are available, check menu prompts stay on original output A while pointer
 and workspace focus move to B; saved captures must still describe A's pre-menu state.
 During separate loads, move the focused target workspace to another output, then test an

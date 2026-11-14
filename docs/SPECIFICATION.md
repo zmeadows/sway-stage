@@ -365,11 +365,20 @@ explicit validated workspace numbers or names:
    currently focused workspace by container identity, and retain its containing output
    identity. Both tiled and floating child lists must be empty, including empty containers.
    The individual loader never creates, selects, renames, or assigns a workspace.
-2. Observe focus throughout construction, sizing, and final focus. Switching away, even
-   briefly and back, destroys the safety precondition. Moving the target to another output,
+2. Observe focus throughout construction, sizing, and final focus. Switching to another
+   workspace, even briefly and back, destroys the safety precondition; focus is never
+   restored across workspaces or outputs. Moving the target to another output,
    including away and back, also stops construction. Missing targets, changed output
    identity, lost observations, and IPC failures are fatal. An unrelated workspace move or
    output geometry change alone is allowed if the target stays on its original output.
+   Focus moving between the run's own windows inside the target workspace, such as with
+   `focus_follows_mouse`, is recoverable. Before each focus-dependent step, and while an
+   application starts until its window appears, construction rechecks the workspace, output,
+   ownership, and hierarchy, then explicitly refocuses the required container. Each focus
+   request or launch allows at most three restorations; further changes stop the run. A
+   window that opens beside a different focused window is not moved: the resulting
+   hierarchy difference is fatal. Restoration never repairs a tabbed/stacked selection
+   changed elsewhere; final selection verification still applies.
 3. Launch once per leaf in depth-first visual order, waiting for each window before
    continuing. Only a newly observed, unclaimed window absent from all pre-launch snapshots
    can match. Matching is global: a matching new window elsewhere, including the scratchpad,
@@ -792,6 +801,7 @@ include only nonzero exit codes or terminating signals. Process exit never short
 | Workspace occupied | Invoke from a Sway keybinding on an empty workspace; the calling terminal counts as an occupant. |
 | No matching window / wrong workspace | Check executable, exact app ID/class, Sway assignment rules, and single-instance behavior. |
 | Focus/output refusal | Keep the target focused on its original output until completion; inspect partial results before retrying. |
+| Focus kept moving | Brief pointer focus changes between the target's windows are restored; avoid continued pointer movement over them until loading finishes. |
 | Draft rejected | Replace null commands/selectors and review inferred arguments, then run `check NAME`. |
 | Menu fails | Install Fuzzel 1.11+ and check Fuzzel's stderr/configuration; selection lists use index output. |
 | Proportions differ | Check gaps and application minimum sizes; substantial deviations are warnings. |
