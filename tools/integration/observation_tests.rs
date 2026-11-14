@@ -361,14 +361,14 @@ fn expected_switch_is_accepted_and_establishes_its_destination() {
 }
 
 #[test]
-fn restoration_switch_ignores_the_emptied_disposable_workspace() {
+fn return_switch_ignores_the_emptied_workspace_it_left() {
     let original = original_identity();
     let target = target_identity();
-    let restoration = ExpectedSwitch {
+    let return_switch = ExpectedSwitch {
         from_id: TARGET_WORKSPACE_ID,
         destination_name: "1".into(),
     };
-    let mut fence = FenceState::new(Some(target.clone()), Some(restoration));
+    let mut fence = FenceState::new(Some(target.clone()), Some(return_switch));
 
     fence.assert_accepts(&focus_event(&target, &original));
     // Once focus has left it, the empty disposable workspace's destruction is unrelated.

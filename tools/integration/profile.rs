@@ -145,7 +145,7 @@ pub fn verify_captured_references(yaml: &str, primary: &str, second: &str) -> Re
 }
 
 /// Existing targets keep their identity/output; missing ones may be created on any
-/// existing output according to the user's Sway rules. Move events are rejected separately.
+/// existing output according to Sway's own rules. Move events are rejected separately.
 pub struct Target {
     pub workspace: WorkspaceIdentity,
     output: Vec<(i64, Option<String>)>,

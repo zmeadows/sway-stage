@@ -17,7 +17,7 @@ pub const SLEEP: &str = "/usr/bin/sleep";
 pub const ROOT_ID: i64 = 1;
 pub const SCRATCHPAD_WORKSPACE_ID: i64 = 3;
 pub const OTHER_WORKSPACE_ID: i64 = 5;
-/// A window on the other workspace that existed before the run, such as the user's browser.
+/// A window on the other workspace that existed before the run, like the foreign fixture.
 pub const PREEXISTING_WINDOW_ID: i64 = 6;
 pub const TARGET_WORKSPACE_ID: i64 = 7;
 

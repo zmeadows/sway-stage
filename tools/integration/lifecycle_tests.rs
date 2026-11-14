@@ -877,7 +877,7 @@ fn foreign_fixture_requires_its_own_launch_evidence_for_cleanup() {
 }
 
 #[test]
-fn interrupted_or_incomplete_second_invocation_never_authorizes_cleanup_or_restoration() {
+fn interrupted_or_incomplete_second_invocation_never_counts_as_a_refusal() {
     refusal_completion(Ok(refused_output(1, &occupied_diagnostic())), false).unwrap();
     for interrupted in [false, true] {
         for reason in [

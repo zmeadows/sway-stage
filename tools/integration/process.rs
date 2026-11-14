@@ -62,22 +62,17 @@ pub fn find_executable(name: &str) -> Result<PathBuf, String> {
     let candidate = if name.contains('/') {
         Some(PathBuf::from(name)).filter(|path| is_executable_file(path))
     } else {
-        find_on_path(name)
+        let search_path = env::var_os("PATH").unwrap_or_default();
+        find_in_search_path(name, &search_path)
     }
     .ok_or_else(|| format!("required executable not found or not executable: {name}"))?;
     fs::canonicalize(&candidate)
         .map_err(|error| format!("resolve {}: {error}", candidate.display()))
 }
 
-/// Returns the first executable file `name` in an absolute `PATH` directory, without
-/// resolving symlinks, so a wrapper or multi-call link keeps the name it is invoked by.
-/// Relative `PATH` entries are skipped so the current directory can never supply one.
-pub fn find_on_path(name: &str) -> Option<PathBuf> {
-    let search_path = env::var_os("PATH").unwrap_or_default();
-    find_in_search_path(name, &search_path)
-}
-
-/// `find_on_path` over an explicit `PATH`-style list, so tests need not change `PATH`.
+/// Returns the first executable file `name` in an absolute directory of a `PATH`-style
+/// list, without resolving symlinks, so a wrapper or multi-call link keeps the name it is
+/// invoked by. Relative entries are skipped so the current directory can never supply one.
 pub fn find_in_search_path(name: &str, search_path: &OsStr) -> Option<PathBuf> {
     for directory in env::split_paths(search_path) {
         if !directory.is_absolute() {
@@ -102,17 +97,7 @@ fn is_executable_file(path: &Path) -> bool {
 /// child only. A nonzero exit reports the child's stderr. On expiry or a capture failure,
 /// the direct child is killed and reaped before the error is returned.
 pub fn run(command: Command, operation: &str, timeout: Duration) -> Result<String, String> {
-    run_bounded(command, operation, timeout)?.require_success(operation)
-}
-
-/// The same bounded runner, with exit interpretation left to an explicit refusal check.
-/// Timeouts, output failures, and interruption still return errors, never an exit result.
-pub fn run_with_status(
-    command: Command,
-    operation: &str,
-    timeout: Duration,
-) -> Result<CompletedProcess, String> {
-    run_bounded(command, operation, timeout)
+    run_with_status(command, operation, timeout)?.require_success(operation)
 }
 
 #[derive(Debug)]
@@ -135,7 +120,10 @@ impl CompletedProcess {
     }
 }
 
-fn run_bounded(
+/// Runs `command` like `run`, but returns its exit status and both outputs, leaving exit
+/// interpretation to an explicit refusal check. Timeouts, output failures, and interruption
+/// still return errors, never an exit result.
+pub fn run_with_status(
     mut command: Command,
     operation: &str,
     timeout: Duration,
@@ -338,22 +326,8 @@ impl CapturedOutput {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn interruption_is_a_stop_request_even_when_reported_repeatedly() {
-        assert!(super::require_not_interrupted(false).is_ok());
-        for _ in 0..2 {
-            assert!(
-                super::require_not_interrupted(true)
-                    .unwrap_err()
-                    .contains("interrupted")
-            );
-        }
-    }
-}
-
-/// Private terminal-child mode; deliberately bypasses the desktop harness entry point.
+/// The private first argument that selects the process probe: a terminal child that never
+/// connects to Sway.
 pub const PROBE_FLAG: &str = "--integration-process-probe";
 
 /// Inspect only direct children of the independently owned terminal, across all its
@@ -464,10 +438,24 @@ pub fn wait_probe_exit(pid: i32) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod probe_tests {
+mod tests {
     use super::*;
     use crate::fixtures::standard_scenario;
+    use std::io::Write;
     use std::os::unix::fs::symlink;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn interruption_is_a_stop_request_even_when_reported_repeatedly() {
+        assert!(require_not_interrupted(false).is_ok());
+        for _ in 0..2 {
+            assert!(
+                require_not_interrupted(true)
+                    .unwrap_err()
+                    .contains("interrupted")
+            );
+        }
+    }
 
     #[test]
     fn probe_inspection_checks_only_the_terminal_child_and_test_values() {
@@ -550,13 +538,6 @@ mod probe_tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
-}
-
-#[cfg(test)]
-mod completion_tests {
-    use super::*;
-    use std::io::Write;
-    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn default_completion_still_rejects_nonzero_status_and_retains_diagnostics() {

@@ -133,8 +133,8 @@ pub fn bind_launches(
 /// its leaf, on the target workspace in safe tiled state, with process evidence where its
 /// leaf requires it. Candidates are accepted IDs, any window anywhere matching one of the
 /// layout's app IDs, and any window on the target; any candidate that is not such an
-/// owned window is fatal. Preexisting windows elsewhere, such as the user's other windows,
-/// are expected and ignored.
+/// owned window is fatal. Preexisting windows elsewhere, such as the foreign fixture, are
+/// expected and ignored.
 pub fn verify_ownership(
     tree: &TreeNode,
     target_workspace_id: i64,
