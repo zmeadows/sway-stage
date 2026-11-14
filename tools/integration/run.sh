@@ -6,7 +6,8 @@
 #   tools/integration/run.sh --filter TEXT   run the scenarios whose names contain TEXT
 #
 # The harness parses and checks these arguments itself.
-# User-run only: agents must never execute this script. See docs/DEVELOPMENT.md.
+# The harness's only supported entry point. Contributors and agents may run it, agents under
+# the restrictions in AGENTS.md. See docs/DEVELOPMENT.md.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."

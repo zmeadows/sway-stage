@@ -153,7 +153,8 @@ Each kind of information has one home:
 - `README.md`: concise introduction, installation, quick start, and links.
 - `docs/SPECIFICATION.md`: authoritative implemented behavior, configuration contract,
   capture workflow, and troubleshooting.
-- `docs/DEVELOPMENT.md`: contributor verification and user-only manual integration procedure.
+- `docs/DEVELOPMENT.md`: contributor verification, the headless integration harness, and
+  user-only manual acceptance procedures.
 - `docs/PLAN.md`: outstanding release work and explicitly undecided ideas only.
 - `examples/`: user-facing illustrative YAML configurations, linked to the specification.
 - `tools/`: development-only Rust diagnostics and the integration harness, registered in
@@ -165,28 +166,40 @@ Each kind of information has one home:
 
 Inspect callers and failure paths before editing. Test behavior at meaningful boundaries:
 configuration fixtures, pure tree/weight calculations, and recorded IPC trees/events.
-Introduce only the smallest test seam needed. Keep automated checks non-interactive and
-independent of a live compositor. Never execute commands that modify the user's live
+Introduce only the smallest test seam needed. Keep offline checks non-interactive and
+independent of any compositor. Never execute commands that modify the user's live
 Sway session, including launching or terminating applications, changing focus, or moving
-or resizing windows. Never run `sway-stage load` or `sway-stage profile load` against the real
-compositor. All live-desktop behavioral verification must be performed manually by the user on disposable
-workspaces in their existing Sway session, following [development](docs/DEVELOPMENT.md).
+or resizing windows. Never run `sway-stage load` or `sway-stage profile load` against the
+user's compositor. All behavioral verification on the user's live desktop must be performed
+manually by the user on disposable workspaces in their existing Sway session, following
+[development](docs/DEVELOPMENT.md).
 A disposable workspace does not isolate the compositor or other workspaces.
 
 The integration harness, the `integration` Cargo example in `tools/integration/`, runs only
 through `tools/integration/run.sh`, which builds it and runs the selected scenarios in a
-private headless Sway started for that run. Both are exclusively for the user's manual
-execution. Agents must never execute either, including `--help`, `--filter`, partial runs,
-or trial runs: never run `run.sh`, `cargo run --example integration`, or the built example
-binary, and never connect the harness to any compositor. Validate it only by compilation,
-static inspection, and the offline `integration_harness` tests. That test target is a
-separate crate root without the harness entry point; its tests must never read `SWAYSOCK`,
-connect to a compositor, or start processes. The launcher gives the compositor and the
-scenario runner an environment built from nothing, never connects to the user's compositor,
-and signals only its own direct children. The harness's workspace switches and owned-window
-cleanup inside that private compositor are development-harness exceptions to the ordinary
-loader's no-switch policy and the CLI's no-close policy, not permission for agents to
-perform desktop operations.
+private headless Sway started and stopped for that run. The launcher gives the compositor
+and the scenario runner an environment built from nothing but `PATH`, never connects to the
+user's compositor, and signals only its own direct children, so starting it from a shell
+inside the user's session is safe. Agents may run the harness, but only as
+`tools/integration/run.sh` or `tools/integration/run.sh --filter TEXT` from the repository
+root. This is the only way agents may exercise sway-stage against a running compositor, and
+it permits no operation on the user's desktop.
+
+Never run `cargo run --example integration` or the built example binary directly, invoke its
+private scenario-runner or probe modes, or otherwise connect the harness, sway-stage, or any
+application it starts to the user's compositor, display, or session bus, for example through
+`SWAYSOCK`, `WAYLAND_DISPLAY`, or `DISPLAY`. Never bypass or weaken the launcher's isolation,
+readiness checks, or cleanup, or relax scenario assertions, to make a run pass. If the
+environment, such as an agent sandbox, cannot start headless Sway or create its local
+sockets, report that limitation and never fall back to the live desktop; broader execution
+permissions require the user's authorization.
+
+Also validate harness changes by compilation, static inspection, and the offline
+`integration_harness` tests. That test target is a separate crate root without the harness
+entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or start
+processes. The harness's workspace switches and owned-window cleanup inside that private
+compositor are development-harness exceptions to the ordinary loader's no-switch policy and
+the CLI's no-close policy, not permission for agents to perform desktop operations.
 
 Window cleanup must remain an explicit verified success phase that closes only windows
 independently proven to belong to the run, never a destructor or failure handler. SIGINT
@@ -224,6 +237,10 @@ cargo test --locked
 cargo build --release --locked
 cargo +1.89.0 check --locked --all-targets
 ```
+
+When a change affects loading, capture, profiles, Sway IPC, or the harness, also run the
+full `tools/integration/run.sh` suite where the environment permits; use `--filter` subsets
+only while iterating.
 
 CI is Linux-only. Report checks that could not run and meaningful limitations; do not
 install packages or toolchains without authorization. Do not commit or push unless asked.

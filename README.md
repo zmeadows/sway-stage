@@ -139,7 +139,8 @@ for common causes.
   [two terminals](examples/two-foot.yaml), [nested splits](examples/four-windows.yaml),
   [mixed native groups](examples/mixed-groups.yaml), and
   [working-directory selection](examples/working-directory.yaml).
-- [Development](docs/DEVELOPMENT.md): offline checks and user-only manual testing.
+- [Development](docs/DEVELOPMENT.md): offline checks, the headless integration suite, and
+  manual acceptance testing.
 - [Roadmap](docs/PLAN.md): remaining release work.
 - [Agent instructions](AGENTS.md): engineering and safety requirements.
 

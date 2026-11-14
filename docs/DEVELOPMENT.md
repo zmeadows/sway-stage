@@ -32,14 +32,13 @@ Some CLI fixtures bind temporary Unix sockets, which restrictive sandboxes may f
 `cargo test --locked --test integration_harness`; it has no harness entry point and must
 never read `SWAYSOCK`, connect to Sway, or start processes.
 
-## Integration harness: user only
+## Headless integration harness
 
-**AI agents must never execute the integration harness: neither `tools/integration/run.sh`
-nor the `integration` example binary, including `--filter`, help, partial, or trial runs.**
-Agents may compile them, inspect them, and run their offline tests only. Agents must never
-issue commands that mutate the user's live Sway desktop, including loads, application
-launches/termination, focus changes, or window moves/resizes. Everything below is
-exclusively for the user's manual execution.
+`tools/integration/run.sh` runs the integration suite in a private headless Sway that exists
+only for that run. Contributors and AI agents may run it; agents follow the restrictions in
+[AGENTS.md](../AGENTS.md). It never touches your own desktop. The user-only checks that do
+are under [manual application acceptance](#manual-application-acceptance) and
+[manual profile acceptance](#manual-profile-acceptance).
 
 Prerequisites: `sway`, `swaymsg`, Foot, `sleep`, and `setpriv` (util-linux) on `PATH`, plus
 `/bin/sh` and a Linux `/proc` that exposes process arguments. Foot is the only application

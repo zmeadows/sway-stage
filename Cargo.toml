@@ -41,8 +41,8 @@ path = "tools/observe_sway.rs"
 test = false
 bench = false
 
-# Development-only integration harness, run in a private headless Sway through
-# tools/integration/run.sh; user-run only.
+# Development-only integration harness, run in a private headless Sway only through
+# tools/integration/run.sh.
 [[example]]
 name = "integration"
 path = "tools/integration/main.rs"

@@ -1,6 +1,6 @@
-//! Development-only integration harness, started only by `tools/integration/run.sh`.
-//! Agents must NEVER execute this example or that script, including help, filtered, or
-//! partial runs. Only the user may run them. `offline_tests.rs` tests the pure decisions
+//! Development-only integration harness, started only by `tools/integration/run.sh`, which
+//! contributors and agents may run (agents under AGENTS.md). Never invoke this executable
+//! or its runner and probe roles directly. `offline_tests.rs` tests the pure decisions
 //! without this entry point.
 //!
 //! One executable with three roles, chosen by the first argument:

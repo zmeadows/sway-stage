@@ -8,7 +8,7 @@
 
 #![allow(
     dead_code,
-    reason = "launcher, session, IPC, process, and runner code runs only in the user-run executable"
+    reason = "launcher, session, IPC, process, and runner code runs only in the harness executable"
 )]
 
 mod capture;
