@@ -147,7 +147,7 @@ fn main() -> ExitCode {
             cli.profiles_dir,
         )
         .map_err(|error| {
-            let _ = diagnostics::notify_failure("profile capture", &error);
+            let _ = diagnostics::notify_capture_failure("profile capture", &error);
             format!("profile capture: {error}")
         }),
         Some(CliCommand::Load { name, cwd }) => load(&name, cli.layouts_dir, cwd),
@@ -332,21 +332,26 @@ fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, Stri
 /// records layout launches only. Capture does not use layout discovery.
 fn capture(infer_commands: bool) -> Result<(), String> {
     print_draft(infer_commands).map_err(|error| {
-        // notify_failure reports its own failure to stderr; the capture error stays primary.
-        let _ = diagnostics::notify_failure("capture", &error);
+        // Notification delivery failures stay secondary to the capture error.
+        let _ = diagnostics::notify_capture_failure("capture", &error);
         format!("capture: {error}")
     })
 }
 
 /// Writes the draft only once it is complete. Flushing surfaces a write error before exit.
-fn print_draft(infer_commands: bool) -> Result<(), String> {
+fn print_draft(infer_commands: bool) -> Result<(), capture::Error> {
     let draft = capture::capture(infer_commands)?;
 
     let mut stdout = io::stdout().lock();
     stdout
         .write_all(draft.yaml.as_bytes())
         .and_then(|()| stdout.flush())
-        .map_err(|error| format!("stdout: {error}"))?;
+        .map_err(|error| {
+            capture::Error::new(
+                "Could not write the captured draft to standard output. Check the output destination.",
+                format!("stdout: {error}"),
+            )
+        })?;
 
     let _ = writeln!(
         io::stderr().lock(),
@@ -422,7 +427,7 @@ fn menu(
         None
     };
 
-    let mut diagnostics = Diagnostics::start("menu");
+    let mut diagnostics = Diagnostics::start("load");
     diagnostics.stage(format!("menu load {name:?}: validation"));
     load_named_layout(
         &name,

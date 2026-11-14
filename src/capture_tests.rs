@@ -106,6 +106,70 @@ fn capture_recorded_tree(tree: Value) -> Result<String, String> {
     read_recorded_snapshot(tree)?
         .render_with(false, &mut |_| panic!("default reads no processes"))
         .map(|draft| draft.yaml)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn capture_summaries_survive_untrusted_workspace_names_and_profile_context() {
+    let private_name = "1: private <b>secret</b> \"quoted\" \\ path";
+    for (state, expected) in [
+        ("empty", "The workspace is empty."),
+        (
+            "floating",
+            "This workspace contains floating windows or containers.",
+        ),
+        (
+            "fullscreen",
+            "A container is fullscreen or its state is unavailable.",
+        ),
+        ("scratchpad", "This workspace contains a scratchpad window."),
+        (
+            "parent focus",
+            "Focus is on a container rather than a window.",
+        ),
+        (
+            "empty container",
+            "This workspace contains an empty container.",
+        ),
+        (
+            "unsupported layout",
+            "This workspace uses an unsupported container layout.",
+        ),
+    ] {
+        let mut tree = workspace_tree("splith", vec![left_window()], 20);
+        let workspace = &mut tree["nodes"][0]["nodes"][0];
+        workspace["name"] = json!(private_name);
+        match state {
+            "empty" => {
+                workspace["nodes"] = json!([]);
+                workspace["focused"] = json!(true);
+            }
+            "floating" => workspace["nodes"][0]["floating"] = json!("user_on"),
+            "fullscreen" => workspace["nodes"][0]["fullscreen_mode"] = json!(1),
+            "scratchpad" => workspace["nodes"][0]["scratchpad_state"] = json!("fresh"),
+            "parent focus" => {
+                workspace["nodes"][0]["focused"] = json!(false);
+                workspace["focused"] = json!(true);
+            }
+            "empty container" => {
+                workspace["nodes"][0]["app_id"] = Value::Null;
+                workspace["nodes"][0]["shell"] = Value::Null;
+            }
+            "unsupported layout" => workspace["layout"] = json!("none"),
+            _ => unreachable!(),
+        }
+
+        let snapshot = read_recorded_snapshot(tree).unwrap();
+        let error = snapshot
+            .render(false)
+            .unwrap_err()
+            .context(format_args!("profile capture {private_name}"));
+        assert!(error.detail.contains("secret"), "{error}");
+        let summary = error.summary.unwrap();
+        assert!(summary.starts_with(expected), "{summary}");
+        assert!(!summary.contains("secret"));
+        assert!(!summary.contains("private"));
+    }
 }
 
 /// The YAML after the explanatory header, which itself mentions both placeholders.
@@ -406,8 +470,8 @@ fn multi_child_headers_reject_unusable_or_contradictory_history_before_inference
                     panic!("invalid capture must not infer commands")
                 })
                 .unwrap_err();
-            assert!(error.contains("container id=10"), "{error}");
-            assert!(error.contains("child-focus history"), "{error}");
+            assert!(error.detail.contains("container id=10"), "{error}");
+            assert!(error.detail.contains("child-focus history"), "{error}");
         }
 
         let inner = group(30, "splith", 960, 1080, vec![left_window()]);
@@ -1105,7 +1169,7 @@ fn workspace_selection_uses_focused_ancestry_across_outputs_and_floating_nodes()
     workspace_tree["nodes"] = json!([]);
     let saved = read_recorded_snapshot(desktop).unwrap();
     assert_eq!(saved.workspace_id(), 77);
-    assert!(saved.render(false).unwrap_err().contains("floating"));
+    assert!(saved.render(false).unwrap_err().detail.contains("floating"));
 }
 
 #[test]
@@ -1810,6 +1874,7 @@ fn inactive_split_focus_rejects_unusable_references_and_structural_leaves() {
             snapshot
                 .render_workspace(10, false)
                 .unwrap_err()
+                .detail
                 .contains("child-focus history")
         );
     }
@@ -1824,6 +1889,7 @@ fn inactive_split_focus_rejects_unusable_references_and_structural_leaves() {
         snapshot
             .render_workspace(10, false)
             .unwrap_err()
+            .detail
             .contains("neither a window")
     );
 }
@@ -1858,6 +1924,7 @@ fn inactive_capture_rejects_floating_and_fullscreen_and_non_workspace_ids() {
             snapshot
                 .render_workspace(10, false)
                 .unwrap_err()
+                .detail
                 .contains(field)
         );
         assert!(snapshot.render_workspace(20, false).is_err());

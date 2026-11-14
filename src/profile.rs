@@ -296,7 +296,7 @@ fn select_workspace(
     let target_before = empty_target(&before, target)?;
     if target_before != expected_target {
         return Err(format!(
-            "workspace {target} identity or output changed since previous observation"
+            "profile target changed: workspace {target} identity or output changed since previous observation"
         ));
     }
 
@@ -446,7 +446,7 @@ fn empty_target(
         .ok_or("target workspace missing from tree")?;
     if !node.nodes.is_empty() || !node.floating_nodes.is_empty() {
         return Err(format!(
-            "workspace {target} id={} must be completely empty, including tiled/floating containers",
+            "profile target occupied: workspace {target} id={} must be completely empty, including tiled/floating containers",
             node.id
         ));
     }
@@ -483,7 +483,7 @@ fn verify_output(
     {
         if workspace.output != expected_output {
             return Err(format!(
-                "workspace {target}: expected output {expected_output:?}, observed output {:?}; {placement_help}",
+                "profile output mismatch: workspace {target}: expected output {expected_output:?}, observed output {:?}; {placement_help}",
                 workspace.output
             ));
         }
@@ -495,7 +495,7 @@ fn verify_output(
         });
         if !output_available {
             return Err(format!(
-                "workspace {target}: expected output {expected_output:?} is not active; workspace does not yet exist; {placement_help}"
+                "profile output unavailable: workspace {target}: expected output {expected_output:?} is not active; workspace does not yet exist; {placement_help}"
             ));
         }
     }

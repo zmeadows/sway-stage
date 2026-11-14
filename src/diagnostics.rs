@@ -2,7 +2,7 @@
 //!
 //! `last-run.log` is reserved for layout launches: only `Diagnostics::start` creates or
 //! replaces it. Operations that never load a selected layout report through
-//! `notify_failure` or `notify_menu_failure`, leaving the previous launch's log in place.
+//! `notify_capture_failure` or `notify_menu_failure`, leaving the previous launch's log in place.
 
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Diagnostics {
-    /// The invoked command, which names failure notifications.
+    /// The operation being performed, independent of whether it was selected in the menu.
     operation: &'static str,
     log_file: Option<File>,
     log_path: Option<PathBuf>,
@@ -210,9 +210,33 @@ pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
     send_failure_notification(operation, &failure_body(operation, message, "", false))
 }
 
+/// Capture summaries are selected where the arrangement or save failure is known.
+/// Detailed workspace names, paths, and recovered commands never enter the notification.
+pub fn notify_capture_failure(
+    operation: &str,
+    error: &crate::capture::Error,
+) -> Result<(), String> {
+    match error.summary {
+        Some(summary) => send_failure_notification(operation, summary),
+        None => notify_failure(operation, &error.detail),
+    }
+}
+
+fn capture_failure_body(operation: &str, summary: Option<&'static str>, detail: &str) -> String {
+    match summary {
+        Some(summary) => summary.to_owned(),
+        None => failure_body(operation, detail, "", false),
+    }
+}
+
 /// Menu preparation never creates a launch log, so these summaries never offer one.
 pub fn notify_menu_failure(error: &crate::menu::Error) -> Result<(), String> {
-    send_failure_notification("menu", &menu_failure_body(error))
+    let operation = match error.kind {
+        crate::menu::FailureKind::Capture(_) | crate::menu::FailureKind::DraftSave => "capture",
+        crate::menu::FailureKind::ProfileCapture(_) => "profile capture",
+        _ => "menu",
+    };
+    send_failure_notification(operation, &menu_failure_body(error))
 }
 
 fn menu_failure_body(error: &crate::menu::Error) -> String {
@@ -243,14 +267,17 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::InvalidLayout(name) => {
             return format!("Layout '{name}' is invalid. Run sway-stage check {name} for details.");
         }
-        FailureKind::Capture => {
-            "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus."
+        FailureKind::Capture(summary) => {
+            return capture_failure_body("capture", *summary, &error.detail);
         }
-        FailureKind::ProfileCapture => {
-            "Could not capture the profile. Check workspace arrangements, destination directories, and terminal output for retained files."
+        FailureKind::ProfileCapture(summary) => {
+            return capture_failure_body("profile capture", *summary, &error.detail);
         }
         FailureKind::FuzzelStart => {
             "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable."
+        }
+        FailureKind::FuzzelResponse if error.detail.starts_with("Fuzzel failed: ") => {
+            "Fuzzel failed. Check its configuration and that your Wayland session is available."
         }
         FailureKind::FuzzelResponse => {
             "Fuzzel did not return a valid choice. Check its configuration."
@@ -268,7 +295,13 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
 fn send_failure_notification(operation: &str, message: &str) -> Result<(), String> {
     notify(
         "critical",
-        &format!("sway-stage {operation} failed"),
+        match operation {
+            "load" => "Layout load failed",
+            "profile load" => "Profile load failed",
+            "capture" => "Workspace capture failed",
+            "profile capture" => "Profile capture failed",
+            _ => "Menu error",
+        },
         message,
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")))
@@ -277,38 +310,134 @@ fn send_failure_notification(operation: &str, message: &str) -> Result<(), Strin
 /// Summarize only recognized error prefixes. Never copy arbitrary diagnostic text or
 /// user-controlled names into the desktop body; terminal and log output retain them.
 fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) -> String {
-    // Loading adds a validated ASCII layout name around the underlying launch error.
-    let mut cause = error;
-    if let Some(layout_error) = error.strip_prefix("layout \"")
-        && let Some((name, inner)) = layout_error.split_once("\": ")
-        && crate::discovery::valid_name(name)
-    {
-        cause = inner;
+    // Validation errors contain paths and arbitrary parser details, so never classify
+    // their contents as runtime errors.
+    if stage.ends_with(": validation") {
+        let summary = if operation == "profile load" {
+            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
+        } else {
+            "Unable to read or validate the selected layout. Run sway-stage check NAME."
+        };
+        return with_log_reference(summary.to_owned(), log_available);
     }
-    for context in ["pre-menu workspace snapshot: ", "capture: "] {
+
+    let mut cause = error;
+    // Named load wrappers contain validated ASCII configuration names. Remove only
+    // known contexts; never search arbitrary error text for something recognizable.
+    for prefix in ["profile \"", "layout \""] {
+        if let Some(named_error) = cause.strip_prefix(prefix)
+            && let Some((name, inner)) = named_error.split_once("\": ")
+            && crate::discovery::valid_name(name)
+        {
+            cause = inner;
+        }
+    }
+    for context in [
+        "layout construction: ",
+        "workspace selection: ",
+        "pre-menu workspace snapshot: ",
+        "capture: ",
+        "snapshot: ",
+    ] {
         if let Some(inner) = cause.strip_prefix(context) {
             cause = inner;
         }
     }
 
-    let summary = if operation == "profile load" {
-        if stage.ends_with(": validation") {
-            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
-        } else {
-            "Profile loading stopped. Completed and partial layouts remain in place; see terminal output for workspace progress."
-        }
-    } else if stage.ends_with(": validation") {
-        "Unable to read or validate the selected layout. Check its configuration."
-    } else if cause.starts_with("window timeout: ") {
-        "The expected window was not ready in time. Check its launch command or window selector."
-    } else if cause.starts_with("workspace focus changed from target id=")
-        || cause.starts_with("snapshot: focus left target id=")
+    let summary = recognized_failure_summary(cause).unwrap_or(match operation {
+        "load" => "Unable to finish loading the layout.",
+        "profile load" => "Unable to finish loading the profile.",
+        "capture" => "Unable to capture the workspace.",
+        "profile capture" => "Unable to capture the profile.",
+        _ => "Unable to complete the menu action.",
+    });
+
+    with_log_reference(summary.to_owned(), log_available)
+}
+
+/// These prefixes belong to internal error producers, before any untrusted details.
+/// Capture arrangement errors instead carry a safe summary alongside their detail.
+fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
+    let summary = if cause.starts_with("window timeout: ") {
+        "The expected window was not ready in time. Check its launch command, exact app ID/class, and single-instance behavior."
+    } else if cause.starts_with("placement failure: wrong workspace: ") {
+        "A window for this layout opened on another workspace. Check Sway's window assignment rules."
+    } else if cause.starts_with("matching window was in the scratchpad: ") {
+        "A window for this layout opened in the scratchpad instead of the target workspace."
+    } else if cause.starts_with("placement failure: unknown workspace: ") {
+        "A matching window's workspace could not be determined. Loading stopped because its placement is uncertain."
+    } else if cause.starts_with("ambiguous new windows id=") {
+        "Multiple new windows match the expected application. Use a more specific app ID/class or a command that opens one window."
+    } else if cause.starts_with("matching window was floating/fullscreen: ")
+        || cause.starts_with("matching window has unusable tiled state: ")
     {
-        "Loading stopped because the target workspace lost focus."
+        "A matching window is floating, fullscreen, or has unknown fullscreen state. Loading requires tiled windows; check application settings and Sway rules."
+    } else if cause.starts_with("unexpected target-workspace window id=")
+        || cause.starts_with("unexpected floating/fullscreen/scratchpad window id=")
+    {
+        "An unexpected window appeared in the target workspace. Check the layout's app ID/class and Sway rules."
+    } else if cause.starts_with("preexisting window id=") {
+        "A preexisting window entered the target workspace. Keep other windows off the target while loading."
+    } else if cause.starts_with("workspace focus changed from target id=")
+        || cause.starts_with("focus left target id=")
+        || cause.starts_with("focused workspace id=")
+    {
+        "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes."
+    } else if cause.starts_with("target workspace id=") {
+        "Loading stopped because the target workspace changed outputs. Keep it on its original output until loading finishes."
+    } else if cause.starts_with("target workspace was destroyed")
+        || cause.starts_with("target workspace missing")
+    {
+        "The target workspace is no longer available. Check workspace state and retry."
     } else if cause.starts_with("target workspace must be completely empty") {
-        "The target workspace is occupied. Load on an empty workspace."
+        "The target workspace is occupied. Load on an empty workspace, including no floating windows or empty containers."
+    } else if cause.starts_with("profile target occupied: ") {
+        "A workspace targeted by the profile is occupied. All profile targets must be empty, including floating windows and empty containers."
+    } else if cause.starts_with("profile output mismatch: ") {
+        "A profile workspace is on a different output than configured. Check the profile's output expectations and Sway workspace placement rules."
+    } else if cause.starts_with("profile output unavailable: ") {
+        "An output required by the profile is not active. Connect or enable it, or update the profile's output expectation."
+    } else if cause.starts_with("profile target changed: ")
+        || cause.starts_with("unexpected focused workspace or containing output")
+        || cause.starts_with("workspace completion: focused workspace")
+        || cause.starts_with("unexpected workspace change ")
+        || cause.starts_with("selected workspace identity or output differs")
+    {
+        "Workspace identity, focus, or output changed during profile loading. Keep workspaces unchanged until loading finishes."
+    } else if cause.starts_with("workspace reload: ") {
+        "Sway's configuration reloaded during loading. Retry after the reload finishes."
+    } else if cause.starts_with("selected workspace number ")
+        || cause.starts_with("workspace selection: expected ")
+        || cause.starts_with("expected focus event was not observed")
+        || cause.starts_with("expected workspace creation event was not observed")
+    {
+        "Sway's workspace selection could not be verified. Check for workspace changes and retry."
+    } else if cause.starts_with("workspace snapshot: ")
+        || cause.starts_with("expected exactly one focused workspace")
+        || cause.starts_with("workspace/tree focus is inconsistent")
+        || cause.starts_with("invalid root or duplicate container identities")
+        || cause.starts_with("duplicate workspace identities")
+    {
+        "Sway reported inconsistent workspace identities or focus. Retry when workspace state is stable."
     } else if cause.starts_with("spawn application: ") {
-        "Unable to start an application. Check its launch command and working directory."
+        "Unable to start an application. Check its executable, launch command, working directory, and permissions."
+    } else if cause.starts_with("Sway command failed: ")
+        || cause.starts_with("workspace command rejected: ")
+        || cause.starts_with("workspace command: ")
+    {
+        "Sway rejected a command or returned an unexpected reply. Check Sway's configuration and compatibility."
+    } else if cause.starts_with("window activity ") || cause.starts_with("window move id=") {
+        "Window activity made loading unsafe. Keep windows unchanged until loading finishes."
+    } else if cause.starts_with("new/accepted window") {
+        "A newly observed window closed before its placement could be verified. Check application behavior and retry."
+    } else if cause.starts_with("matching window changed identity") {
+        "A window's app ID/class changed during loading. Use a stable, exact selector."
+    } else if cause.starts_with("accepted window") || cause.starts_with("matched window") {
+        "A layout window closed or changed identity, placement, or tiled state. Keep layout windows unchanged until loading finishes."
+    } else if cause.starts_with("unexpected hierarchy at ")
+        || cause.starts_with("invalid hierarchy state ")
+    {
+        "The workspace hierarchy differs from the expected layout. Check Sway rules and keep windows unchanged while loading."
     } else if [
         "connect: SWAYSOCK ",
         "connect to SWAYSOCK: ",
@@ -316,24 +445,36 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
         "subscribe to workspace/window/tick: ",
         "get tree: ",
         "get workspaces: ",
+        "clone event socket: ",
+        "clone query socket: ",
+        "clone command socket: ",
+        "configure event socket: ",
+        "start event reader: ",
+        "start snapshot reader: ",
+        "start capture reader: ",
+        "start command reader: ",
         "read Sway event: ",
-        "command IPC ",
+        "command IPC",
+        "command deadline/channel failure: ",
         "snapshot deadline/channel failure: ",
         "tree deadline/channel failure: ",
+        "event reader ",
+        "event stream ended",
+        "event history ",
+        "snapshot event history ",
+        "new-window history ",
+        "event fence deadline ",
+        "send observation fence: ",
+        "Sway rejected observation fence",
     ]
     .iter()
     .any(|prefix| cause.starts_with(prefix))
     {
-        "Unable to communicate with Sway."
+        "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."
     } else {
-        match operation {
-            "load" => "Unable to finish loading the layout.",
-            "capture" => "Unable to capture the workspace. See terminal output for details.",
-            _ => "Unable to complete the menu action.",
-        }
+        return None;
     };
-
-    with_log_reference(summary.to_owned(), log_available)
+    Some(summary)
 }
 
 fn with_log_reference(summary: String, log_available: bool) -> String {
@@ -545,31 +686,31 @@ mod tests {
         for (error, expected) in [
             (
                 "layout \"development\": window timeout: elapsed=10000ms observed=[]",
-                "The expected window was not ready in time. Check its launch command or window selector.",
+                "The expected window was not ready in time. Check its launch command, exact app ID/class, and single-instance behavior.",
             ),
             (
                 "layout \"development\": workspace focus changed from target id=7",
-                "Loading stopped because the target workspace lost focus.",
+                "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes.",
             ),
             (
                 "snapshot: focus left target id=7",
-                "Loading stopped because the target workspace lost focus.",
+                "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes.",
             ),
             (
                 "connect to SWAYSOCK: connection refused",
-                "Unable to communicate with Sway.",
+                "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.",
             ),
             (
                 "pre-menu workspace snapshot: get tree: connection closed",
-                "Unable to communicate with Sway.",
+                "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.",
             ),
             (
                 "spawn application: executable missing; child PATH and cwd",
-                "Unable to start an application. Check its launch command and working directory.",
+                "Unable to start an application. Check its executable, launch command, working directory, and permissions.",
             ),
             (
                 "target workspace must be completely empty, including tiled/floating containers",
-                "The target workspace is occupied. Load on an empty workspace.",
+                "The target workspace is occupied. Load on an empty workspace, including no floating windows or empty containers.",
             ),
             (
                 "unexpected failure: window timeout: untrusted text",
@@ -581,6 +722,87 @@ mod tests {
                 failure_body("load", error, "wait", true),
                 format!("{expected}\n\nSee last-run.log for details.")
             );
+        }
+    }
+
+    #[test]
+    fn runtime_causes_survive_layout_and_profile_context_without_copying_details() {
+        #[rustfmt::skip]
+        let cases = [
+            ("placement failure: wrong workspace: matching window id=20", "opened on another workspace"),
+            ("placement failure: unknown workspace: matching window id=20", "workspace could not be determined"),
+            ("matching window was in the scratchpad: id=20", "opened in the scratchpad instead"),
+            ("ambiguous new windows id=20 and id=21", "Multiple new windows match"),
+            ("matching window was floating/fullscreen: id=20", "Loading requires tiled windows"),
+            ("matching window has unusable tiled state: id=20", "unknown fullscreen state"),
+            ("unexpected target-workspace window id=20", "An unexpected window appeared"),
+            ("unexpected floating/fullscreen/scratchpad window id=20", "An unexpected window appeared"),
+            ("preexisting window id=20 entered target workspace", "A preexisting window entered"),
+            ("snapshot: focused workspace id=11 differs from pre-menu workspace id=10", "target workspace lost focus"),
+            ("target workspace id=10 moved to another output", "target workspace changed outputs"),
+            ("snapshot: target workspace id=10 changed output from id=2 to id=3", "target workspace changed outputs"),
+            ("target workspace was destroyed", "target workspace is no longer available"),
+            ("profile target occupied: workspace 3", "All profile targets must be empty"),
+            ("profile output mismatch: workspace 3", "different output than configured"),
+            ("profile output unavailable: workspace 3", "output required by the profile is not active"),
+            ("profile target changed: workspace 3", "Workspace identity, focus, or output changed"),
+            ("unexpected workspace change Focus id=10", "Workspace identity, focus, or output changed"),
+            ("workspace reload: revalidation required", "configuration reloaded"),
+            ("workspace snapshot: ambiguous workspace identities or numbers", "inconsistent workspace identities or focus"),
+            ("workspace selection: expected focus event was not observed", "workspace selection could not be verified"),
+            ("spawn application: missing executable", "Unable to start an application"),
+            ("workspace command rejected: denied", "Sway rejected a command"),
+            ("Sway command failed: rejected", "Sway rejected a command"),
+            ("window activity id=20 during prelaunch fence", "Window activity made loading unsafe"),
+            ("accepted window id=20 disappeared", "A layout window closed or changed"),
+            ("new/accepted window id=20 closed", "A newly observed window closed"),
+            ("matching window changed identity after a nonmatching identity: id=20", "app ID/class changed during loading"),
+            ("unexpected hierarchy at id=10", "hierarchy differs from the expected layout"),
+            ("command deadline/channel failure: timeout", "Unable to communicate with Sway"),
+            ("snapshot: event fence deadline expired", "Unable to communicate with Sway"),
+            ("event reader disconnected; history cannot be trusted", "Unable to communicate with Sway"),
+        ];
+        for (cause, expected) in cases {
+            let detail = format!("{cause}: /private/<b>secret</b>");
+            for (operation, error) in [
+                ("load", format!("layout \"work\": {detail}")),
+                (
+                    "profile load",
+                    format!("profile \"work\": layout construction: {detail}"),
+                ),
+                (
+                    "profile load",
+                    format!("profile \"work\": workspace selection: {detail}"),
+                ),
+            ] {
+                let body = failure_body(operation, &error, "runtime", false);
+                assert!(body.contains(expected), "{error}: {body}");
+                assert!(!body.contains("secret"), "{body}");
+                assert!(!body.contains("/private"), "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn validation_and_unknown_errors_do_not_guess_at_runtime_causes() {
+        assert_eq!(
+            failure_body(
+                "profile load",
+                "spawn application: untrusted parser text",
+                "profile: validation",
+                false
+            ),
+            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
+        );
+        for operation in ["load", "profile load", "capture", "profile capture", "menu"] {
+            let body = failure_body(
+                operation,
+                "unrecognized: spawn application: /private",
+                "runtime",
+                false,
+            );
+            assert!(!body.contains("start an application"));
+            assert!(!body.contains("/private"));
         }
     }
 
@@ -601,7 +823,7 @@ mod tests {
                 &stage,
                 false
             ),
-            "Unable to read or validate the selected layout. Check its configuration."
+            "Unable to read or validate the selected layout. Run sway-stage check NAME."
         );
         assert_eq!(
             failure_body(
@@ -610,7 +832,7 @@ mod tests {
                 "",
                 false
             ),
-            "Unable to capture the workspace. See terminal output for details."
+            "Unable to capture the workspace."
         );
     }
 
@@ -626,8 +848,8 @@ mod tests {
             FailureKind::NoActions,
             FailureKind::NoLayouts,
             FailureKind::NoValidLayouts,
-            FailureKind::Capture,
-            FailureKind::ProfileCapture,
+            FailureKind::Capture(None),
+            FailureKind::ProfileCapture(None),
             FailureKind::FuzzelStart,
             FailureKind::FuzzelResponse,
             FailureKind::DraftSave,

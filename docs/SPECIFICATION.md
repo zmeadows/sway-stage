@@ -744,6 +744,11 @@ notifications through `notify-send`. Sizing warnings also notify. Missing notifi
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
 notification refers to `last-run.log` only when logging remains available for that attempt.
+Titles identify layout loading, profile loading, workspace capture, or profile capture,
+including operations selected through Fuzzel; failures of the menu itself use `Menu error`.
+Recognized failures explain window placement (including scratchpad placement), matching,
+tiled-state requirements, focus/output changes, profile preflight refusals, or unsupported
+capture arrangements without copying raw diagnostic text into notifications.
 Pre-load menu failures identify unavailable layouts/profiles, invalid selections, capture, or Fuzzel problems,
 save failures, or working-directory selection problems without exposing paths or technical
 error chains. Successful loads do not notify; saved menu captures retain their save

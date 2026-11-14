@@ -31,6 +31,49 @@ const DRAFT_HEADER: &str = "\
 # the enclosing split. Validate the edited file with `sway-stage check NAME`.
 ";
 
+/// A safe desktop summary travels separately from detailed workspace/container diagnostics.
+/// Unclassified errors keep their full detail for stderr and use the operation's fallback.
+#[derive(Debug)]
+pub struct Error {
+    pub summary: Option<&'static str>,
+    pub detail: String,
+}
+
+impl Error {
+    pub fn new(summary: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            summary: Some(summary),
+            detail: detail.into(),
+        }
+    }
+
+    pub fn context(mut self, context: impl std::fmt::Display) -> Self {
+        self.detail = format!("{context}: {}", self.detail);
+        self
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl From<String> for Error {
+    fn from(detail: String) -> Self {
+        Self {
+            summary: None,
+            detail,
+        }
+    }
+}
+
+impl From<&str> for Error {
+    fn from(detail: &str) -> Self {
+        detail.to_owned().into()
+    }
+}
+
 /// YAML and command counts from the same generated layout.
 #[derive(Debug, PartialEq)]
 pub struct RenderedDraft {
@@ -251,7 +294,7 @@ impl Snapshot {
     }
 
     /// Validates and renders only saved Sway state. Process arguments remain best-effort.
-    pub fn render(&self, infer_commands: bool) -> Result<RenderedDraft, String> {
+    pub fn render(&self, infer_commands: bool) -> Result<RenderedDraft, Error> {
         self.render_workspace(self.target_workspace_id, infer_commands)
     }
 
@@ -260,7 +303,7 @@ impl Snapshot {
         &self,
         workspace_id: i64,
         infer_commands: bool,
-    ) -> Result<RenderedDraft, String> {
+    ) -> Result<RenderedDraft, Error> {
         self.render_workspace_with(workspace_id, infer_commands, &mut read_process_command)
     }
 
@@ -269,7 +312,7 @@ impl Snapshot {
         &self,
         infer_commands: bool,
         read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
-    ) -> Result<RenderedDraft, String> {
+    ) -> Result<RenderedDraft, Error> {
         self.render_workspace_with(self.target_workspace_id, infer_commands, read_command)
     }
 
@@ -278,7 +321,7 @@ impl Snapshot {
         workspace_id: i64,
         infer_commands: bool,
         read_command: &mut dyn FnMut(i32) -> Option<Vec<String>>,
-    ) -> Result<RenderedDraft, String> {
+    ) -> Result<RenderedDraft, Error> {
         let captured = capture_workspace(self, workspace_id)?;
         let mut infer_window_command = |container_id| {
             if !infer_commands {
@@ -326,7 +369,7 @@ fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapsho
 }
 
 /// Returns a complete draft in memory, so a failed capture cannot print partial YAML.
-pub fn capture(infer_commands: bool) -> Result<RenderedDraft, String> {
+pub fn capture(infer_commands: bool) -> Result<RenderedDraft, Error> {
     snapshot()?.render(infer_commands)
 }
 
@@ -363,21 +406,27 @@ enum Selector {
 
 /// Converts the target workspace's tiled hierarchy, refusing anything the layout format
 /// cannot represent rather than approximating it.
-fn capture_workspace(snapshot: &Snapshot, workspace_id: i64) -> Result<CapturedWorkspace, String> {
+fn capture_workspace(snapshot: &Snapshot, workspace_id: i64) -> Result<CapturedWorkspace, Error> {
     let workspace = snapshot
         .tree
         .find_as_ref(|node| node.id == workspace_id && node.node_type == NodeType::Workspace)
         .ok_or("target workspace missing from tree")?;
     let name = workspace.name.as_deref().unwrap_or_default();
-    let in_workspace = |error: String| format!("workspace {name:?}: {error}");
+    let in_workspace = |error: Error| error.context(format_args!("workspace {name:?}"));
 
     if workspace.nodes.is_empty() && workspace.floating_nodes.is_empty() {
-        return Err(in_workspace("empty; there is nothing to capture".into()));
+        return Err(in_workspace(Error::new(
+            "The workspace is empty. Open tiled windows before capturing.",
+            "empty; there is nothing to capture",
+        )));
     }
     if !workspace.floating_nodes.is_empty() {
-        return Err(in_workspace(format!(
-            "{} floating container(s); the layout format has only tiled windows, so tile or move them and retry",
-            workspace.floating_nodes.len()
+        return Err(in_workspace(Error::new(
+            "This workspace contains floating windows or containers. Use only tiled windows before capturing.",
+            format!(
+                "{} floating container(s); the layout format has only tiled windows, so tile or move them and retry",
+                workspace.floating_nodes.len()
+            ),
         )));
     }
 
@@ -415,32 +464,41 @@ fn capture_group(
     group: &Node,
     layout_depth: usize,
     layout_node_count: &mut usize,
-) -> Result<CapturedNode, String> {
+) -> Result<CapturedNode, Error> {
     let layout = match group.layout {
         NodeLayout::SplitH => GroupLayout::SplitH,
         NodeLayout::SplitV => GroupLayout::SplitV,
         NodeLayout::Tabbed => GroupLayout::Tabbed,
         NodeLayout::Stacked => GroupLayout::Stacked,
         layout => {
-            return Err(format!(
-                "container id={} has unsupported layout {layout:?}",
-                group.id
+            return Err(Error::new(
+                "This workspace uses an unsupported container layout. Use splits, tabs, or stacks.",
+                format!(
+                    "container id={} has unsupported layout {layout:?}",
+                    group.id
+                ),
             ));
         }
     };
 
     let is_split = matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV);
     match group.nodes.as_slice() {
-        [] => Err(format!(
-            "container id={} holds neither a window nor child containers",
-            group.id
+        [] => Err(Error::new(
+            "This workspace contains an empty container. Remove it before capturing.",
+            format!(
+                "container id={} holds neither a window nor child containers",
+                group.id
+            ),
         )),
         [only_child] if is_split => capture_node(only_child, layout_depth, layout_node_count),
         children => {
             count_layout_node(layout_depth, layout_node_count)?;
             let split_extents_pixels = if is_split {
                 let extents = sibling_dimensions(group).map_err(|error| {
-                    format!("container id={} has unusable geometry: {error}", group.id)
+                    Error::new(
+                        "Window sizes could not be read reliably. Retry after the workspace settles.",
+                        format!("container id={} has unusable geometry: {error}", group.id),
+                    )
                 })?;
                 Some(extents)
             } else {
@@ -471,7 +529,7 @@ fn capture_group(
 }
 
 /// Uses direct-child history even when keyboard focus is outside this group.
-fn capture_active_child(group: &Node) -> Result<usize, String> {
+fn capture_active_child(group: &Node) -> Result<usize, Error> {
     if group.nodes.len() == 1 {
         return Ok(1);
     }
@@ -481,11 +539,14 @@ fn capture_active_child(group: &Node) -> Result<usize, String> {
 
 /// Shared tab/stack selection and inactive-workspace focus descent. A singleton needs
 /// no ordering information, but any supplied references must still identify its child.
-fn selected_tiled_child(group: &Node) -> Result<usize, String> {
+fn selected_tiled_child(group: &Node) -> Result<usize, Error> {
     let unusable_history = || {
-        format!(
-            "container id={} has unusable child-focus history; cannot determine the selected tiled child",
-            group.id
+        Error::new(
+            "The selected window or tab could not be determined reliably. Select a window and retry.",
+            format!(
+                "container id={} has unusable child-focus history; cannot determine the selected tiled child",
+                group.id
+            ),
         )
     };
     if group.nodes.len() == 1 && group.focus.is_empty() {
@@ -510,9 +571,12 @@ fn selected_tiled_child(group: &Node) -> Result<usize, String> {
 
     for (child_index, child) in group.nodes.iter().enumerate() {
         if child_index != selected_child_index && child.find_as_ref(|node| node.focused).is_some() {
-            return Err(format!(
-                "container id={} has child-focus history contradicting keyboard focus",
-                group.id
+            return Err(Error::new(
+                "The selected window or tab could not be determined reliably. Select a window and retry.",
+                format!(
+                    "container id={} has child-focus history contradicting keyboard focus",
+                    group.id
+                ),
             ));
         }
     }
@@ -525,18 +589,22 @@ fn capture_node(
     container: &Node,
     layout_depth: usize,
     layout_node_count: &mut usize,
-) -> Result<CapturedNode, String> {
+) -> Result<CapturedNode, Error> {
     let container_id = container.id;
     match container.node_type {
         NodeType::Con => {}
         NodeType::FloatingCon => {
-            return Err(format!(
-                "container id={container_id} is floating; the layout format has only tiled windows"
+            return Err(Error::new(
+                "This workspace contains floating windows or containers. Use only tiled windows before capturing.",
+                format!(
+                    "container id={container_id} is floating; the layout format has only tiled windows"
+                ),
             ));
         }
         node_type => {
-            return Err(format!(
-                "unsupported Sway node type {node_type:?} at id={container_id}"
+            return Err(Error::new(
+                "This workspace contains an unsupported container type.",
+                format!("unsupported Sway node type {node_type:?} at id={container_id}"),
             ));
         }
     }
@@ -546,14 +614,20 @@ fn capture_node(
         Some(Floating::AutoOn | Floating::UserOn)
     );
     if floating || !container.floating_nodes.is_empty() {
-        return Err(format!(
-            "container id={container_id} is or holds a floating window; the layout format has only tiled windows"
+        return Err(Error::new(
+            "This workspace contains floating windows or containers. Use only tiled windows before capturing.",
+            format!(
+                "container id={container_id} is or holds a floating window; the layout format has only tiled windows"
+            ),
         ));
     }
 
     if container.fullscreen_mode != Some(0) {
-        return Err(format!(
-            "container id={container_id} is fullscreen or reports no fullscreen state; exit fullscreen and retry"
+        return Err(Error::new(
+            "A container is fullscreen or its state is unavailable. Exit fullscreen and retry.",
+            format!(
+                "container id={container_id} is fullscreen or reports no fullscreen state; exit fullscreen and retry"
+            ),
         ));
     }
 
@@ -561,8 +635,11 @@ fn capture_node(
         container.scratchpad_state,
         Some(ScratchpadState::Fresh | ScratchpadState::Changed)
     ) {
-        return Err(format!(
-            "container id={container_id} belongs to the scratchpad; remove it from the scratchpad and retry"
+        return Err(Error::new(
+            "This workspace contains a scratchpad window. Remove it from the scratchpad before capturing.",
+            format!(
+                "container id={container_id} belongs to the scratchpad; remove it from the scratchpad and retry"
+            ),
         ));
     }
 
@@ -573,8 +650,9 @@ fn capture_node(
         return capture_group(container, layout_depth, layout_node_count);
     }
     if !container.nodes.is_empty() {
-        return Err(format!(
-            "window id={container_id} unexpectedly holds child containers"
+        return Err(Error::new(
+            "The window hierarchy cannot be represented as a layout.",
+            format!("window id={container_id} unexpectedly holds child containers"),
         ));
     }
 
@@ -593,16 +671,22 @@ fn capture_node(
 
 /// Counts one emitted layout node against the limits `check` and `load` enforce, so a
 /// filled-in draft can always be loaded. Collapsed wrappers are not layout nodes.
-fn count_layout_node(layout_depth: usize, layout_node_count: &mut usize) -> Result<(), String> {
+fn count_layout_node(layout_depth: usize, layout_node_count: &mut usize) -> Result<(), Error> {
     *layout_node_count += 1;
     if layout_depth > MAX_LAYOUT_DEPTH {
-        return Err(format!(
-            "the arrangement nests deeper than the layout format's {MAX_LAYOUT_DEPTH} levels"
+        return Err(Error::new(
+            "This arrangement exceeds the layout depth limit. Simplify it before capturing.",
+            format!(
+                "the arrangement nests deeper than the layout format's {MAX_LAYOUT_DEPTH} levels"
+            ),
         ));
     }
     if *layout_node_count > MAX_LAYOUT_NODES {
-        return Err(format!(
-            "the arrangement has more than the layout format's {MAX_LAYOUT_NODES} windows and groups"
+        return Err(Error::new(
+            "This arrangement has too many windows and groups. Capture a smaller layout.",
+            format!(
+                "the arrangement has more than the layout format's {MAX_LAYOUT_NODES} windows and groups"
+            ),
         ));
     }
 
@@ -676,7 +760,7 @@ fn render_draft(
     captured: &CapturedWorkspace,
     infer_commands: bool,
     infer_window_command: &mut dyn FnMut(i64) -> Option<Vec<String>>,
-) -> Result<RenderedDraft, String> {
+) -> Result<RenderedDraft, Error> {
     let mut draft_window_ids = HashMap::new();
     let mut commands = CommandCounts {
         total: 0,
@@ -693,9 +777,12 @@ fn render_draft(
         &mut commands,
     );
     let focus = draft_window_ids.remove(&captured.focused_container_id).ok_or_else(|| {
-        format!(
-            "focus is on container id={} rather than a window, for example after `focus parent`; focus a window and retry",
-            captured.focused_container_id
+        Error::new(
+            "Focus is on a container rather than a window. Focus a window and retry.",
+            format!(
+                "focus is on container id={} rather than a window, for example after `focus parent`; focus a window and retry",
+                captured.focused_container_id
+            ),
         )
     })?;
 

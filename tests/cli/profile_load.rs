@@ -365,9 +365,7 @@ fn assert_failure(fixture: &CliFixture, output: &Output, expected: &str, complet
     );
     let notifications = fs::read_to_string(fixture.path.join("notifications")).unwrap();
     assert_eq!(
-        notifications
-            .matches("sway-stage profile load failed")
-            .count(),
+        notifications.matches("Profile load failed").count(),
         1,
         "{notifications}"
     );
@@ -518,7 +516,69 @@ fn preflight_refuses_occupied_later_targets_and_insufficient_observations() {
         };
         let output = run(&fixture, vec![step], false);
         assert_failure(&fixture, &output, expected, 0);
+        if matches!(
+            scenario,
+            "window" | "empty-container" | "floating-container"
+        ) {
+            let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+            assert!(notification.contains("All profile targets must be empty"));
+        }
         assert!(!fixture.path.join("launches").exists());
+    }
+}
+
+#[test]
+fn profile_window_placement_notifications_distinguish_other_workspaces_and_scratchpad() {
+    for scratchpad in [false, true] {
+        let fixture = fixture();
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+        steps.extend([snapshot(&selected), snapshot(&selected)]);
+
+        let mut misplaced = selected.clone();
+        if scratchpad {
+            let mut scratch_window = window(20, false);
+            scratch_window["floating"] = json!("user_on");
+            let mut scratch_workspace = sway_node(99, "workspace", 100, vec![]);
+            scratch_workspace["name"] = json!("__i3_scratch");
+            scratch_workspace["num"] = json!(-1);
+            scratch_workspace["floating_nodes"] = json!([scratch_window]);
+            let mut internal_output = sway_node(4, "output", 100, vec![scratch_workspace]);
+            internal_output["name"] = json!("__i3");
+            misplaced["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(internal_output);
+        } else {
+            misplaced["nodes"][0]["nodes"][0]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(window(20, false));
+        }
+        steps.push(snapshot(&misplaced));
+
+        let output = run(&fixture, steps, false);
+        assert_failure(
+            &fixture,
+            &output,
+            if scratchpad {
+                "scratchpad"
+            } else {
+                "wrong workspace"
+            },
+            0,
+        );
+        let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+        let expected = if scratchpad {
+            "A window for this layout opened in the scratchpad instead of the target workspace."
+        } else {
+            "A window for this layout opened on another workspace. Check Sway's window assignment rules."
+        };
+        assert!(notification.contains(expected), "{notification}");
+        assert!(!notification.contains("profile-test"));
+        assert!(!notification.contains(fixture.path.to_str().unwrap()));
     }
 }
 
@@ -708,6 +768,8 @@ fn failure_on_second_layout_retains_first_and_partial_windows_without_selecting_
         };
         let output = run(&fixture, steps, false);
         assert_failure(&fixture, &output, "layout construction", 1);
+        let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+        assert!(notification.contains("Multiple new windows match the expected application."));
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
             error.contains(if named {
@@ -1257,7 +1319,7 @@ fn unified_menu_profile_preflights_all_targets_before_any_selection() {
     assert!(!fixture.path.join("launches").exists());
     let notifications = fs::read_to_string(fixture.path.join("notification")).unwrap();
     assert_eq!(notifications.matches("--app-name=sway-stage").count(), 1);
-    assert!(notifications.contains("sway-stage profile load failed"));
+    assert!(notifications.contains("Profile load failed"));
     let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
     assert!(log.contains("completed 0 workspaces"), "{log}");
 }
@@ -1341,6 +1403,15 @@ fn output_preflight_rejects_first_later_and_missing_targets_without_launching() 
         };
         let output = run(&fixture, vec![snapshot(&initial)], false);
         assert_failure(&fixture, &output, expected, 0);
+        let notification = fs::read_to_string(fixture.path.join("notifications")).unwrap();
+        assert!(
+            notification.contains(if expected == "observed output" {
+                "A profile workspace is on a different output than configured."
+            } else {
+                "An output required by the profile is not active."
+            }),
+            "{notification}"
+        );
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(
             error.contains(&format!("workspace {target}: expected output")),

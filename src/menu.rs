@@ -31,8 +31,8 @@ pub enum FailureKind {
     NoLayouts,
     NoValidLayouts,
     InvalidLayout(String),
-    Capture,
-    ProfileCapture,
+    Capture(Option<&'static str>),
+    ProfileCapture(Option<&'static str>),
     FuzzelStart,
     FuzzelResponse,
     DraftSave,
@@ -87,7 +87,7 @@ pub fn select_action(
         Ok(snapshot) => match snapshot.render(false) {
             Ok(_) => choices.push((MenuAction::Capture, true)),
             Err(error) => unavailable.push(Error::new(
-                FailureKind::Capture,
+                FailureKind::Capture(error.summary),
                 format!("capture unavailable: {error}"),
             )),
         },
@@ -109,7 +109,7 @@ pub fn select_action(
                 choices.insert(profile_capture_index, (MenuAction::CaptureProfile, true));
             }
             Err(error) => unavailable.push(Error::new(
-                FailureKind::ProfileCapture,
+                FailureKind::ProfileCapture(error.summary),
                 format!("profile capture unavailable: {error}"),
             )),
         }
@@ -325,9 +325,12 @@ pub fn capture_draft(
     infer_commands: bool,
 ) -> Result<(), Error> {
     // Render the pre-menu state without querying Sway again.
-    let draft = snapshot
-        .render(infer_commands)
-        .map_err(|error| Error::new(FailureKind::Capture, format!("capture: {error}")))?;
+    let draft = snapshot.render(infer_commands).map_err(|error| {
+        Error::new(
+            FailureKind::Capture(error.summary),
+            format!("capture: {error}"),
+        )
+    })?;
     let mut placeholder = None;
     loop {
         let Some(name) = fuzzel(
@@ -363,13 +366,15 @@ pub fn capture_profile(
     profiles_dir: Option<PathBuf>,
     infer_commands: bool,
 ) -> Result<(), Error> {
-    let profile_error = |error| Error::new(FailureKind::ProfileCapture, error);
+    let profile_error = |error: capture::Error| {
+        Error::new(FailureKind::ProfileCapture(error.summary), error.detail)
+    };
     let prepared =
         profile_capture::prepare(snapshot, &[], true, infer_commands).map_err(profile_error)?;
-    let layouts_directory =
-        discovery::LayoutDirectory::resolve(layouts_dir).map_err(profile_error)?;
+    let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)
+        .map_err(|error| profile_error(error.into()))?;
     let (profiles_directory, _) =
-        profile::profile_directory(profiles_dir).map_err(profile_error)?;
+        profile::profile_directory(profiles_dir).map_err(|error| profile_error(error.into()))?;
 
     let mut placeholder = None;
     loop {
@@ -392,7 +397,7 @@ pub fn capture_profile(
             Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {
                 placeholder = Some(name_error_placeholder(&name, &error));
             }
-            Err(error) => return Err(profile_error(error.to_string())),
+            Err(error) => return Err(profile_error(profile_capture::save_error(error))),
         }
     }
 }

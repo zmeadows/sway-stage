@@ -796,7 +796,9 @@ fn delayed_identity_without_event_and_existing_matching_window_elsewhere() {
 fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail() {
     for scenario in [
         "wrong-workspace",
+        "unknown-workspace",
         "scratchpad",
+        "floating-scratchpad",
         "ambiguous-match",
         "unexpected-window",
         "preexisting-window",
@@ -812,15 +814,25 @@ fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail(
                     empty_workspace_tree(),
                     wayland_window(20, Some("expected")),
                 ),
-                "wrong workspace",
+                "placement failure: wrong workspace:",
             ),
-            "scratchpad" => {
+            "scratchpad" | "floating-scratchpad" => {
                 let mut bad = with_window_on_other_workspace(
                     empty_workspace_tree(),
                     wayland_window(20, Some("expected")),
                 );
                 bad["nodes"][0]["nodes"][1]["name"] = json!("__i3_scratch");
-                (bad, "scratchpad")
+                if scenario == "floating-scratchpad" {
+                    bad["nodes"][0]["nodes"][1]["nodes"][0]["floating"] = json!("user_on");
+                }
+                (bad, "matching window was in the scratchpad:")
+            }
+            "unknown-workspace" => {
+                let mut bad = empty_workspace_tree();
+                let mut unlocated = wayland_window(20, Some("expected"));
+                unlocated["focused"] = json!(false);
+                bad["nodes"].as_array_mut().unwrap().push(unlocated);
+                (bad, "placement failure: unknown workspace:")
             }
             "ambiguous-match" => {
                 let mut other = wayland_window(21, Some("expected"));

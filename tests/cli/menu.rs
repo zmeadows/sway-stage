@@ -411,10 +411,14 @@ fn selections_and_subprocess_errors_notify_without_starting_launch_diagnostics()
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(expected), "{stderr}");
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage menu failed"));
+        assert!(notification.contains("Menu error"));
         assert_preload_notification(
             &fixture,
-            "Fuzzel did not return a valid choice. Check its configuration.",
+            if status == "1" || status == "7" {
+                "Fuzzel failed. Check its configuration and that your Wayland session is available."
+            } else {
+                "Fuzzel did not return a valid choice. Check its configuration."
+            },
         );
         assert!(!fixture.path.join(".config").exists());
     }
@@ -454,10 +458,10 @@ fn exact_load_selection_uses_existing_validation_and_launch_diagnostics() {
         assert!(log.contains("connect"));
         assert!(!log.contains("previous launch"));
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage menu failed"));
+        assert!(notification.contains("Layout load failed"));
         assert!(
             notification
-                .contains("Unable to communicate with Sway.\n\nSee last-run.log for details.")
+                .contains("Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.\n\nSee last-run.log for details.")
         );
         assert!(!fixture.path.join("name-opened").exists());
     }
@@ -884,7 +888,7 @@ fn save_collisions_and_directory_failures_preserve_files_and_the_launch_log() {
         }
         if obstacle == "dangling layouts link" {
             let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-            assert!(notification.contains("sway-stage menu failed"));
+            assert!(notification.contains("Workspace capture failed"));
             assert!(!notification.contains("command:"));
             assert_preload_notification(
                 &fixture,
@@ -1116,7 +1120,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
         assert!(!log.contains("launch leaf="), "{log}");
         assert!(!log.contains("command replies"), "{log}");
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage menu failed"));
+        assert!(notification.contains("Layout load failed"));
         assert!(!fixture.path.join("name-opened").exists());
         assert_eq!(
             fs::read_to_string(fixture.path.join("outputs")).unwrap(),
@@ -1529,14 +1533,42 @@ fn capture_action_skips_layout_discovery() {
 
 #[test]
 fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
-    for (arrangement, reason) in [
-        ("floating", "tile or move"),
-        ("fullscreen", "exit fullscreen"),
-        ("empty container", "holds neither"),
-        ("parent focus", "focus a window"),
-        ("unsupported layout", "unsupported layout"),
-        ("geometry", "unusable geometry"),
-        ("tab selection", "child-focus history"),
+    for (arrangement, reason, summary) in [
+        (
+            "floating",
+            "tile or move",
+            "This workspace contains floating windows or containers. Use only tiled windows before capturing.",
+        ),
+        (
+            "fullscreen",
+            "exit fullscreen",
+            "A container is fullscreen or its state is unavailable. Exit fullscreen and retry.",
+        ),
+        (
+            "empty container",
+            "holds neither",
+            "This workspace contains an empty container. Remove it before capturing.",
+        ),
+        (
+            "parent focus",
+            "focus a window",
+            "Focus is on a container rather than a window. Focus a window and retry.",
+        ),
+        (
+            "unsupported layout",
+            "unsupported layout",
+            "This workspace uses an unsupported container layout. Use splits, tabs, or stacks.",
+        ),
+        (
+            "geometry",
+            "unusable geometry",
+            "Window sizes could not be read reliably. Retry after the workspace settles.",
+        ),
+        (
+            "tab selection",
+            "child-focus history",
+            "The selected window or tab could not be determined reliably. Select a window and retry.",
+        ),
     ] {
         let fixture = CliFixture::new();
         prepare_menu_fixture(&fixture);
@@ -1591,10 +1623,49 @@ fn unrepresentable_workspaces_fail_before_fuzzel_with_capture_guidance() {
                 .to_string_lossy()
                 .ends_with(".partial")
         }));
+        assert_preload_notification(&fixture, summary);
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(notification.contains("\nWorkspace capture failed\n"));
+    }
+}
+
+#[test]
+fn standalone_captures_preserve_safe_summaries_without_replacing_the_launch_log() {
+    for profile_capture in [false, true] {
+        let fixture = CliFixture::new();
+        prepare_menu_fixture(&fixture);
+        let mut tree = profile_capture_tree(false);
+        // Numeric workspaces may have arbitrary descriptive names. Neither these nor
+        // the generated destination paths belong in the desktop notification.
+        let workspace = &mut tree["nodes"][0]["nodes"][0];
+        workspace["name"] = json!("3: private <b>secret</b>");
+        workspace["floating_nodes"] = workspace["nodes"].take();
+        workspace["nodes"] = json!([]);
+
+        let mut process = menu_command(&fixture, "", "");
+        if profile_capture {
+            process.args(["profile", "capture", "work", "--all", "--no-infer-commands"]);
+        } else {
+            process.args(["capture", "--no-infer-commands"]);
+        }
+        let output = run_with_recorded_snapshot(&fixture, &mut process, tree);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty());
         assert_preload_notification(
             &fixture,
-            "Cannot capture this workspace. Check floating or fullscreen windows, containers, and window focus.",
+            "This workspace contains floating windows or containers. Use only tiled windows before capturing.",
         );
+        let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+        assert!(
+            notification.contains(if profile_capture {
+                "\nProfile capture failed\n"
+            } else {
+                "\nWorkspace capture failed\n"
+            }),
+            "{notification}"
+        );
+        assert!(!notification.contains("secret"));
+        assert!(!fixture.path.join("name-opened").exists());
     }
 }
 
@@ -1894,9 +1965,9 @@ fn identical_layout_and_profile_names_dispatch_by_index() {
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(
             notification.contains(if selection == "0\n" {
-                "sway-stage menu failed"
+                "Layout load failed"
             } else {
-                "sway-stage profile load failed"
+                "Profile load failed"
             }),
             "{notification}"
         );
@@ -2168,6 +2239,9 @@ fn profile_capture_operational_errors_stop_and_notification_errors_remain_second
         assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
         assert_eq!(notification.contains("Saved profile"), !fail_publication);
         if fail_publication {
+            assert!(notification.contains("\nProfile capture failed\n"));
+            assert!(notification.contains("Could not save the profile capture."));
+            assert!(!notification.contains(fixture.path.to_str().unwrap()));
             assert!(stderr.contains("no configuration published"), "{stderr}");
             assert!(stderr.contains("staging files may remain"), "{stderr}");
             assert!(!fixture.path.join("layouts/work-001.yaml").exists());

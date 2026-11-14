@@ -1393,7 +1393,7 @@ impl NewWindowTracker<'_> {
             self.matched_window_id = Some(node.id);
             if let Some(reason) = self.disqualified_windows.get(&node.id) {
                 return Err(format!(
-                    "matching window id={} {reason}; refusing repair",
+                    "matching window {reason}: id={}; refusing repair",
                     node.id,
                 ));
             }
@@ -1500,7 +1500,13 @@ impl NewWindowTracker<'_> {
                 "workspace={:?} scratchpad={} floating={}",
                 located.workspace_id, located.scratchpad, located.floating
             );
-            if located.floating || located.fullscreen {
+            // A matching window already fails for scratchpad placement. Prefer that
+            // proven location over the generic floating reason without adding history
+            // restrictions to windows whose selector has not matched.
+            if located.scratchpad && matches_window(self.matcher, node) {
+                self.disqualified_windows
+                    .insert(node.id, "was in the scratchpad");
+            } else if located.floating || located.fullscreen {
                 self.disqualified_windows
                     .insert(node.id, "was floating/fullscreen");
             }
@@ -1516,14 +1522,19 @@ impl NewWindowTracker<'_> {
 
             if matches_window(self.matcher, node) {
                 if located.workspace_id != Some(self.target_workspace_id) || located.scratchpad {
+                    let placement = if located.workspace_id.is_some() {
+                        "wrong workspace"
+                    } else {
+                        "unknown workspace"
+                    };
                     return Err(format!(
-                        "placement failure: matching window id={} on wrong workspace or scratchpad ({location}); expected workspace={}; check Sway assignment rules and activation context",
+                        "placement failure: {placement}: matching window id={} ({location}); expected workspace={}; check Sway assignment rules and activation context",
                         node.id, self.target_workspace_id
                     ));
                 }
                 if located.floating || located.fullscreen || node.fullscreen_mode != Some(0) {
                     return Err(format!(
-                        "matching window id={} is floating/fullscreen or fullscreen state is unknown",
+                        "matching window has unusable tiled state: id={} is floating/fullscreen or fullscreen state is unknown",
                         node.id
                     ));
                 }

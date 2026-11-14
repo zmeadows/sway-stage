@@ -81,9 +81,19 @@ pub fn capture(
     infer_commands: bool,
     layouts_dir: Option<PathBuf>,
     profiles_dir: Option<PathBuf>,
-) -> Result<(), String> {
-    validate_name(name)?;
-    let targets = parse_targets(arguments, all)?;
+) -> Result<(), capture::Error> {
+    validate_name(name).map_err(|error| {
+        capture::Error::new(
+            "Invalid profile capture name. Use letters, digits, underscores, or hyphens; at most 246 characters.",
+            error,
+        )
+    })?;
+    let targets = parse_targets(arguments, all).map_err(|error| {
+        capture::Error::new(
+            "Invalid or duplicate workspace targets. Use distinct workspace numbers or exact supported names.",
+            error,
+        )
+    })?;
     let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)?.path;
     let (profiles_directory, _) = profile::profile_directory(profiles_dir)?;
 
@@ -91,8 +101,24 @@ pub fn capture(
     let prepared = prepare(&snapshot, &targets, all, infer_commands)?;
     prepared
         .save(name, &layouts_directory, &profiles_directory)
-        .map_err(|error| error.to_string())?;
+        .map_err(save_error)?;
     Ok(())
+}
+
+/// Save errors already distinguish rejected names and conflicts from operational failures.
+pub fn save_error(error: DraftSaveError) -> capture::Error {
+    let summary = match &error {
+        DraftSaveError::InvalidName(_) => {
+            "Invalid profile capture name. Use letters, digits, underscores, or hyphens; at most 246 characters."
+        }
+        DraftSaveError::NameConflict(_) => {
+            "A profile or generated layout already uses this name. Choose another profile name."
+        }
+        DraftSaveError::Operational(_) => {
+            "Could not save the profile capture. Check destination permissions and available storage; files may have been retained."
+        }
+    };
+    capture::Error::new(summary, error.to_string())
 }
 
 /// Complete rendered layouts retained across interactive name retries.
@@ -106,10 +132,15 @@ pub fn prepare(
     targets: &[WorkspaceTarget],
     all: bool,
     infer_commands: bool,
-) -> Result<PreparedCapture, String> {
+) -> Result<PreparedCapture, capture::Error> {
     let selected = snapshot
         .select_workspaces(targets, all)
-        .map_err(|error| format!("selection: {error}"))?;
+        .map_err(|error| {
+            capture::Error::new(
+                "Cannot select workspaces for capture. Check that targets exist, use supported names, and include populated workspaces.",
+                format!("selection: {error}"),
+            )
+        })?;
     let mut drafts = Vec::new();
     let mut commands = CommandCounts {
         total: 0,
@@ -119,7 +150,7 @@ pub fn prepare(
     for (target, workspace_id) in selected {
         let draft = snapshot
             .render_workspace(workspace_id, infer_commands)
-            .map_err(|error| format!("render workspace {target}: {error}"))?;
+            .map_err(|error| error.context(format_args!("render workspace {target}")))?;
         commands.total += draft.commands.total;
         commands.inferred += draft.commands.inferred;
         drafts.push((target, draft));

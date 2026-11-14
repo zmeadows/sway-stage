@@ -498,7 +498,7 @@ fn list_and_check_never_contact_sway_log_or_notify_even_on_failure() {
     assert!(fixture.path.join("state/sway-stage/last-run.log").exists());
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
     assert!(
-        notification.contains("Unable to communicate with Sway."),
+        notification.contains("Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."),
         "{notification}"
     );
 }
@@ -631,11 +631,11 @@ fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary
         "{notification}"
     );
     assert!(
-        notification.contains("\n--\nsway-stage load failed\n"),
+        notification.contains("\n--\nLayout load failed\n"),
         "{notification}"
     );
     assert!(
-        notification.contains("Unable to communicate with Sway.\n\nSee last-run.log for details.")
+        notification.contains("Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.\n\nSee last-run.log for details.")
     );
     assert!(!notification.contains("SWAYSOCK"));
     assert!(!notification.contains(fixture.path.to_str().unwrap()));
@@ -657,7 +657,7 @@ fn load_errors_notify_with_literal_arguments_and_logging_failure_stays_secondary
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-    assert!(notification.contains("Unable to communicate with Sway."));
+    assert!(notification.contains("Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."));
     assert!(!notification.contains("last-run.log"));
     assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
 
@@ -976,11 +976,11 @@ fn capture_failures_notify_without_touching_the_launch_log() {
         assert!(!stderr.contains("log:"), "{stderr}");
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert!(
-            notification.contains("\n--\nsway-stage capture failed\n"),
+            notification.contains("\n--\nWorkspace capture failed\n"),
             "{notification}"
         );
         assert!(
-            notification.contains("Unable to communicate with Sway."),
+            notification.contains("Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."),
             "{notification}"
         );
         assert!(!notification.contains("last-run.log"), "{notification}");
