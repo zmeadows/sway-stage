@@ -320,17 +320,18 @@ impl<'a> Construction<'a> {
         }
     }
 
-    /// Runs one command request between settled, fully verified snapshots and requires the
-    /// result to match `expected_after`. A command whose effect depends on focus must
+    /// Runs `commands` as one request between settled, fully verified snapshots and requires
+    /// the result to match `expected_after`. A command whose effect depends on focus must
     /// establish that focus earlier in the same request; see `with_workspace_focus`.
     fn guarded_command(
         &mut self,
-        command: String,
+        commands: &[String],
         expected_after: ExpectedHierarchy,
     ) -> Result<Snapshot, String> {
-        self.diagnostics.stage(format!("command {command}"));
+        self.diagnostics
+            .stage(format!("command {}", commands.join("; ")));
         self.settled_snapshot()?;
-        run_checked_command(self.connect, self.diagnostics, command)?;
+        run_checked_command(self.connect, self.diagnostics, commands)?;
 
         self.expected_hierarchy = expected_after;
         let after_command = self.settled_snapshot()?;
@@ -346,7 +347,7 @@ impl<'a> Construction<'a> {
     fn focus_container(&mut self, path: &[usize]) -> Result<Snapshot, String> {
         let container_id = self.expected_hierarchy.subtree_mut(path).id();
         let mut after_command = self.guarded_command(
-            format!("[con_id={container_id}] focus"),
+            &[format!("[con_id={container_id}] focus")],
             self.expected_hierarchy.clone(),
         )?;
 
@@ -373,11 +374,13 @@ impl<'a> Construction<'a> {
     /// after the criteria commands fail. If the child closes or moves just before Sway runs
     /// the request, that command acts on whatever is focused then, possibly outside the
     /// target. Checking every reply and the resulting hierarchy only detects this afterward.
-    fn with_workspace_focus(&mut self, criteria_free_command: &str) -> String {
+    fn with_workspace_focus(&mut self, criteria_free_command: &str) -> Vec<String> {
         let direct_child_id = self.expected_hierarchy.subtree_mut(&[0]).id();
-        format!(
-            "[con_id={direct_child_id}] focus; [con_id={direct_child_id}] focus parent; {criteria_free_command}"
-        )
+        vec![
+            format!("[con_id={direct_child_id}] focus"),
+            format!("[con_id={direct_child_id}] focus parent"),
+            criteria_free_command.to_owned(),
+        ]
     }
 
     fn initialize_group_selection(
@@ -551,7 +554,9 @@ impl<'a> Construction<'a> {
                 child_path.push(child_index);
                 let child_id = self.expected_hierarchy.subtree_mut(&child_path).id();
                 snapshot = self.guarded_command(
-                    format!("[con_id={child_id}] resize set {axis} {target_extent_pixels:.0} px"),
+                    &[format!(
+                        "[con_id={child_id}] resize set {axis} {target_extent_pixels:.0} px"
+                    )],
                     self.expected_hierarchy.clone(),
                 )?;
 
@@ -639,7 +644,7 @@ impl<'a> Construction<'a> {
 
         let mut expected_after = self.expected_hierarchy.clone();
         let group_path;
-        let command;
+        let commands;
         if first_path.is_empty() {
             // The first completed child occupies the workspace. workspace_split wraps
             // its populated children, preserving even equal-axis meaningful groups.
@@ -662,7 +667,7 @@ impl<'a> Construction<'a> {
                 layout: split_layout,
                 children: vec![wrapped_children],
             };
-            command = self.with_workspace_focus(split_command);
+            commands = self.with_workspace_focus(split_command);
             group_path = Vec::new();
         } else {
             let first_id = self.expected_hierarchy.subtree_mut(&first_path).id();
@@ -685,9 +690,9 @@ impl<'a> Construction<'a> {
                 *parent_layout = group_layout;
                 group_path = parent_path.to_vec();
                 if parent_is_split && matches!(layout, GroupLayout::SplitH | GroupLayout::SplitV) {
-                    command = format!("[con_id={first_id}] {split_command}");
+                    commands = vec![format!("[con_id={first_id}] {split_command}")];
                 } else {
-                    command = self.with_workspace_focus(&format!("layout {layout_command}"));
+                    commands = self.with_workspace_focus(&format!("layout {layout_command}"));
                 }
             } else {
                 let first_child_hierarchy = expected_after.subtree_mut(&first_path).clone();
@@ -697,7 +702,7 @@ impl<'a> Construction<'a> {
                     children: vec![first_child_hierarchy],
                 };
                 group_path = first_path;
-                command = format!("[con_id={first_id}] {split_command}");
+                commands = vec![format!("[con_id={first_id}] {split_command}")];
             }
         }
 
@@ -705,7 +710,7 @@ impl<'a> Construction<'a> {
             "expected group/reparent transition {:?} -> {expected_after:?}",
             self.expected_hierarchy
         ));
-        self.guarded_command(command, expected_after)?;
+        self.guarded_command(&commands, expected_after)?;
 
         let ExpectedHierarchy::Group {
             layout: observed_layout,
@@ -719,13 +724,13 @@ impl<'a> Construction<'a> {
             // child's parent. This parent's siblings number at least two, preventing
             // layout.c's singleton-grandparent flattening. At the root, operate on the
             // workspace itself so layout cannot introduce an extra workspace wrapper.
-            let command = if group_path.is_empty() {
+            let commands = if group_path.is_empty() {
                 self.with_workspace_focus(&format!("layout {layout_command}"))
             } else {
                 let mut first_child_path = group_path.clone();
                 first_child_path.push(0);
                 let first_child_id = self.expected_hierarchy.subtree_mut(&first_child_path).id();
-                format!("[con_id={first_child_id}] layout {layout_command}")
+                vec![format!("[con_id={first_child_id}] layout {layout_command}")]
             };
 
             let mut expected_after = self.expected_hierarchy.clone();
@@ -734,7 +739,7 @@ impl<'a> Construction<'a> {
                 unreachable!("constructed group");
             };
             *layout = group_layout;
-            self.guarded_command(command, expected_after)?;
+            self.guarded_command(&commands, expected_after)?;
         }
 
         for (child_index, child) in children.iter().enumerate().skip(1) {
@@ -1136,16 +1141,27 @@ pub(crate) fn run_command(
     }
 }
 
-/// Sends one command request and requires a success reply for every command in it.
+/// Sends `commands` as one request and requires exactly one success reply per command.
+/// Sway replies once for every command it runs and stops early only after an invalid one,
+/// so any other reply count means the request was not handled as sent.
 fn run_checked_command(
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
-    command: String,
+    commands: &[String],
 ) -> Result<(), String> {
-    let replies = run_command(connect()?, command, Instant::now() + IPC_TIMEOUT)?;
+    let request = commands.join("; ");
+    let replies = run_command(connect()?, request, Instant::now() + IPC_TIMEOUT)?;
     diagnostics.record(&format!("command replies: {replies:?}"));
-    if replies.is_empty() || replies.iter().any(Result::is_err) {
+
+    if replies.iter().any(Result::is_err) {
         return Err(format!("Sway command failed: {replies:?}"));
+    }
+    if replies.len() != commands.len() {
+        return Err(format!(
+            "Sway command failed: reply count {} differs from command count {}: {replies:?}",
+            replies.len(),
+            commands.len()
+        ));
     }
 
     Ok(())
@@ -1175,7 +1191,7 @@ fn restore_focus(
         "focus moved within the target workspace; restoring id={container_id} (restoration {} of {MAX_FOCUS_RESTORATIONS})",
         *focus_restorations
     ));
-    run_checked_command(connect, diagnostics, command)
+    run_checked_command(connect, diagnostics, &[command])
 }
 
 fn is_focused(tree: &Node, container_id: i64) -> bool {

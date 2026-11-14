@@ -1325,9 +1325,14 @@ fn arranged_tree(layout: &str, children: Vec<Value>, focused: i64) -> Value {
     value
 }
 
+// Sway replies once for each `;`-separated command in a request.
 fn command_step(command: &str) -> IpcStep {
     let mut value = snapshot_step(empty_workspace_tree());
-    value.command = Some((command.into(), json!([{"success": true}])));
+    let replies: Vec<_> = command
+        .split(';')
+        .map(|_| json!({"success": true}))
+        .collect();
+    value.command = Some((command.into(), json!(replies)));
     value
 }
 
@@ -1741,6 +1746,7 @@ fn nested_first_child_wraps_populated_workspace_and_preserves_equal_axis_groups(
 fn construction_failures_stop_before_another_launch() {
     for scenario in [
         "empty-replies",
+        "extra-reply",
         "rejected-reply",
         "unchanged-hierarchy",
         "missing-window",
@@ -1770,11 +1776,15 @@ fn construction_failures_stop_before_another_launch() {
         let expected = match scenario {
             "empty-replies" => {
                 command.command.as_mut().unwrap().1 = json!([]);
-                "command failed"
+                "reply count 0 differs from command count 1"
+            }
+            "extra-reply" => {
+                command.command.as_mut().unwrap().1 = json!([{"success": true}, {"success": true}]);
+                "reply count 2 differs from command count 1"
             }
             "rejected-reply" => {
                 command.command.as_mut().unwrap().1 =
-                    json!([{"success": true}, {"success": false, "error": "fixture rejection"}]);
+                    json!([{"success": false, "error": "fixture rejection"}]);
                 "fixture rejection"
             }
             "unchanged-hierarchy" => {
@@ -3734,7 +3744,14 @@ fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_laun
 
 #[test]
 fn workspace_layout_request_still_verifies_target_replies_and_result() {
-    for scenario in ["target-moved", "rejected-focus", "redirected-layout"] {
+    for scenario in [
+        "target-moved",
+        "rejected-focus",
+        "stopped-early",
+        "missing-reply",
+        "extra-reply",
+        "redirected-layout",
+    ] {
         let fixture = LaunchFixture::new();
         let config = layout_config(
             &fixture,
@@ -3765,6 +3782,27 @@ fn workspace_layout_request_still_verifies_target_replies_and_result() {
                     {"success": true}
                 ]);
                 "No matching node"
+            }
+            "stopped-early" => {
+                // Only an invalid command stops Sway early, and its own reply reports it.
+                command.command.as_mut().unwrap().1 = json!([
+                    {"success": true},
+                    {"success": false, "parse_error": true, "error": "Unknown/invalid command"}
+                ]);
+                "Unknown/invalid command"
+            }
+            "missing-reply" => {
+                command.command.as_mut().unwrap().1 = json!([{"success": true}, {"success": true}]);
+                "reply count 2 differs from command count 3"
+            }
+            "extra-reply" => {
+                command.command.as_mut().unwrap().1 = json!([
+                    {"success": true},
+                    {"success": true},
+                    {"success": true},
+                    {"success": true}
+                ]);
+                "reply count 4 differs from command count 3"
             }
             _ => {
                 // Sway accepted the request, but the layout reached a window's new
