@@ -1,6 +1,6 @@
 # Reusable project terminals; requires Foot. See ../docs/SPECIFICATION.md.
 # Customize ~/projects to an existing directory containing the desired project subdirectories.
-version: 1
+version: 1  # ← Required; do not remove
 cwd: ~/projects
 # sway-stage menu offers cwd itself followed by its immediate child directories.
 # Direct load uses cwd as configured unless --cwd PATH overrides it; it never prompts.

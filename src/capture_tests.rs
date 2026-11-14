@@ -115,6 +115,11 @@ fn draft_body(draft: &str) -> &str {
 
 /// Fills the placeholders as a user would, then applies the strict validator `check` uses.
 fn parse_filled_draft(draft: &str) -> Config {
+    assert!(
+        draft
+            .lines()
+            .any(|line| line == "version: 1  # ← Required; do not remove")
+    );
     let edited = draft
         .replace("command: null", "command: [app]")
         .replace("match: null", "match: {app_id: filled}");
@@ -178,7 +183,7 @@ fn single_window_is_a_root_leaf_with_explicit_focus() {
     assert_eq!(tree["nodes"][0]["nodes"][0]["fullscreen_mode"], 1);
 
     let expected = "\
-version: 1
+version: 1  # ← Required; do not remove
 focus: window1
 layout:
   id: window1
@@ -203,7 +208,7 @@ fn two_windows_record_axis_order_proportions_and_non_first_focus() {
         21,
     );
     let expected = "\
-version: 1
+version: 1  # ← Required; do not remove
 focus: window2
 layout:
   group: splith

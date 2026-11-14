@@ -162,6 +162,12 @@ impl PreparedCapture {
             serde_saphyr::ser_options! { compact_list_indent: false },
         )
         .map_err(|error| format!("render profile: {error}"))?;
+        // Version is the first field; annotate only its line, leaving all serialized data intact.
+        let profile_yaml = profile_yaml.replacen(
+            "version: 1\n",
+            "version: 1  # ← Required; do not remove\n",
+            1,
+        );
         let profile_header = format!(
             "# Captured drafts: edit unresolved commands/matches, then run `sway-stage profile check {name}`.\n"
         );

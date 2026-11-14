@@ -101,10 +101,10 @@ fn explicit_numbers_names_and_mixed_targets_keep_order_and_independent_focus() {
         let fixture = CliFixture::new();
         let output = run_capture(&fixture, tree(), &arguments, 0);
         assert!(output.stdout.is_empty());
-        let profile: Value = serde_saphyr::from_str(
-            &fs::read_to_string(fixture.path.join("profiles/work.yaml")).unwrap(),
-        )
-        .unwrap();
+        let profile_yaml = fs::read_to_string(fixture.path.join("profiles/work.yaml")).unwrap();
+        assert!(profile_yaml.contains("\nversion: 1  # ← Required; do not remove\n"));
+        let profile: Value = serde_saphyr::from_str(&profile_yaml).unwrap();
+        assert_eq!(profile["version"], 1);
         for (index, target) in expected.iter().enumerate() {
             let name = format!("work-{:03}", index + 1);
             assert_eq!(profile["workspaces"][index]["workspace"], *target);
@@ -115,7 +115,9 @@ fn explicit_numbers_names_and_mixed_targets_keep_order_and_independent_focus() {
                 0o600
             );
             let yaml = fs::read_to_string(path).unwrap();
+            assert!(yaml.contains("\nversion: 1  # ← Required; do not remove\n"));
             let draft: Value = serde_saphyr::from_str(&yaml).unwrap();
+            assert_eq!(draft["version"], 1);
             assert_eq!(draft["focus"], "window2");
             if target.is_string() {
                 assert_eq!(draft["layout"]["active"], 2);

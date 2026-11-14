@@ -712,6 +712,12 @@ fn render_draft(
             format!("serialize draft: {error}")
         }
     })?;
+    // Version is the first field; annotate only its line, leaving all serialized data intact.
+    let yaml = yaml.replacen(
+        "version: 1\n",
+        "version: 1  # ← Required; do not remove\n",
+        1,
+    );
     let inference_header = if infer_commands { INFERENCE_HEADER } else { "" };
 
     Ok(RenderedDraft {

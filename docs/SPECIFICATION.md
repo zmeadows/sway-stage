@@ -196,7 +196,7 @@ For example, save this as `work.yaml` in the profiles directory, with the three 
 layouts in the layouts directory:
 
 ```yaml
-version: 1
+version: 1  # ← Required; do not remove
 workspaces:
   - workspace: 1
     layout: development
@@ -423,6 +423,10 @@ the loader refuses rather than moving it. IPC observations and commands are not 
 these safeguards do not provide isolation from concurrent desktop activity.
 
 ## Capture workflow
+
+Generated layouts and profiles annotate the required version field as
+`version: 1  # ← Required; do not remove`. The comment is a reminder; the integer `version`
+field remains required, and YAML parsers ignore the comment.
 
 Capture records an arrangement as a draft, not a restorable session. From a terminal in the
 arrangement, or a keybinding, run `sway-stage capture > draft.yaml`. To exclude your terminal,

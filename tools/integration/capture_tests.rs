@@ -82,6 +82,19 @@ fn matching_default_capture_is_filled_for_check() {
 }
 
 #[test]
+fn generated_version_reminder_preserves_capture_validation() {
+    let scenario = standard_scenario("horizontal-pair");
+    let draft = horizontal_pair_draft().replacen(
+        "version: 1\n",
+        "version: 1  # ← Required; do not remove\n",
+        1,
+    );
+    let filled = verify_capture(&draft, &scenario, &horizontal_pair_measurements()).unwrap();
+    let document: serde_json::Value = serde_saphyr::from_str(&filled).unwrap();
+    assert_eq!(document["version"], 1);
+}
+
+#[test]
 fn nested_capture_matches_the_measured_hierarchy() {
     let scenario = standard_scenario("mixed-nesting");
     let shares = [

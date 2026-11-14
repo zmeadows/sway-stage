@@ -2,7 +2,7 @@
 # Width ratios 44:32:24, right-column height ratios 77:23, and final browser focus.
 # Adapt Firefox's executable and exact app_id to your installation (or use class for Xwayland).
 # See ../docs/SPECIFICATION.md for the configuration contract.
-version: 1
+version: 1  # ← Required; do not remove
 focus: browser
 layout:
   group: splith

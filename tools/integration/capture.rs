@@ -17,12 +17,16 @@ const WEIGHT_TOLERANCE: f64 = 0.02;
 const IDENTIFIER_KEYS: [&str; 5] = ["id", "focus", "app_id", "class", "group"];
 
 /// The lines of a draft that carry content: blank and comment lines are dropped and
-/// trailing whitespace is removed.
+/// trailing whitespace and the generated version reminder are removed.
 pub fn capture_lines(draft: &str) -> Vec<&str> {
     draft
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.is_empty() && !line.trim_start().starts_with('#'))
+        .map(|line| match line {
+            "version: 1  # ← Required; do not remove" => "version: 1",
+            _ => line,
+        })
         .collect()
 }
 

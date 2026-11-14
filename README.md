@@ -32,7 +32,7 @@ Save this as `~/.config/sway-stage/layouts/dev.yaml` (create the directory first
 under `$XDG_CONFIG_HOME/sway-stage/layouts` if you set `XDG_CONFIG_HOME`:
 
 ```yaml
-version: 1
+version: 1  # ← Required; do not remove
 focus: shell
 layout:
   group: splith

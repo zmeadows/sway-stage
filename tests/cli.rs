@@ -839,7 +839,9 @@ fn capture_prints_only_a_draft_that_check_accepts_once_filled_in() {
     let draft = drafts.remove(0);
     assert!(draft.starts_with("# Layout draft from `sway-stage capture`."));
     assert!(
-        draft.contains("version: 1\nfocus: window1\nlayout:\n  group: splith\n"),
+        draft.contains(
+            "version: 1  # ← Required; do not remove\nfocus: window1\nlayout:\n  group: splith\n"
+        ),
         "{draft}"
     );
     let placeholders = |placeholder: &str| {

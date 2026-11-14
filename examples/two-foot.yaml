@@ -1,6 +1,6 @@
 # Minimal splith layout; requires Foot. Distinct --app-id values match each new terminal.
 # Equal widths; final focus defaults to the left window. See ../docs/SPECIFICATION.md.
-version: 1
+version: 1  # ← Required; do not remove
 layout:
   group: splith
   children:
