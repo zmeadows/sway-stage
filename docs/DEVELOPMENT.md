@@ -95,9 +95,7 @@ profile SKIPs. The flag also works with `--extended`.
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
 | `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables four profile scenarios after the other scenarios, while the foreign fixture stays alive. |
-| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, unresolved-command, and two optional package-inference cases. |
-| `--appimage PATH` | Enable real AppImage inference with an existing executable; requires `--extended`. |
-| `--flatpak APP_ID` | Enable real Flatpak inference with an installed application ID; requires `--extended`. |
+| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, and unresolved-command cases. |
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
 | `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
@@ -131,13 +129,11 @@ updates the empty workspace directly.
 
 Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
 commands. Expect twenty passes and four profile SKIPs for the standard two-workspace suite.
-Extended runs add eight cases, for twenty-eight total, plus the separate foreign fixture.
-With the original optional prerequisites available, an extended run without package flags
-reports twenty-six passes, two package SKIPs, and four profile SKIPs; supplying one package
-enables twenty-seven possible passes, and both enable twenty-eight. Other missing optional
-prerequisites still produce explicit SKIPs.
+Extended runs add six cases, for twenty-six total, plus the separate foreign fixture.
+With all optional prerequisites available, an extended run reports twenty-six passes and
+four profile SKIPs; missing optional prerequisites produce explicit SKIPs.
 
-With `--profile-workspace`, add four passes (twenty-four standard, or up to thirty-two
+With `--profile-workspace`, add four passes (twenty-four standard, or up to thirty
 extended) and remove the four profile SKIPs. Expected failures count as passes only after
 independent verification, and the summary reports profile scenarios separately:
 
@@ -300,93 +296,6 @@ cannot be restored and verified, its directory is retained and reported for manu
 all windows remain untouched. This case adds no standard-suite dependencies and requires
 no application packages.
 
-The seventh and eighth extended cases, `appimage-inference` and `flatpak-inference`, are
-optional real-package capture checks. Supply either flag independently, or both; the other
-package case prints `SKIP ... --appimage not supplied` or `SKIP ... --flatpak not supplied`.
-Both flags require `--extended`; Clap rejects either without it before contacting Sway.
-No package downloads, installation, desktop entries, or app-ID/class overrides are involved.
-
-After building, run these manually from a third workspace, one invocation at a time. Replace
-the image path and Flatpak ID with existing local applications:
-
-```sh
-# AppImage only
-./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended \
-    --appimage "$HOME/Applications/LiteXL.AppImage"
-
-# Flatpak only
-./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended \
-    --flatpak org.gnome.Calculator
-
-# Both
-./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended \
-    --appimage "$HOME/Applications/LiteXL.AppImage" --flatpak org.gnome.Calculator
-```
-
-Prefer simple GUI applications that independently create exactly one tiled, focused window.
-Close existing instances manually before the run. These cases use the application's ordinary
-settings and may change its own saved state; they do not create private application profiles.
-The package must start without prompts, splash windows, floating/fullscreen rules, or another
-window. Discovery waits at most sixty seconds; capture and IPC operations have their own
-bounded deadlines. Linux `/proc` must expose the process, executable, parent chain, and the
-package-specific evidence below. Wrappers, singleton/delegated launches, reparenting outside
-the direct launch ancestry, inaccessible metadata, or ambiguous identities fail conservatively.
-The window PID need not equal the launcher PID, but a live, stable ancestry link is required.
-Do not weaken these requirements to accommodate an arbitrary application.
-
-Each case records every preexisting window/container ID on a freshly verified empty target,
-then directly launches the package without a declarative loader or guessed selector. Global
-creation events and the tree must agree on exactly one new safe window. Independent process
-and package provenance must then establish ownership; only afterward does the harness obtain
-its actual native Sway app ID or Xwayland class. A title, package name, selector, or creation
-event alone never authorizes cleanup. Retained `/proc` descriptors, start times, executable
-paths/inodes, fresh ancestry, and package evidence are rechecked across capture and immediately
-before the exact-container close. Any additional window or unexpected workspace activity fails.
-
-AppImage prerequisites are an existing executable type 1 or type 2 image with its runtime
-header and a readable mounted image filesystem (FUSE, SquashFS, or ISO9660). Relative paths
-and symlinks resolve to an absolute canonical path, and that resolved path is invoked directly.
-This deliberately avoids selecting a different bundled program through an invocation alias:
-[AppImage documents](https://docs.appimage.org/packaging-guide/environment-variables.html)
-`APPIMAGE` as the resolved image path and `ARGV0` as the original invocation name. The observed
-`APPIMAGE` must identify the unchanged configured host file; `APPDIR` must identify an actual
-image mount containing the window process's executable on the same filesystem. `ARGV0`, when
-present, must agree with the direct invocation. Environment fields alone cannot prove ownership.
-Extract-and-run images, unusual wrappers, and executables outside the mounted image are unsupported.
-The expected inferred command is exactly one element: the resolved host AppImage path.
-No environment metadata is fabricated to obtain this result.
-
-Flatpak prerequisites are `flatpak` on `PATH`, an installed application, and readable sandbox
-metadata and mount namespaces. The harness checks `flatpak info --show-ref APP_ID`, then launches
-exactly `flatpak run APP_ID`, without a desktop file. It independently queries
-[`flatpak ps`](https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-ps)
-for instance ID, application, architecture, branch, wrapper PID, and sandbox PID. Those values
-must agree with `/proc/WINDOW_PID/root/.flatpak-info` and the configured application. The
-sandbox PID must descend from the launch and share the window process's separate mount
-namespace and metadata; the executable must resolve inside that sandbox. Expected argv comes
-from the running instance table: `flatpak`, `run`, `--branch=ACTUAL_BRANCH`,
-`--arch=ACTUAL_ARCH`, `APP_ID`. No branch or architecture is hard-coded. Flatpak versions or
-launch mechanisms that obscure this evidence are unsupported.
-
-Both cases verify ordinary capture against the observed single-window model, then require
-inferred capture to differ only in the exact recovered command. The inferred YAML must pass
-`sway-stage check`. Fresh trees and continuous event history verify hierarchy, geometry,
-focus, output identity, and foreign-window preservation before/after capture, with no additional
-window launch. These cases do not reload the application; existing round-trip cases cover replay.
-A pass prints `PASS appimage-inference` or `PASS flatpak-inference` with provenance/capture
-coverage. A configured missing/unusable application, unresolved or incorrect inference, or
-uncertain provenance prints `FAIL` with the stage and cause and stops the suite; it never
-becomes a SKIP. Failure retains windows and forbids further launches, closes, and restoration.
-Diagnostics report launch PID and candidate container IDs without claiming ownership.
-
-Only complete success enters the existing guarded cleanup, augmented with fresh package
-provenance. It requests a close of the exact verified window and observes disappearance;
-a close prompt or late extra window fails the run. The harness never kills the package,
-its descendants, or a package name. A package may stay running after its window closes;
-there is no automatic application lifetime limit. Inspect retained applications/windows
-manually before another run. As with all harness cases, snapshots and fences are not
-transactional isolation against concurrent desktop activity.
-
 For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
 the correct distinct run-specific title argument from each leaf's original launch array.
 Swapped, duplicate, or missing titles fail, even though both selectors agree. Titles reported
@@ -507,9 +416,9 @@ and structural-container focus refuse capture without YAML. Native tabbed/stacke
 including singletons, must capture successfully with weights only beneath splits. Capture must
 leave desktop state and the launch log unchanged.
 
-For optional real AppImage and Flatpak command inference, use the package harness cases
-above instead of repeating manual capture acceptance. General edited-draft replay remains
-covered by the existing round-trip scenarios and can also be checked manually if desired.
+Real AppImage and Flatpak command inference has offline coverage only; to check it live,
+capture a disposable workspace manually and review the recovered command. General
+edited-draft replay remains covered by the existing round-trip scenarios.
 
 For optional unified-menu acceptance, use one `sway-stage menu` keybinding with temporary
 layout and profile directories and trusted applications on disposable workspaces:

@@ -19,8 +19,7 @@ use clap::Parser;
 
 use crate::capture::{
     executable_capture, verify_capture, verify_desktop_launcher_capture,
-    verify_desktop_replay_capture, verify_inferred_capture, verify_package_capture,
-    verify_package_default_capture, verify_unresolved_capture,
+    verify_desktop_replay_capture, verify_inferred_capture, verify_unresolved_capture,
 };
 use crate::ipc::{
     IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, validate_restoration_name,
@@ -37,7 +36,6 @@ use crate::ownership::{
     AcceptedWindows, ExpectedClose, bind_launches, require_quiet, verify_ownership,
     verify_process_evidence,
 };
-use crate::packages::{self, Launch, Ownership, Package};
 use crate::preservation::ForeignWindows;
 use crate::scenarios::{
     ConfiguredNode, DesktopLauncher, Extension, OptionalApplications, Scenario, configuration_yaml,
@@ -69,7 +67,7 @@ pub struct Arguments {
     profile_workspace: Option<String>,
     #[arg(
         long,
-        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, desktop launcher replay, unresolved capture, and optional package inference"
+        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, desktop launcher replay, and unresolved capture"
     )]
     extended: bool,
     #[arg(
@@ -77,16 +75,6 @@ pub struct Arguments {
         help = "Exact native Firefox app ID, overriding application.ini RemotingName"
     )]
     firefox_app_id: Option<String>,
-    #[arg(
-        long,
-        requires = "extended",
-        value_name = "PATH",
-        help = "Existing executable AppImage for optional command-inference coverage"
-    )]
-    appimage: Option<PathBuf>,
-    #[arg(long, requires = "extended", value_name = "APP_ID", value_parser = parse_flatpak_id,
-        help = "Installed Flatpak application for optional command-inference coverage")]
-    flatpak: Option<String>,
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage"))]
     binary: String,
 }
@@ -168,9 +156,6 @@ struct Harness {
     skipped: usize,
     retained_profiles: Vec<PathBuf>,
     restoration: Option<String>,
-    packages: Vec<(&'static str, Option<Package>)>,
-    package_preexisting: Option<HashSet<i64>>,
-    package_launch_pid: Option<u32>,
 }
 
 pub fn run(arguments: Arguments) -> bool {
@@ -193,12 +178,6 @@ pub fn run(arguments: Arguments) -> bool {
         }
         let message = failure.report(&mut harness.events);
         eprintln!("FAIL  {}: {message}", harness.stage);
-
-        if let Some(pid) = harness.package_launch_pid {
-            eprintln!(
-                "  Package launch PID={pid}; package windows/applications retained without termination or automatic lifetime limit."
-            );
-        }
         if harness.switch_attempted {
             for (workspace, accepted) in &harness.profile_progress {
                 eprintln!(
@@ -209,7 +188,6 @@ pub fn run(arguments: Arguments) -> bool {
                 &harness.sway,
                 &harness.run_id,
                 harness.current_scenario.as_ref(),
-                harness.package_preexisting.as_ref(),
             );
             if let Some(fixture) = &harness.fixture {
                 eprintln!(
@@ -268,17 +246,6 @@ pub fn run(arguments: Arguments) -> bool {
 
 impl Harness {
     fn new(arguments: Arguments) -> Result<Self, String> {
-        let mut packages = Vec::new();
-        if arguments.extended {
-            for name in packages::SCENARIOS {
-                let configured = Package::configured(
-                    name,
-                    arguments.appimage.as_deref(),
-                    arguments.flatpak.as_deref(),
-                )?;
-                packages.push((name, configured));
-            }
-        }
         process::install_sigint_handler()?;
         process::check_interruption()?;
         let sway = Swaymsg::from_environment()?;
@@ -314,9 +281,6 @@ impl Harness {
             skipped: 0,
             retained_profiles: Vec::new(),
             restoration: None,
-            packages,
-            package_preexisting: None,
-            package_launch_pid: None,
         })
     }
 
@@ -413,27 +377,6 @@ impl Harness {
                         "unresolved-launcher failed; no restoration permitted",
                     );
                 }
-                return Err(failure);
-            }
-        }
-
-        for (name, package) in std::mem::take(&mut self.packages) {
-            self.current_scenario = None;
-            let Some(package) = package else {
-                self.skipped += 1;
-                let flag = if name == "appimage-inference" {
-                    "--appimage"
-                } else {
-                    "--flatpak"
-                };
-                println!("SKIP  {name:19} {flag} not supplied");
-                continue;
-            };
-            // All package failures retain windows and prohibit restoration, including a
-            // failed assertion after ownership was established. Never retry the launch.
-            if let Err(failure) = self.run_package(name, package, &directory) {
-                self.events
-                    .distrust_focus_history("package scenario failed; retained windows");
                 return Err(failure);
             }
         }
@@ -821,7 +764,6 @@ impl Harness {
             let second_foreign = ForeignWindows::record(&loaded, second.workspace.id)?;
             if !partial {
                 let context = CleanupContext {
-                    package: None,
                     target: &second.workspace,
                     layout: &layouts[1].layout,
                     preexisting_ids: &preexisting,
@@ -873,7 +815,6 @@ impl Harness {
             // or reuse the second workspace's cleanup baseline for the primary workspace.
             let primary_foreign = ForeignWindows::record(&returned, primary.id)?;
             let context = CleanupContext {
-                package: None,
                 target: primary,
                 layout: &layouts[0].layout,
                 preexisting_ids: &preexisting,
@@ -1214,7 +1155,6 @@ impl Harness {
 
             self.stage = format!("{cycle_name}: cleanup");
             let context = CleanupContext {
-                package: None,
                 foreign: &foreign,
                 target,
                 layout: &progress.scenario.layout,
@@ -1276,186 +1216,6 @@ impl Harness {
         };
         println!("PASS  {name:19} {coverage}");
         self.stage = "scenario preparation".into();
-        Ok(())
-    }
-
-    fn run_package(
-        &mut self,
-        name: &'static str,
-        package: Package,
-        directory: &TemporaryConfigurations,
-    ) -> Result<(), Failure> {
-        self.stage = format!("{name}: package availability");
-        package.require_available()?;
-        self.stage = format!("{name}: prelaunch baseline");
-        interruption_check()?;
-        let before = snapshot(&self.sway, &mut self.events, None)?;
-        require_quiet(&before.window_events, None)?;
-        require_empty(before.focused_workspace())?;
-        let target = self
-            .disposable
-            .as_ref()
-            .expect("primary target established");
-        let fixture = self.fixture.as_ref().expect("foreign fixture established");
-        verify_fixture_state(
-            &before,
-            fixture,
-            fixture.loaded_signature.as_ref().expect("fixture verified"),
-        )?;
-        let foreign = ForeignWindows::record(&before, target.id)?;
-        let preexisting: HashSet<i64> = walk(&before.tree)
-            .iter()
-            .map(|placed| placed.node.id)
-            .collect();
-        self.package_preexisting = Some(preexisting.clone());
-        let revision = self.events.workspace_revision();
-
-        self.stage = format!("{name}: direct package launch and discovery");
-        let (mut launcher, launch) = Launch::start(package).map_err(Failure::Uncertain)?;
-        self.package_launch_pid = Some(launcher.id());
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut creation_events = Vec::new();
-        let (loaded, container_id, ownership, scenario) = loop {
-            interruption_check()?;
-            let mut observed = snapshot(&self.sway, &mut self.events, None)?;
-            foreign.verify(&observed)?;
-            if revision != self.events.workspace_revision() {
-                return Err(Failure::Uncertain(
-                    "workspace activity during package scenario".into(),
-                ));
-            }
-            creation_events.append(&mut observed.window_events);
-            if creation_events.len() > 4096 {
-                return Err(Failure::Uncertain(
-                    "package discovery exceeded event-history limit".into(),
-                ));
-            }
-            if let Some(window) =
-                packages::discover(&observed.tree, &creation_events, &preexisting, target.id)
-                    .map_err(Failure::Uncertain)?
-            {
-                let container_id = window.id;
-                let ownership = launch.accept(window).map_err(Failure::Uncertain)?;
-                let scenario = packages::captured_scenario(name, packages::selector(window)?);
-                break (observed, container_id, ownership, scenario);
-            }
-            if Instant::now() >= deadline {
-                return Err(Failure::Uncertain("package discovery timed out after 60 seconds; missing/unusable app, singleton, or unresolved window identity; leave windows untouched".into()));
-            }
-            thread::sleep(CLOSE_POLL_INTERVAL);
-        };
-        let accepted = BTreeMap::from([(container_id, "window1".to_owned())]);
-        verify_ownership(
-            &loaded.tree,
-            target.id,
-            &scenario.layout,
-            &preexisting,
-            &accepted,
-        )?;
-        verify_layout(loaded.focused_workspace(), &scenario, &accepted)?;
-        let baseline = signature(loaded.focused_workspace());
-        self.current_scenario = Some(ScenarioProgress {
-            scenario,
-            preexisting_ids: Some(preexisting),
-            accepted,
-        });
-        let progress = self
-            .current_scenario
-            .as_ref()
-            .expect("package window accepted");
-
-        let mut default_draft = None;
-        for infer in [false, true] {
-            self.stage = format!(
-                "{name}: {}capture",
-                if infer { "inferred " } else { "ordinary " }
-            );
-            // Recheck after discovery and before each capture, then again after it. Capture
-            // must cause neither desktop mutations nor new application/window launches.
-            let ready = snapshot(&self.sway, &mut self.events, None)?;
-            verify_package_state(
-                &ready, &foreign, target.id, progress, &loaded, &launch, &ownership,
-            )?;
-            if revision != self.events.workspace_revision() {
-                return Err(Failure::Uncertain(
-                    "workspace activity before package capture".into(),
-                ));
-            }
-            let mut command = Command::new(&self.binary);
-            command.arg("capture");
-            if !infer {
-                command.arg("--no-infer-commands");
-            }
-            self.sway.select_socket(&mut command);
-            let draft = process::run(command, &self.stage, CAPTURE_TIMEOUT)?;
-            let after = snapshot(&self.sway, &mut self.events, None)?;
-            verify_package_state(
-                &after, &foreign, target.id, progress, &loaded, &launch, &ownership,
-            )?;
-            if revision != self.events.workspace_revision() {
-                return Err(Failure::Uncertain(
-                    "workspace activity during package capture".into(),
-                ));
-            }
-            if infer {
-                verify_package_capture(
-                    &draft,
-                    default_draft.as_deref().expect("ordinary capture verified"),
-                    &ownership.expected_command,
-                )?;
-                directory.write("captured", &draft)?;
-            } else {
-                verify_package_default_capture(
-                    &draft,
-                    &progress.scenario.layout.leaves()[0].selector,
-                )?;
-                default_draft = Some(draft);
-            }
-        }
-        check_configuration(
-            &self.binary,
-            &directory.path,
-            "captured",
-            "check inferred package capture",
-        )?;
-
-        self.stage = format!("{name}: guarded cleanup");
-        let context = CleanupContext {
-            target,
-            layout: &progress.scenario.layout,
-            preexisting_ids: progress
-                .preexisting_ids
-                .as_ref()
-                .expect("package baseline recorded"),
-            foreign: &foreign,
-            package: Some(PackageCleanup {
-                launch: &launch,
-                ownership: &ownership,
-                workspace_revision: revision,
-            }),
-        };
-        cleanup(
-            &self.sway,
-            &mut self.events,
-            &context,
-            &progress.accepted,
-            baseline,
-        )?;
-        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
-        foreign.verify(&cleaned)?;
-        require_quiet(&cleaned.window_events, None)?;
-        require_empty(cleaned.focused_workspace())?;
-        require_package_workspace_history(&context, self.events.workspace_revision())?;
-        // Reap only if already exited. Never wait for or terminate a packaged application.
-        launcher
-            .try_wait()
-            .map_err(|error| format!("reap package launcher: {error}"))?;
-        self.package_launch_pid = None;
-        self.package_preexisting = None;
-        self.passed += 1;
-        println!(
-            "PASS  {name:19} package provenance, dynamic identity, inferred capture, unchanged desktop"
-        );
         Ok(())
     }
 
@@ -1605,7 +1365,6 @@ impl Harness {
         }
         self.stage = "foreign fixture: cleanup".into();
         let context = CleanupContext {
-            package: None,
             target: &fixture.workspace,
             layout: &fixture.progress.scenario.layout,
             preexisting_ids: fixture
@@ -1678,45 +1437,6 @@ impl Harness {
         }
         Ok(RESTORED)
     }
-}
-
-fn parse_flatpak_id(application: &str) -> Result<String, String> {
-    packages::validate_flatpak_id(application)?;
-    Ok(application.into())
-}
-
-fn verify_package_state(
-    observed: &Snapshot,
-    foreign: &ForeignWindows,
-    target_workspace_id: i64,
-    progress: &ScenarioProgress,
-    baseline: &Snapshot,
-    launch: &Launch,
-    ownership: &Ownership,
-) -> Result<(), Failure> {
-    foreign.verify(observed)?;
-    verify_unchanged(
-        observed,
-        target_workspace_id,
-        progress,
-        &signature(baseline.focused_workspace()),
-    )?;
-    require_signature(
-        &observed.tree,
-        &signature(&baseline.tree),
-        "package capture changed the modeled desktop",
-    )?;
-    let window_id = *progress
-        .accepted
-        .keys()
-        .next()
-        .expect("one accepted package window");
-    let window = walk(&observed.tree)
-        .into_iter()
-        .find(|placed| placed.node.id == window_id)
-        .ok_or_else(|| Failure::Uncertain("package window disappeared".into()))?
-        .node;
-    ownership.verify(launch, window).map_err(Failure::Uncertain)
 }
 
 fn fixture_eligibility(target_number: &str, fixture_number: &str) -> Result<(), String> {
@@ -2161,14 +1881,7 @@ fn require_signature(
     Ok(())
 }
 
-struct PackageCleanup<'a> {
-    launch: &'a Launch,
-    ownership: &'a Ownership,
-    workspace_revision: u64,
-}
-
 struct CleanupContext<'a> {
-    package: Option<PackageCleanup<'a>>,
     target: &'a WorkspaceIdentity,
     layout: &'a ConfiguredNode,
     preexisting_ids: &'a HashSet<i64>,
@@ -2199,18 +1912,6 @@ fn prepare_close(
             "cleanup requires trusted target workspace focus".into(),
         ));
     }
-    if context.package.is_none()
-        && context
-            .layout
-            .leaves()
-            .iter()
-            .any(|leaf| leaf.command.is_empty())
-    {
-        return Err(Failure::Uncertain(
-            "dynamic package cleanup requires independent package provenance".into(),
-        ));
-    }
-
     context.foreign.verify(observed)?;
     require_quiet(&observed.window_events, None)?;
     verify_ownership(
@@ -2226,18 +1927,6 @@ fn prepare_close(
         "workspace changed before cleanup; ownership/state uncertain",
     )?;
 
-    if let Some(package) = &context.package {
-        let window = walk(&observed.tree)
-            .into_iter()
-            .find(|placed| placed.node.id == closing_window_id)
-            .ok_or_else(|| Failure::Uncertain("package cleanup window disappeared".into()))?
-            .node;
-        package
-            .ownership
-            .verify(package.launch, window)
-            .map_err(Failure::Uncertain)?;
-    }
-
     if !remaining.contains_key(&closing_window_id) || closing_window_id <= 0 {
         return Err(Failure::Uncertain(
             "close requires an individually verified owned window".into(),
@@ -2251,20 +1940,6 @@ fn prepare_close(
         remaining: expected_remaining,
         hierarchy,
     })
-}
-
-fn require_package_workspace_history(
-    context: &CleanupContext,
-    revision: u64,
-) -> Result<(), Failure> {
-    if let Some(package) = &context.package
-        && package.workspace_revision != revision
-    {
-        return Err(Failure::Uncertain(
-            "workspace activity during package cleanup".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn cleanup(
@@ -2285,7 +1960,6 @@ fn cleanup(
             .ok_or_else(|| Failure::Uncertain("missing accepted cleanup window".into()))?;
         interruption_check()?;
         let before = snapshot(sway, events, None)?;
-        require_package_workspace_history(context, events.workspace_revision())?;
         let plan = prepare_close(
             &before,
             context,
@@ -2302,7 +1976,6 @@ fn cleanup(
         let after = loop {
             interruption_check()?;
             let observed = snapshot(sway, events, None)?;
-            require_package_workspace_history(context, events.workspace_revision())?;
             if verify_close_observation(
                 &observed,
                 context,
@@ -2362,17 +2035,6 @@ fn verify_close_observation(
 
     let workspace = observed.focused_workspace();
     if !disappeared {
-        if let Some(package) = &context.package {
-            let window = walk(&observed.tree)
-                .into_iter()
-                .find(|placed| placed.node.id == closing_window_id)
-                .expect("disappearance checked above")
-                .node;
-            package
-                .ownership
-                .verify(package.launch, window)
-                .map_err(Failure::Uncertain)?;
-        }
         require_signature(
             workspace,
             baseline,
@@ -2392,12 +2054,7 @@ fn verify_close_observation(
     Ok(true)
 }
 
-fn report_remaining(
-    sway: &Swaymsg,
-    run_id: &str,
-    progress: Option<&ScenarioProgress>,
-    package_preexisting: Option<&HashSet<i64>>,
-) {
+fn report_remaining(sway: &Swaymsg, run_id: &str, progress: Option<&ScenarioProgress>) {
     eprintln!(
         "No further cleanup attempted. Scenario terminals expire after 300 seconds; the foreign fixture after 3600 seconds; Firefox has no lifetime limit."
     );
@@ -2422,7 +2079,6 @@ fn report_remaining(
             .any(|leaf| observed_identifier(window, &leaf.selector) == Some(leaf.selector.value()));
         let newly_observed = progress
             .and_then(|progress| progress.preexisting_ids.as_ref())
-            .or(package_preexisting)
             .is_some_and(|preexisting| !preexisting.contains(&window.id) && is_window(window));
         let run_identifier = [window.app_id.as_deref(), class(window)]
             .into_iter()
