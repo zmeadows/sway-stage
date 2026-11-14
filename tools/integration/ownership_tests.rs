@@ -2,7 +2,7 @@ use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, SCRATCHPAD_WORKSPACE_ID, TARGET_WORKSPACE_ID,
     accepted_windows, assert_contains, configured_app_id, container_ids, desktop, node_mut,
-    parse_tree, rect, standard_scenario, uncertain_message, wayland_window, window_event,
+    parse_tree, rect, standard_scenario, wayland_window, window_event,
 };
 use crate::scenarios::Scenario;
 use serde_json::{Value, json};
@@ -45,7 +45,7 @@ fn verify_recorded_ownership(
     tree: Value,
     scenario: &Scenario,
     owned_windows: &AcceptedWindows,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     let tree = parse_tree(tree);
     verify_ownership(
         &tree,
@@ -86,19 +86,19 @@ fn binding_rejects_preexisting_repeated_missing_or_extra_new_windows() {
     ];
 
     assert_contains(
-        &uncertain_message(bind(&preexisting)),
+        &bind(&preexisting).unwrap_err(),
         "preexisting or repeated new event: id=6",
     );
 
     let repeated = [window_event("new", 20, None), window_event("new", 20, None)];
     assert_contains(
-        &uncertain_message(bind(&repeated)),
+        &bind(&repeated).unwrap_err(),
         "preexisting or repeated new event: id=20",
     );
 
     let missing = [window_event("new", 20, None)];
     assert_contains(
-        &uncertain_message(bind(&missing)),
+        &bind(&missing).unwrap_err(),
         "expected 2 sequential new windows, observed IDs [20]",
     );
 
@@ -107,10 +107,7 @@ fn binding_rejects_preexisting_repeated_missing_or_extra_new_windows() {
         window_event("new", 21, None),
         window_event("new", 22, None),
     ];
-    assert_contains(
-        &uncertain_message(bind(&extra)),
-        "observed IDs [20, 21, 22]",
-    );
+    assert_contains(&bind(&extra).unwrap_err(), "observed IDs [20, 21, 22]");
 }
 
 #[test]
@@ -129,19 +126,15 @@ fn binding_rejects_structural_activity_and_contradicting_identities() {
     ] {
         let mut events = launches();
         events.push(window_event(change, container_id, None));
-        let message =
-            uncertain_message(bind_launches(&events, &scenario.layout, &preexisting_ids()));
+        let message = bind_launches(&events, &scenario.layout, &preexisting_ids()).unwrap_err();
         assert_contains(&message, "unexpected activity during load");
         assert_contains(&message, &format!("id={container_id}"));
     }
 
     let mut swapped_identity = launches();
     swapped_identity.push(window_event("focus", 20, Some(&second_window_app_id)));
-    let message = uncertain_message(bind_launches(
-        &swapped_identity,
-        &scenario.layout,
-        &preexisting_ids(),
-    ));
+    let message =
+        bind_launches(&swapped_identity, &scenario.layout, &preexisting_ids()).unwrap_err();
 
     assert_contains(
         &message,
@@ -162,7 +155,7 @@ fn quiet_history_allows_only_harmless_events_or_the_requested_close() {
     let focus = [window_event("focus", 20, None)];
 
     assert_contains(
-        &uncertain_message(require_quiet(&focus, None)),
+        &require_quiet(&focus, None).unwrap_err(),
         "unexpected window activity",
     );
 
@@ -183,7 +176,7 @@ fn quiet_history_allows_only_harmless_events_or_the_requested_close() {
         window_event("new", 22, None),
         window_event("focus", PREEXISTING_WINDOW_ID, None),
     ] {
-        uncertain_message(require_quiet(&[unexpected], Some(&closing)));
+        require_quiet(&[unexpected], Some(&closing)).unwrap_err();
     }
 }
 
@@ -264,11 +257,8 @@ fn ownership_rejects_uncertain_windows_anywhere() {
     cases.push((closed, "owned windows changed".into()));
 
     for (tree, expected) in cases {
-        let message = uncertain_message(verify_recorded_ownership(
-            tree,
-            &scenario,
-            &accepted_pair_windows(),
-        ));
+        let message =
+            verify_recorded_ownership(tree, &scenario, &accepted_pair_windows()).unwrap_err();
         assert_contains(&message, &expected);
     }
 }
@@ -282,20 +272,14 @@ fn ownership_requires_native_wayland_windows_for_app_ids() {
     // An Xwayland window reporting the expected app ID is not the launched Foot window.
     let mut app_id_under_xwayland = loaded_pair_tree(&scenario);
     node_mut(&mut app_id_under_xwayland, 21)["shell"] = json!("xwayland");
-    let message = uncertain_message(verify_recorded_ownership(
-        app_id_under_xwayland,
-        &scenario,
-        &owned_windows,
-    ));
+    let message =
+        verify_recorded_ownership(app_id_under_xwayland, &scenario, &owned_windows).unwrap_err();
     assert_contains(&message, "expected a native Wayland window: 21:");
 
     let mut app_id_with_x11_window = loaded_pair_tree(&scenario);
     node_mut(&mut app_id_with_x11_window, 21)["window"] = json!(1234);
-    let message = uncertain_message(verify_recorded_ownership(
-        app_id_with_x11_window,
-        &scenario,
-        &owned_windows,
-    ));
+    let message =
+        verify_recorded_ownership(app_id_with_x11_window, &scenario, &owned_windows).unwrap_err();
     assert_contains(&message, "expected a native Wayland window");
 }
 
@@ -381,10 +365,7 @@ fn process_evidence_reads_the_windows_process_arguments() {
     require_process_command(&window_of_this_process(this_process), leaf).unwrap();
 
     leaf.command.push("an argument this process lacks".into());
-    let message = uncertain_message(require_process_command(
-        &window_of_this_process(this_process),
-        leaf,
-    ));
+    let message = require_process_command(&window_of_this_process(this_process), leaf).unwrap_err();
 
     assert_eq!(
         message,
@@ -396,20 +377,15 @@ fn process_evidence_reads_the_windows_process_arguments() {
     );
 
     for unusable in [None, Some(0), Some(-1)] {
-        let message = uncertain_message(require_process_command(
-            &window_of_this_process(unusable),
-            leaf,
-        ));
+        let message = require_process_command(&window_of_this_process(unusable), leaf).unwrap_err();
         assert_contains(
             &message,
             "no usable Sway process identity: container=20 leaf=window1",
         );
     }
 
-    let message = uncertain_message(require_process_command(
-        &window_of_this_process(Some(5_000_000)),
-        leaf,
-    ));
+    let message =
+        require_process_command(&window_of_this_process(Some(5_000_000)), leaf).unwrap_err();
     assert_contains(
         &message,
         "cannot verify process argv: container=20 pid=5000000",
@@ -430,11 +406,8 @@ fn ownership_requires_process_evidence_for_repeated_app_ids() {
     );
     // This test process cannot have Foot's arguments.
     node_mut(&mut loaded, 20)["pid"] = json!(std::process::id());
-    let message = uncertain_message(verify_recorded_ownership(
-        loaded,
-        &scenario,
-        &accepted_pair_windows(),
-    ));
+    let message =
+        verify_recorded_ownership(loaded, &scenario, &accepted_pair_windows()).unwrap_err();
 
     assert_contains(
         &message,

@@ -1,8 +1,7 @@
 use super::*;
 use crate::fixtures::{
     FOOT, OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SLEEP, TARGET_WORKSPACE_ID,
-    accepted_windows, container_ids, desktop, parse_tree, uncertain_message, window_event,
-    workspaces_reply,
+    accepted_windows, container_ids, desktop, parse_tree, window_event, workspaces_reply,
 };
 use crate::scenarios::configuration_yaml;
 
@@ -149,7 +148,7 @@ fn target_evidence_freezes_existing_identity_and_output_and_allows_absence() {
             "output-name" => changed.tree.nodes[1].name = Some("different".into()),
             _ => unreachable!(),
         }
-        uncertain_message(target.verify(&changed));
+        target.verify(&changed).unwrap_err();
     }
     let mut renamed = empty_target();
     renamed.workspaces[1].name = "9: other".into();
@@ -158,7 +157,7 @@ fn target_evidence_freezes_existing_identity_and_output_and_allows_absence() {
     absent.workspaces.pop();
     absent.tree.nodes[1].nodes.pop();
     assert!(Target::record(&absent, "9").unwrap().is_none());
-    uncertain_message(target.verify(&absent));
+    target.verify(&absent).unwrap_err();
     let mut duplicate = empty_target();
     duplicate.workspaces.push(crate::ipc::Workspace {
         id: 80,

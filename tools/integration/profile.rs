@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::ipc::{TreeNode, WindowChange, WindowEvent};
-use crate::observation::{Failure, Snapshot, WorkspaceIdentity, walk};
+use crate::observation::{Snapshot, WorkspaceIdentity, walk};
 use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
 use crate::preservation::output_ancestry;
 use crate::scenarios::{Scenario, foreign_fixture_scenario, standard_scenarios};
@@ -153,7 +153,7 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn record(observed: &Snapshot, target_name: &str) -> Result<Option<Self>, Failure> {
+    pub fn record(observed: &Snapshot, target_name: &str) -> Result<Option<Self>, String> {
         let candidates: Vec<_> = observed
             .workspaces
             .iter()
@@ -176,13 +176,11 @@ impl Target {
                     number: workspace.num,
                 }))
             }
-            _ => Err(Failure::Uncertain(
-                "ambiguous or renamed profile workspace".into(),
-            )),
+            _ => Err("ambiguous or renamed profile workspace".into()),
         }
     }
 
-    pub fn verify<'a>(&self, observed: &'a Snapshot) -> Result<&'a TreeNode, Failure> {
+    pub fn verify<'a>(&self, observed: &'a Snapshot) -> Result<&'a TreeNode, String> {
         let workspace = walk(&observed.tree)
             .into_iter()
             .map(|placed| placed.node)
@@ -191,13 +189,9 @@ impl Target {
                     && node.name.as_ref() == Some(&self.workspace.name)
                     && node.num == Some(self.number)
             })
-            .ok_or_else(|| {
-                Failure::Uncertain("profile target identity changed/disappeared".into())
-            })?;
+            .ok_or("profile target identity changed/disappeared")?;
         if output_ancestry(&observed.tree, workspace.id)? != self.output {
-            return Err(Failure::Uncertain(
-                "profile target output ancestry changed".into(),
-            ));
+            return Err("profile target output ancestry changed".into());
         }
         Ok(workspace)
     }
@@ -206,15 +200,13 @@ impl Target {
 /// Workspace switches may change global focus and focus-stack metadata. Every identity,
 /// wrapper, window state, and rectangle must otherwise survive; selection is verified
 /// separately with the independent layout model and the accepted focus events.
-pub fn require_preserved_layout(before: &TreeNode, after: &TreeNode) -> Result<(), Failure> {
+pub fn require_preserved_layout(before: &TreeNode, after: &TreeNode) -> Result<(), String> {
     let mut baseline = crate::layout::signature(before);
     let mut current = crate::layout::signature(after);
     baseline.ignore_focus();
     current.ignore_focus();
     if baseline != current {
-        return Err(Failure::Uncertain(
-            "profile layout changed across cleanup workspace switch".into(),
-        ));
+        return Err("profile layout changed across cleanup workspace switch".into());
     }
     Ok(())
 }
@@ -227,10 +219,10 @@ pub fn bind_ordered_launches(
     layouts: &[Scenario; 2],
     preexisting: &HashSet<i64>,
     partial: bool,
-) -> Result<[AcceptedWindows; 2], Failure> {
+) -> Result<[AcceptedWindows; 2], String> {
     let (first_events, second_events) = events
         .split_at_checked(switch_index)
-        .ok_or_else(|| Failure::Uncertain("invalid profile transition boundary".into()))?;
+        .ok_or("invalid profile transition boundary")?;
     let first = bind_launches(first_events, &layouts[0].layout, preexisting)?;
     let expected_focus = first
         .iter()
@@ -242,9 +234,7 @@ pub fn bind_ordered_launches(
         .find(|event| event.change == WindowChange::Focus)
         .map(|event| event.container.id);
     if last_focus != expected_focus {
-        return Err(Failure::Uncertain(
-            "first profile layout did not select its final focus before switching".into(),
-        ));
+        return Err("first profile layout did not select its final focus before switching".into());
     }
 
     let mut before_second = preexisting.clone();
@@ -264,7 +254,7 @@ pub fn verify_rename_preparation(
     observed: &Snapshot,
     primary: &WorkspaceIdentity,
     destination: &str,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     observed.validate()?;
     crate::ipc::validate_workspace_name(destination)?;
     require_quiet(&observed.window_events, None)?;
@@ -280,10 +270,10 @@ pub fn verify_rename_preparation(
             workspace.name == destination || Some(workspace.num) == destination_number
         })
     {
-        return Err(Failure::Uncertain(
+        return Err(
             "disposable rename requires the exact empty focused primary and an unused destination"
                 .into(),
-        ));
+        );
     }
     Ok(())
 }
@@ -292,7 +282,7 @@ pub fn verify_rename_result(
     before: &Snapshot,
     after: &Snapshot,
     renamed: &WorkspaceIdentity,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     after.validate()?;
     require_quiet(&after.window_events, None)?;
     let workspace = after.focused_workspace();
@@ -303,9 +293,9 @@ pub fn verify_rename_result(
             != crate::layout::signature(workspace)
         || output_ancestry(&before.tree, renamed.id)? != output_ancestry(&after.tree, renamed.id)?
     {
-        return Err(Failure::Uncertain(
+        return Err(
             "disposable rename changed identity, number, output, focus, or empty structure".into(),
-        ));
+        );
     }
     // Renaming can reorder output children. Compare workspace identities independently.
     let other_workspaces = |snapshot: &Snapshot| {
@@ -322,9 +312,7 @@ pub fn verify_rename_result(
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     if other_workspaces(before) != other_workspaces(after) {
-        return Err(Failure::Uncertain(
-            "another workspace changed during disposable rename".into(),
-        ));
+        return Err("another workspace changed during disposable rename".into());
     }
     Ok(())
 }

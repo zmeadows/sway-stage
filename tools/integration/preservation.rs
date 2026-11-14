@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, TreeNode};
 use crate::layout::{Signature, is_window, signature};
-use crate::observation::{Failure, Snapshot};
+use crate::observation::Snapshot;
 
 /// An ancestor's role in a window's placement. Ordering matters inside workspaces, but
 /// output/workspace sibling positions may change as disposable workspaces come and go.
@@ -39,7 +39,7 @@ pub struct ForeignWindows {
 }
 
 impl ForeignWindows {
-    pub fn record(observed: &Snapshot, target_workspace_id: i64) -> Result<Self, Failure> {
+    pub fn record(observed: &Snapshot, target_workspace_id: i64) -> Result<Self, String> {
         observed.validate()?;
         let target_output_ancestry = output_ancestry(&observed.tree, target_workspace_id)?;
         let mut windows = BTreeMap::new();
@@ -59,33 +59,33 @@ impl ForeignWindows {
 
     /// Verify every recorded foreign window, including those in the scratchpad. New
     /// windows remain the responsibility of the existing strict global event checks.
-    pub fn verify(&self, observed: &Snapshot) -> Result<(), Failure> {
+    pub fn verify(&self, observed: &Snapshot) -> Result<(), String> {
         let current = Self::record(observed, self.target_workspace_id)?;
         if current.target_output_ancestry != self.target_output_ancestry {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "target workspace id={} changed output ancestry",
                 self.target_workspace_id
-            )));
+            ));
         }
         for (window_id, baseline) in &self.windows {
             let Some(current) = current.windows.get(window_id) else {
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "foreign window id={window_id} disappeared or entered the target workspace"
-                )));
+                ));
             };
             if current.ancestry != baseline.ancestry {
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "foreign window id={window_id} ancestry/parent/order/ancestor state changed: \
                      expected {:?}, observed {:?}",
                     baseline.ancestry, current.ancestry
-                )));
+                ));
             }
             if current.window != baseline.window {
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "foreign window id={window_id} identity/geometry/state changed: \
                      expected {:?}, observed {:?}",
                     baseline.window, current.window
-                )));
+                ));
             }
         }
         Ok(())
@@ -98,7 +98,7 @@ fn record_windows(
     inside_target: bool,
     ancestry: &mut Vec<Ancestor>,
     windows: &mut BTreeMap<i64, PreservedWindow>,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     let inside_target = inside_target || node.id == target_workspace_id;
     if is_window(node) && !inside_target {
         let has_workspace = ancestry
@@ -108,19 +108,19 @@ fn record_windows(
             .iter()
             .any(|ancestor| ancestor.node_type == NodeType::Output);
         if !has_workspace || !has_output {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "foreign window id={} has no workspace/output ancestry",
                 node.id
-            )));
+            ));
         }
         if node.fullscreen_mode.is_none()
             || node.floating.is_none()
             || node.scratchpad_state.is_none()
         {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "foreign window id={} lacks floating/fullscreen/scratchpad evidence",
                 node.id
-            )));
+            ));
         }
         let mut window = signature(node);
         // Focus legitimately changes while entering/leaving the fixture workspace. Every
@@ -178,7 +178,7 @@ fn record_windows(
 pub fn output_ancestry(
     tree: &TreeNode,
     workspace_id: i64,
-) -> Result<Vec<(i64, Option<String>)>, Failure> {
+) -> Result<Vec<(i64, Option<String>)>, String> {
     fn find(node: &TreeNode, id: i64, outputs: &mut Vec<(i64, Option<String>)>) -> bool {
         if node.node_type == NodeType::Output {
             outputs.push((node.id, node.name.clone()));
@@ -198,9 +198,9 @@ pub fn output_ancestry(
     }
     let mut outputs = Vec::new();
     if !find(tree, workspace_id, &mut outputs) || outputs.is_empty() {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "workspace id={workspace_id} missing output ancestry"
-        )));
+        ));
     }
     Ok(outputs)
 }

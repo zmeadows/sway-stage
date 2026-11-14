@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, Shell, TreeNode};
-use crate::observation::{Failure, walk};
+use crate::observation::walk;
 use crate::ownership::AcceptedWindows;
 use crate::scenarios::{ConfiguredNode, Scenario, describe_path, diagnostic_yaml};
 
@@ -79,16 +79,13 @@ pub enum Shape {
     },
 }
 
-/// Validates every container under a workspace and returns its shape. Every failure is
-/// uncertain: a floating, fullscreen, scratchpad, unsupported, or malformed container
-/// means something other than this run has changed the workspace.
-pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
+/// Validates every container under a workspace and returns its shape. A floating,
+/// fullscreen, scratchpad, unsupported, or malformed container means something other than
+/// this run has changed the workspace.
+pub fn shape(node: &TreeNode) -> Result<Shape, String> {
     let is_workspace = node.node_type == NodeType::Workspace;
     if !is_workspace && node.node_type != NodeType::Con {
-        return Err(Failure::Uncertain(format!(
-            "unexpected container type: {}",
-            outline(node)
-        )));
+        return Err(format!("unexpected container type: {}", outline(node)));
     }
 
     let floating = matches!(node.floating, Some(Floating::AutoOn | Floating::UserOn));
@@ -96,18 +93,15 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
     // Sway reports fullscreen_mode 1 on every workspace, so only containers carry it.
     let fullscreen = !is_workspace && node.fullscreen_mode != Some(0);
     if !node.floating_nodes.is_empty() || floating || in_scratchpad || fullscreen {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "floating/fullscreen/scratchpad state: {}",
             outline(node)
-        )));
+        ));
     }
 
     if is_window(node) {
         if is_workspace || !node.nodes.is_empty() {
-            return Err(Failure::Uncertain(format!(
-                "malformed window: {}",
-                outline(node)
-            )));
+            return Err(format!("malformed window: {}", outline(node)));
         }
         return Ok(Shape::Window {
             container_id: node.id,
@@ -121,10 +115,7 @@ pub fn shape(node: &TreeNode) -> Result<Shape, Failure> {
         node.layout,
         Layout::SplitH | Layout::SplitV | Layout::Tabbed | Layout::Stacked
     ) {
-        return Err(Failure::Uncertain(format!(
-            "unsupported group: {}",
-            outline(node)
-        )));
+        return Err(format!("unsupported group: {}", outline(node)));
     }
     let mut children = Vec::new();
     for child in &node.nodes {
@@ -240,13 +231,12 @@ pub struct LayoutMeasurements {
 
 /// Verifies that `workspace` holds exactly the accepted windows in the scenario's visual
 /// order and group hierarchy, focused on the configured window, with every sibling
-/// share within 5 percentage points of its weight. Unusable geometry and sizing are
-/// `Check` failures; every other failure is `Uncertain`.
+/// share within 5 percentage points of its weight.
 pub fn verify_layout(
     workspace: &TreeNode,
     scenario: &Scenario,
     accepted: &AcceptedWindows,
-) -> Result<LayoutMeasurements, Failure> {
+) -> Result<LayoutMeasurements, String> {
     verify_layout_focus(workspace, scenario, accepted, true)
 }
 
@@ -256,7 +246,7 @@ pub fn verify_inactive_layout(
     workspace: &TreeNode,
     scenario: &Scenario,
     accepted: &AcceptedWindows,
-) -> Result<LayoutMeasurements, Failure> {
+) -> Result<LayoutMeasurements, String> {
     verify_layout_focus(workspace, scenario, accepted, false)
 }
 
@@ -265,7 +255,7 @@ fn verify_layout_focus(
     scenario: &Scenario,
     accepted: &AcceptedWindows,
     globally_focused: bool,
-) -> Result<LayoutMeasurements, Failure> {
+) -> Result<LayoutMeasurements, String> {
     // Validate every container, including wrappers the comparison below steps through.
     shape(workspace)?;
 
@@ -279,10 +269,7 @@ fn verify_layout_focus(
     let observed_id_set: BTreeSet<i64> = observed_window_ids.iter().copied().collect();
     let accepted_id_set: BTreeSet<i64> = accepted.keys().copied().collect();
     if observed_id_set != accepted_id_set {
-        return Err(Failure::Uncertain(format!(
-            "unexpected windows: {}",
-            outline(workspace)
-        )));
+        return Err(format!("unexpected windows: {}", outline(workspace)));
     }
 
     let container_ids: HashMap<&str, i64> = accepted
@@ -292,25 +279,19 @@ fn verify_layout_focus(
     let mut expected_window_ids = Vec::new();
     for leaf in scenario.layout.leaves() {
         let Some(container_id) = container_ids.get(leaf.layout_id.as_str()) else {
-            return Err(Failure::Uncertain(format!(
-                "no accepted window for {}",
-                leaf.layout_id
-            )));
+            return Err(format!("no accepted window for {}", leaf.layout_id));
         };
         expected_window_ids.push(*container_id);
     }
     if observed_window_ids != expected_window_ids {
-        return Err(Failure::Uncertain(format!(
-            "window order differs: {}",
-            outline(workspace)
-        )));
+        return Err(format!("window order differs: {}", outline(workspace)));
     }
 
     let Some(&expected_focus_window_id) = container_ids.get(scenario.expected_focus) else {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "no accepted window for focus {}",
             scenario.expected_focus
-        )));
+        ));
     };
     let observed_focused_container_ids: Vec<i64> = placed_nodes
         .iter()
@@ -323,11 +304,11 @@ fn verify_layout_focus(
         Vec::new()
     };
     if observed_focused_container_ids != expected_global_focus {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "final focus differs: expected {} id={expected_focus_window_id}, observed {}",
             scenario.expected_focus,
             outline(workspace)
-        )));
+        ));
     }
 
     if !globally_focused {
@@ -337,14 +318,10 @@ fn verify_layout_focus(
                 .nodes
                 .iter()
                 .find(|child| Some(&child.id) == selected.focus.first())
-                .ok_or_else(|| {
-                    Failure::Uncertain("inactive workspace lacks selected-child history".into())
-                })?;
+                .ok_or("inactive workspace lacks selected-child history")?;
         }
         if selected.id != expected_focus_window_id {
-            return Err(Failure::Uncertain(
-                "inactive workspace selected focus differs".into(),
-            ));
+            return Err("inactive workspace selected focus differs".into());
         }
     }
 
@@ -361,16 +338,13 @@ fn verify_layout_focus(
         &mut measurements,
     );
 
-    if let Err(failure) = comparison {
+    if let Err(message) = comparison {
         let context = format!(
             "\nExpected layout:\n{}Observed: {}",
             diagnostic_yaml(scenario),
             outline(workspace)
         );
-        return Err(match failure {
-            Failure::Check(message) => Failure::Check(message + &context),
-            Failure::Uncertain(message) => Failure::Uncertain(message + &context),
-        });
+        return Err(message + &context);
     }
     Ok(measurements)
 }
@@ -385,7 +359,7 @@ fn compare_node(
     container_ids: &HashMap<&str, i64>,
     expected_focus: &str,
     measurements: &mut LayoutMeasurements,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     let mut observed = observed;
     while !is_window(observed)
         && observed.nodes.len() == 1
@@ -399,11 +373,11 @@ fn compare_node(
         ConfiguredNode::Window(window) => {
             let expected_id = container_ids.get(window.layout_id.as_str());
             if !is_window(observed) || expected_id != Some(&observed.id) {
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "{location}: expected {}, observed {}",
                     window.layout_id,
                     outline(observed)
-                )));
+                ));
             }
             return Ok(());
         }
@@ -417,12 +391,12 @@ fn compare_node(
         || observed.layout != expected_layout
         || observed.nodes.len() != configured_children.len()
     {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "{location}: expected {} with {} children, observed {}",
             layout_name(expected_layout),
             configured_children.len(),
             outline(observed)
-        )));
+        ));
     }
 
     if layout.is_split() {
@@ -434,10 +408,10 @@ fn compare_node(
         let selected_child_index = configured.selected_child_index(Some(expected_focus));
         let selected_child = &observed.nodes[selected_child_index];
         if observed.focus.first() != Some(&selected_child.id) {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "{location}: selected child differs: expected id={}, child-focus history={:?}",
                 selected_child.id, observed.focus
-            )));
+            ));
         }
     }
 
@@ -463,7 +437,7 @@ fn measure_split(
     observed: &TreeNode,
     path: &[usize],
     measurements: &mut LayoutMeasurements,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     let location = describe_path(path);
     let expected_layout = observed.layout;
     let rects: Vec<Rect> = observed.nodes.iter().map(|child| child.rect).collect();
@@ -472,17 +446,15 @@ fn measure_split(
         .map(|rect| span(rect, expected_layout))
         .collect();
     if spans.iter().any(|&(_, extent)| extent <= 0) {
-        return Err(Failure::Check(format!(
-            "{location}: unusable rectangles {rects:?}"
-        )));
+        return Err(format!("{location}: unusable rectangles {rects:?}"));
     }
     for adjacent in spans.windows(2) {
         let (previous_position, previous_extent) = adjacent[0];
         let (next_position, _) = adjacent[1];
         if i64::from(previous_position) + i64::from(previous_extent) > i64::from(next_position) {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "{location}: visual order/overlap differs: {rects:?}"
-            )));
+            ));
         }
     }
 
@@ -514,9 +486,9 @@ fn measure_split(
         observed.id
     );
     if max_deviation > SIZING_TOLERANCE_POINTS + SHARE_EPSILON {
-        return Err(Failure::Check(format!(
+        return Err(format!(
             "sizing exceeds 5 percentage points (check application minimum sizes): {detail}"
-        )));
+        ));
     }
     if max_deviation > SIZING_TARGET_POINTS + SHARE_EPSILON {
         measurements.sizing_notes.push(detail);

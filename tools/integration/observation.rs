@@ -42,8 +42,8 @@ pub struct Events {
     /// observation, then changed only by an expected switch or rename. Until it is set, any
     /// focus change fails.
     current_workspace: Option<WorkspaceIdentity>,
-    /// Cleared by any fence or snapshot consistency failure, and never restored. Unlike an
-    /// ordinary failure, untrusted history forbids further fences and cleanup.
+    /// Cleared by any fence or snapshot consistency failure, and by the runner when the run
+    /// fails; never restored. Untrusted history refuses every later fence, and so cleanup.
     focus_history_trusted: bool,
     workspace_revision: u64,
 }
@@ -94,8 +94,7 @@ impl Events {
         self.focus_history_trusted
     }
 
-    /// Marks focus history untrusted and returns `message` as the error, for failures that
-    /// leave workspace control uncertain rather than merely failing a check.
+    /// Marks focus history untrusted and returns `message` as the error.
     pub fn distrust_focus_history(&mut self, message: impl Into<String>) -> String {
         self.focus_history_trusted = false;
         message.into()
@@ -266,43 +265,6 @@ fn apply_workspace_event(
     Ok(())
 }
 
-/// A failed verification, classified by what it leaves in doubt. Either kind ends the run
-/// without further cleanup; only `report` turns one into a message.
-#[derive(Debug)]
-pub enum Failure {
-    /// An expectation failed, such as sizing, while window ownership and workspace control
-    /// remain established.
-    Check(String),
-    /// Window ownership, placement, identity, or workspace control is uncertain.
-    Uncertain(String),
-}
-
-impl Failure {
-    /// Returns the message to report. An uncertain failure also distrusts focus history,
-    /// which refuses every later fence and so forbids cleanup.
-    pub fn report(self, events: &mut Events) -> String {
-        self.report_history(&mut events.focus_history_trusted)
-    }
-
-    fn report_history(self, focus_history_trusted: &mut bool) -> String {
-        match self {
-            Failure::Check(message) => message,
-            Failure::Uncertain(message) => {
-                *focus_history_trusted = false;
-                message
-            }
-        }
-    }
-}
-
-// Strings come only from ordinary filesystem/process checks or observations that already
-// invalidate their own history. Verification retains Failure until the central report.
-impl From<String> for Failure {
-    fn from(message: String) -> Self {
-        Self::Check(message)
-    }
-}
-
 /// Sway state from `get_workspaces`, then `get_tree`, then a fence covering every event
 /// emitted before both replies. The tree may still predate some of those events.
 pub struct Snapshot {
@@ -315,13 +277,10 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Also used by preservation decisions on recorded snapshots in offline tests.
-    pub fn validate(&self) -> Result<(), Failure> {
-        let focused_workspace_id =
-            validate_snapshot(&self.tree, &self.workspaces, None).map_err(Failure::Uncertain)?;
+    pub fn validate(&self) -> Result<(), String> {
+        let focused_workspace_id = validate_snapshot(&self.tree, &self.workspaces, None)?;
         if focused_workspace_id != self.focused_workspace_id {
-            return Err(Failure::Uncertain(
-                "snapshot focus evidence contradicts its tree".into(),
-            ));
+            return Err("snapshot focus evidence contradicts its tree".into());
         }
         Ok(())
     }

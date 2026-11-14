@@ -4,7 +4,6 @@
 //! never establish ownership. Later checks require those container IDs on the target
 //! workspace in safe tiled state, as native Wayland windows with the exact app ID, and,
 //! where the leaf requires it, the literal launch arguments in `/proc/PID/cmdline`.
-//! Every failure here is `Uncertain`, which forbids cleanup.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -13,7 +12,7 @@ use std::path::Path;
 
 use crate::ipc::{Shell, TreeNode, WindowChange, WindowEvent};
 use crate::layout::{class, is_window, outline};
-use crate::observation::{Failure, walk};
+use crate::observation::walk;
 use crate::scenarios::{ConfiguredNode, ConfiguredWindow};
 
 /// Sway container ID → configured layout ID, for windows this run launched and accepted.
@@ -38,7 +37,7 @@ fn is_harmless(change: WindowChange) -> bool {
 pub fn require_quiet(
     window_events: &[WindowEvent],
     expected_close: Option<&ExpectedClose>,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     for event in window_events {
         if is_harmless(event.change) {
             continue;
@@ -54,10 +53,10 @@ pub fn require_quiet(
                 continue;
             }
         }
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "unexpected window activity: {:?} id={container_id}",
             event.change
-        )));
+        ));
     }
     Ok(())
 }
@@ -72,7 +71,7 @@ pub fn bind_launches(
     window_events: &[WindowEvent],
     layout: &ConfiguredNode,
     preexisting_ids: &HashSet<i64>,
-) -> Result<AcceptedWindows, Failure> {
+) -> Result<AcceptedWindows, String> {
     let mut new_window_ids = Vec::new();
     for event in window_events {
         if event.change != WindowChange::New {
@@ -80,19 +79,19 @@ pub fn bind_launches(
         }
         let container_id = event.container.id;
         if preexisting_ids.contains(&container_id) || new_window_ids.contains(&container_id) {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "preexisting or repeated new event: id={container_id}"
-            )));
+            ));
         }
         new_window_ids.push(container_id);
     }
 
     let leaves = layout.leaves();
     if new_window_ids.len() != leaves.len() {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "expected {} sequential new windows, observed IDs {new_window_ids:?}",
             leaves.len()
-        )));
+        ));
     }
     let leaves_by_container: HashMap<i64, &ConfiguredWindow> =
         new_window_ids.iter().copied().zip(leaves).collect();
@@ -106,20 +105,20 @@ pub fn bind_launches(
         let leaf = match leaves_by_container.get(&container_id) {
             Some(leaf) if matches!(event.change, WindowChange::New | WindowChange::Focus) => leaf,
             _ => {
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "unexpected activity during load: {:?} id={container_id}",
                     event.change
-                )));
+                ));
             }
         };
         // Identities may arrive after the new event, so an absent one is not a mismatch.
         let reported_app_id = event.container.app_id.as_deref();
         if reported_app_id.is_some_and(|app_id| app_id != leaf.app_id) {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "event identity differs: id={container_id} app_id={reported_app_id:?}, \
                  expected {:?}",
                 leaf.app_id
-            )));
+            ));
         }
     }
 
@@ -142,7 +141,7 @@ pub fn verify_ownership(
     layout: &ConfiguredNode,
     preexisting_ids: &HashSet<i64>,
     accepted: &AcceptedWindows,
-) -> Result<(), Failure> {
+) -> Result<(), String> {
     let leaves = layout.leaves();
     let mut verified_windows = AcceptedWindows::new();
     for placed in walk(tree) {
@@ -180,35 +179,35 @@ pub fn verify_ownership(
                 let workspace_name = placed
                     .workspace
                     .and_then(|workspace| workspace.name.as_deref());
-                return Err(Failure::Uncertain(format!(
+                return Err(format!(
                     "ownership/placement uncertain: id={container_id} app_id={:?} class={:?} \
                      workspace={workspace_name:?}",
                     node.app_id,
                     class(node)
-                )));
+                ));
             }
         };
         let Some(leaf) = leaves
             .iter()
             .find(|leaf| &leaf.layout_id == owned_layout_id)
         else {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "accepted window id={container_id} names no layout leaf {owned_layout_id}"
-            )));
+            ));
         };
 
         if observed_app_id != Some(leaf.app_id.as_str()) {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "owned identity changed: id={container_id} expected app_id {:?}",
                 leaf.app_id
-            )));
+            ));
         }
         let is_native_wayland = node.shell == Some(Shell::XdgShell) && node.window.is_none();
         if !is_native_wayland {
-            return Err(Failure::Uncertain(format!(
+            return Err(format!(
                 "expected a native Wayland window: {}",
                 outline(node)
-            )));
+            ));
         }
         if leaf.requires_process_evidence {
             require_process_command(node, leaf)?;
@@ -218,27 +217,27 @@ pub fn verify_ownership(
     }
 
     if &verified_windows != accepted {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "owned windows changed: expected {accepted:?}, observed {verified_windows:?}"
-        )));
+        ));
     }
     Ok(())
 }
 
 /// Requires Sway's PID for `window` to show the configured application's literal argv.
 /// Recovered arguments never appear in messages.
-pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Result<(), Failure> {
+pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Result<(), String> {
     let Some(pid) = window.pid.filter(|pid| *pid > 0) else {
-        return Err(Failure::Uncertain(format!(
+        return Err(format!(
             "no usable Sway process identity: container={} leaf={}",
             window.id, leaf.layout_id
-        )));
+        ));
     };
     let refuse = |reason: &str| {
-        Failure::Uncertain(format!(
+        format!(
             "{reason}: container={} pid={pid} leaf={}; refusing cleanup",
             window.id, leaf.layout_id
-        ))
+        )
     };
 
     let command_line_path = format!("/proc/{pid}/cmdline");

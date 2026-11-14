@@ -1,8 +1,7 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, TARGET_WORKSPACE_ID, assert_contains, desktop,
-    group, node_mut, parse_tree, rect, uncertain_message, wayland_window, window_event,
-    workspaces_reply,
+    group, node_mut, parse_tree, rect, wayland_window, window_event, workspaces_reply,
 };
 use crate::ownership::require_quiet;
 use serde_json::{Value, json};
@@ -76,7 +75,9 @@ fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
         let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, PREEXISTING_WINDOW_ID)[field] = changed;
         assert_contains(
-            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
+            &foreign_window_baseline
+                .verify(&recorded_snapshot(tree))
+                .unwrap_err(),
             "identity/geometry/state changed",
         );
     }
@@ -88,7 +89,9 @@ fn foreign_geometry_state_identity_and_ancestor_changes_fail_conservatively() {
         let mut tree = foreign_window_baseline_tree();
         node_mut(&mut tree, ancestor)[field] = changed;
         assert_contains(
-            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
+            &foreign_window_baseline
+                .verify(&recorded_snapshot(tree))
+                .unwrap_err(),
             "ancestry/parent/order/ancestor state changed",
         );
     }
@@ -156,7 +159,9 @@ fn changed_foreign_parent_order_workspace_output_or_disappearance_fails() {
         output_moved,
     ] {
         assert_contains(
-            &uncertain_message(foreign_window_baseline.verify(&recorded_snapshot(tree))),
+            &foreign_window_baseline
+                .verify(&recorded_snapshot(tree))
+                .unwrap_err(),
             "foreign window id=6",
         );
     }
@@ -164,9 +169,9 @@ fn changed_foreign_parent_order_workspace_output_or_disappearance_fails() {
     node_mut(&mut target_output_changed, 4)["id"] = json!(41);
 
     assert_contains(
-        &uncertain_message(
-            foreign_window_baseline.verify(&recorded_snapshot(target_output_changed)),
-        ),
+        &foreign_window_baseline
+            .verify(&recorded_snapshot(target_output_changed))
+            .unwrap_err(),
         "target workspace id=7 changed output ancestry",
     );
 }
@@ -188,8 +193,8 @@ fn contradictory_or_missing_snapshot_evidence_never_establishes_preservation() {
         recorded_snapshot(duplicate),
         missing_target,
     ] {
-        uncertain_message(foreign_window_baseline.verify(&snapshot));
-        uncertain_message(ForeignWindows::record(&snapshot, TARGET_WORKSPACE_ID));
+        foreign_window_baseline.verify(&snapshot).unwrap_err();
+        ForeignWindows::record(&snapshot, TARGET_WORKSPACE_ID).unwrap_err();
     }
 }
 
@@ -209,7 +214,7 @@ fn structural_events_fail_even_when_a_foreign_window_returns_to_its_baseline() {
             .window_events
             .push(window_event(change, PREEXISTING_WINDOW_ID, None));
         foreign_window_baseline.verify(&snapshot).unwrap();
-        uncertain_message(require_quiet(&snapshot.window_events, None));
+        require_quiet(&snapshot.window_events, None).unwrap_err();
     }
 }
 
@@ -222,10 +227,7 @@ fn absent_window_state_fields_cannot_establish_a_preservation_baseline() {
             .unwrap()
             .remove(field);
         assert_contains(
-            &uncertain_message(ForeignWindows::record(
-                &recorded_snapshot(tree),
-                TARGET_WORKSPACE_ID,
-            )),
+            &ForeignWindows::record(&recorded_snapshot(tree), TARGET_WORKSPACE_ID).unwrap_err(),
             "lacks floating/fullscreen/scratchpad evidence",
         );
     }

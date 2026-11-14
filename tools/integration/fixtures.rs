@@ -2,12 +2,11 @@
 //! nodes carry the fields Sway serializes, including ones the harness ignores.
 
 use std::collections::HashSet;
-use std::fmt::Debug;
 
 use serde_json::{Value, json};
 
 use crate::ipc::{TreeNode, WindowEvent, Workspace};
-use crate::observation::{Failure, walk};
+use crate::observation::walk;
 use crate::ownership::AcceptedWindows;
 use crate::scenarios::{Scenario, standard_scenarios};
 
@@ -239,22 +238,6 @@ pub fn window_event(change: &str, container_id: i64, app_id: Option<&str>) -> Wi
         },
     });
     serde_json::from_value(event).expect("a window event in Sway's format")
-}
-
-/// The message of a failure that must be `Uncertain`.
-pub fn uncertain_message<T: Debug>(result: Result<T, Failure>) -> String {
-    match result {
-        Err(Failure::Uncertain(message)) => message,
-        other => panic!("expected an uncertain failure, got {other:?}"),
-    }
-}
-
-/// The message of a failure that must be an ordinary `Check` failure.
-pub fn check_message<T: Debug>(result: Result<T, Failure>) -> String {
-    match result {
-        Err(Failure::Check(message)) => message,
-        other => panic!("expected an ordinary check failure, got {other:?}"),
-    }
 }
 
 pub fn assert_contains(text: &str, expected: &str) {

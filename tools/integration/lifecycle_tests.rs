@@ -2,8 +2,8 @@ use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SCRATCHPAD_WORKSPACE_ID,
     TARGET_WORKSPACE_ID, accepted_windows, assert_contains, configured_app_id, container_ids,
-    desktop, find, group, node_mut, parse_tree, rect, standard_scenario, uncertain_message,
-    wayland_window, window_event, workspaces_reply,
+    desktop, find, group, node_mut, parse_tree, rect, standard_scenario, wayland_window,
+    window_event, workspaces_reply,
 };
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -160,7 +160,7 @@ fn only_a_fresh_compositor_starts_a_run() {
 
     // Another workspace and a window: a used desktop, not a fresh compositor.
     assert_contains(
-        &uncertain_message(verify_fresh_compositor(&starting_snapshot())),
+        &verify_fresh_compositor(&starting_snapshot()).unwrap_err(),
         r#"found ["1", "9"]"#,
     );
 
@@ -170,7 +170,7 @@ fn only_a_fresh_compositor_starts_a_run() {
         node_mut(&mut tree, OTHER_WORKSPACE_ID)[child_key] =
             json!([group(30, "splith", rect(0, 0, 1920, 1080), Vec::new())]);
         assert_contains(
-            &uncertain_message(verify_fresh_compositor(&fresh_compositor_snapshot(tree))),
+            &verify_fresh_compositor(&fresh_compositor_snapshot(tree)).unwrap_err(),
             "occupied",
         );
     }
@@ -179,7 +179,7 @@ fn only_a_fresh_compositor_starts_a_run() {
     node_mut(&mut tree, SCRATCHPAD_WORKSPACE_ID)["floating_nodes"] =
         json!([wayland_window(40, "hidden", rect(0, 0, 100, 100))]);
     assert_contains(
-        &uncertain_message(verify_fresh_compositor(&fresh_compositor_snapshot(tree))),
+        &verify_fresh_compositor(&fresh_compositor_snapshot(tree)).unwrap_err(),
         "found container 40",
     );
 
@@ -187,7 +187,7 @@ fn only_a_fresh_compositor_starts_a_run() {
     renamed.workspaces[0].name = "2".into();
     find_and_rename(&mut renamed.tree, OTHER_WORKSPACE_ID, "2");
     assert_contains(
-        &uncertain_message(verify_fresh_compositor(&renamed)),
+        &verify_fresh_compositor(&renamed).unwrap_err(),
         r#"starts on workspace "1", found "2""#,
     );
 }
@@ -289,52 +289,56 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
     let owned_windows = accepted_windows(&[(20, "window1"), (21, "window2")]);
 
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &snapshot,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             false,
-        )),
+        )
+        .unwrap_err(),
         "trusted",
     );
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &snapshot,
             &context,
             &owned_windows,
             &workspace_baseline,
             99,
             true,
-        )),
+        )
+        .unwrap_err(),
         "individually verified",
     );
     let mut activity = loaded_pair_snapshot(&scenario);
     activity.window_events.push(window_event("focus", 20, None));
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &activity,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             true,
-        )),
+        )
+        .unwrap_err(),
         "unexpected window activity",
     );
 
     let mut changed = loaded_pair_snapshot(&scenario);
     changed.tree.nodes[1].nodes[1].nodes[0].rect.width += 1;
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &changed,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             true,
-        )),
+        )
+        .unwrap_err(),
         "changed before cleanup",
     );
 
@@ -347,28 +351,30 @@ fn cleanup_refuses_lost_history_activity_changed_state_and_unowned_ids() {
             rect(0, 0, 50, 50),
         )));
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &foreign,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             true,
-        )),
+        )
+        .unwrap_err(),
         "ownership/placement uncertain",
     );
 
     let mut elsewhere = loaded_pair_snapshot(&scenario);
     elsewhere.focused_workspace_id = OTHER_WORKSPACE_ID;
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &elsewhere,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             true,
-        )),
+        )
+        .unwrap_err(),
         "trusted target",
     );
 }
@@ -447,28 +453,30 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         .window_events
         .push(window_event("close", PREEXISTING_WINDOW_ID, None));
     assert_contains(
-        &uncertain_message(verify_close_observation(
+        &verify_close_observation(
             &unexpected_event,
             &context,
             &owned_windows,
             &close_plan,
             &workspace_baseline,
             20,
-        )),
+        )
+        .unwrap_err(),
         "unexpected window activity",
     );
 
     let mut changed_hierarchy = survivor();
     changed_hierarchy.tree.nodes[1].nodes[1].nodes[0].pid = Some(5_999_999);
     assert_contains(
-        &uncertain_message(verify_close_observation(
+        &verify_close_observation(
             &changed_hierarchy,
             &context,
             &owned_windows,
             &close_plan,
             &workspace_baseline,
             20,
-        )),
+        )
+        .unwrap_err(),
         "cleanup hierarchy changed",
     );
 
@@ -477,14 +485,15 @@ fn close_observation_allows_only_the_requested_disappearance_and_verified_surviv
         .rect
         .width -= 1;
     assert_contains(
-        &uncertain_message(verify_close_observation(
+        &verify_close_observation(
             &changed_while_waiting,
             &context,
             &owned_windows,
             &close_plan,
             &workspace_baseline,
             20,
-        )),
+        )
+        .unwrap_err(),
         "while waiting for close",
     );
 
@@ -660,23 +669,19 @@ fn occupied_refusal_requires_the_specific_prelaunch_error_and_unchanged_desktop(
         ),
         (1, occupied_diagnostic().replace("prelaunch", "launch")),
     ] {
-        uncertain_message(verify_refusal(
-            &refused_output(code, &diagnostic),
-            &before,
-            &after,
-            false,
-        ));
+        verify_refusal(&refused_output(code, &diagnostic), &before, &after, false).unwrap_err();
     }
     let mut stdout = refused_output(1, &occupied_diagnostic());
     stdout.stdout = "unexpected data".into();
-    uncertain_message(verify_refusal(&stdout, &before, &after, false));
+    verify_refusal(&stdout, &before, &after, false).unwrap_err();
     // Init/empty or focus events returning to the baseline are still evidence of activity.
-    uncertain_message(verify_refusal(
+    verify_refusal(
         &refused_output(1, &occupied_diagnostic()),
         &before,
         &after,
         true,
-    ));
+    )
+    .unwrap_err();
 }
 
 #[test]
@@ -718,7 +723,7 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
             "foreign-geometry" => after.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1,
             _ => unreachable!(),
         }
-        uncertain_message(verify_refusal(&output, &before, &after, false));
+        verify_refusal(&output, &before, &after, false).unwrap_err();
     }
     for change in [
         "new",
@@ -731,7 +736,7 @@ fn occupied_refusal_rejects_new_windows_and_changed_ids_hierarchy_focus_or_geome
         let mut after = loaded_pair_snapshot(&scenario);
         after.window_events.push(window_event(change, 99, None));
         assert_contains(
-            &uncertain_message(verify_refusal(&output, &before, &after, false)),
+            &verify_refusal(&output, &before, &after, false).unwrap_err(),
             "unexpected window activity",
         );
     }
@@ -792,31 +797,34 @@ fn foreign_fixture_requires_its_own_launch_evidence_for_cleanup() {
     )
     .unwrap();
     for closing_window_id in [PREEXISTING_WINDOW_ID, 99] {
-        uncertain_message(prepare_close(
+        prepare_close(
             &loaded,
             &context,
             &owned_windows,
             &workspace_baseline,
             closing_window_id,
             true,
-        ));
+        )
+        .unwrap_err();
     }
-    uncertain_message(prepare_close(
+    prepare_close(
         &loaded,
         &context,
         &AcceptedWindows::new(),
         &workspace_baseline,
         20,
         true,
-    ));
-    uncertain_message(prepare_close(
+    )
+    .unwrap_err();
+    prepare_close(
         &loaded,
         &context,
         &owned_windows,
         &workspace_baseline,
         20,
         false,
-    ));
+    )
+    .unwrap_err();
     let mut changed_foreign = recorded_snapshot(
         desktop(
             "splith",
@@ -828,25 +836,27 @@ fn foreign_fixture_requires_its_own_launch_evidence_for_cleanup() {
     );
     changed_foreign.tree.nodes[1].nodes[0].nodes[0].rect.width -= 1;
     assert_contains(
-        &uncertain_message(prepare_close(
+        &prepare_close(
             &changed_foreign,
             &context,
             &owned_windows,
             &workspace_baseline,
             20,
             true,
-        )),
+        )
+        .unwrap_err(),
         "foreign window",
     );
     // Preservation is checked on the post-close boundary too; no later close is allowed.
-    uncertain_message(verify_close_observation(
+    verify_close_observation(
         &changed_foreign,
         &context,
         &owned_windows,
         &close_plan,
         &workspace_baseline,
         20,
-    ));
+    )
+    .unwrap_err();
     let mut cleaned = recorded_snapshot(
         desktop("splith", Vec::new(), TARGET_WORKSPACE_ID),
         "9",
@@ -877,13 +887,10 @@ fn interrupted_or_incomplete_second_invocation_never_authorizes_cleanup_or_resto
             "start failed",
             "interrupted",
         ] {
-            uncertain_message(refusal_completion(Err(reason.into()), interrupted));
+            refusal_completion(Err(reason.into()), interrupted).unwrap_err();
         }
     }
-    uncertain_message(refusal_completion(
-        Ok(refused_output(1, &occupied_diagnostic())),
-        true,
-    ));
+    refusal_completion(Ok(refused_output(1, &occupied_diagnostic())), true).unwrap_err();
 }
 
 #[test]
@@ -915,11 +922,7 @@ fn fixture_creation_evidence_survives_expected_focus_changes_but_never_changed_s
     verify_fixture_state(&loaded, &fixture, &workspace_baseline).unwrap();
     let mut changed = recorded_snapshot(make_tree(20), "9", TARGET_WORKSPACE_ID);
     changed.tree.nodes[1].nodes[1].nodes[0].rect.height -= 1;
-    uncertain_message(verify_fixture_state(
-        &changed,
-        &fixture,
-        &workspace_baseline,
-    ));
+    verify_fixture_state(&changed, &fixture, &workspace_baseline).unwrap_err();
 }
 
 #[test]
@@ -1259,14 +1262,15 @@ fn mixed_group_cleanup_requires_exact_surviving_headers_before_every_next_close(
                 .window_events
                 .push(window_event("close", closing_window_id, None));
             assert_contains(
-                &uncertain_message(verify_close_observation(
+                &verify_close_observation(
                     &changed,
                     &context,
                     &remaining,
                     &close_plan,
                     &workspace_baseline,
                     closing_window_id,
-                )),
+                )
+                .unwrap_err(),
                 "cleanup hierarchy changed",
             );
             // A different header layout is equally uncertain.
@@ -1390,7 +1394,7 @@ fn initial_layout_guards_refuse_mutation_on_unsafe_targets() {
             0,
             || panic!("must not mutate {problem}"),
         );
-        assert!(matches!(result, Err(Failure::Uncertain(_))), "{problem}");
+        assert!(result.is_err(), "{problem}");
     }
 }
 
@@ -1455,9 +1459,7 @@ fn initial_layout_failure_leaves_no_launch_or_cleanup_evidence() {
                     },
                 )
                 .and_then(|prepared| progress.begin_cycle(&prepared, &HashSet::new()));
-            let failure = result.unwrap_err();
-            // All preparation failures invalidate history, forbidding restoration too.
-            assert!(matches!(failure, Failure::Uncertain(_)));
+            assert!(result.is_err());
             assert!(progress.preexisting_ids.is_none());
             assert!(progress.accepted.is_empty());
         }
