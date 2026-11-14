@@ -41,62 +41,70 @@ are under [manual application acceptance](#manual-application-acceptance) and
 [manual profile acceptance](#manual-profile-acceptance).
 
 Prerequisites: `sway`, `swaymsg`, Foot, `sleep`, and `setpriv` (util-linux) on `PATH`, plus
-`/bin/sh` and a Linux `/proc` that exposes process arguments. Foot is the only application
-the harness launches. From the repository root:
+`/bin/sh` and a Linux `/proc` that exposes process arguments. Foot is mandatory: it is the
+only application the harness launches, and it cannot be replaced or configured. From the
+repository root:
 
 ```sh
 tools/integration/run.sh                  # all 25 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
-`run.sh` builds `sway-stage` and the `integration` example in release mode into
-`target/<host triple>/release`, whatever `CARGO_TARGET_DIR` or a configured build target
-says, then runs the harness. `--filter` is a case-sensitive substring match over every scenario name, including
-the profile scenarios, and keeps suite order: `--filter single-window` runs one scenario and
-`--filter profile` the four profile scenarios. Any other argument, a missing or empty TEXT,
-or a filter that matches no scenario fails with exit status 2 before anything starts. A run
-exits 0 only when every selected scenario passed and the compositor stopped cleanly.
+`run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
+scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
+suite order: `--filter single-window` runs one scenario and `--filter profile` the four
+profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
+scenario exits with status 2 before anything starts.
 
-Every run starts its own Sway on the wlroots headless backend, whether it selects one
-scenario or all 25. It has one 2560×1440 `HEADLESS-1` output and no Xwayland, bar,
-decorations, input devices, or startup applications. Everything lives in a new owner-only
-directory under `$TMPDIR` (default `/tmp`), with an environment built from nothing but
-`PATH`: private runtime, home, XDG, and temporary directories, and a deliberately
-nonexistent D-Bus bus. The harness never connects to your session's compositor,
-notification daemon, or launch log, so it is safe to start from a terminal inside your Sway
-session. The launcher first verifies the private IPC and Wayland sockets and the single
-virtual output. It then runs the scenario runner as its child with only that private
-environment, so sway-stage and every Foot window it launches see only the private
-compositor. The runner checks the virtual output again and requires a fresh compositor
-(only workspace `1`, focused and empty, with no windows) before its first command.
+Each run starts and stops its own Sway on the wlroots headless backend, with one 2560×1440
+`HEADLESS-1` output and no Xwayland, bar, or input devices. Its sockets and private home,
+XDG, and temporary directories live in a new owner-only session directory under `$TMPDIR`
+(default `/tmp`), and everything it runs receives an environment built from nothing but
+`PATH`. It never connects to your session's compositor, notification daemon, or launch log,
+so it is safe to start from a terminal inside your Sway session.
 
-The runner establishes its workspaces explicitly:
+A passing run prints a ready line, one `PASS` line per selected scenario, `N of N selected
+scenarios passed.`, and `Headless Sway stopped; session files removed.` It exits 0 only
+when every selected scenario passed and the compositor stopped cleanly. Foot windows end
+with the compositor; they are never signalled.
+
+The first failure prints `FAIL  STAGE: reason`, runs no further scenarios, closes no
+windows, stops the compositor, and exits 1. The session directory is kept and its path
+printed. Inspect `sway.log`; `final-tree.json`, the raw tree recorded just before shutdown
+(absent after Ctrl-C); `tmp/sway-stage-integration-*/` for the generated layouts, profiles,
+and captures; and `home/.local/state/sway-stage/last-run.log` for the last sway-stage load.
+
+Ctrl-C fails the run at the runner's next check in the same way. The harness signals only
+its own direct children by PID, never process groups or applications, and if the launcher
+itself is killed, the kernel kills the compositor (`setpriv --pdeathsig`). On 2026-11-14 the
+user ran the complete suite with all 25 scenarios passing, and verified that Ctrl-C
+interruption and forced launcher termination leave no compositor, Foot, or test process
+running. After changing the launcher or the harness's interruption, shutdown, or process
+handling, repeat those user-run checks: interrupt separate runs during a load, a capture,
+and a cleanup, and kill one launcher from another terminal with
+`kill -KILL "$(pgrep -o -x integration)"` (the oldest `integration` process). Each must fail
+naming the interrupted stage, with no subsequent scenarios or closes; an already dispatched
+close may complete. A few seconds after each run, this must print nothing:
+
+```sh
+grep -l sway-stage-headless /proc/[0-9]*/environ 2>/dev/null
+```
+
+The suite exercises sway-stage against a real Sway, but only with Foot, one virtual output,
+and no input devices or desktop services. Other applications, physical outputs, keybinding
+launch context, and visual rendering need the occasional user-run checks under
+[manual application acceptance](#manual-application-acceptance).
+
+### Scenarios
+
+The runner requires a fresh compositor (only workspace `1`, focused and empty) before its
+first command, then establishes its workspaces explicitly:
 
 | Workspace | Role |
 | --- | --- |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
 | `3` | The second target of the successful and partial profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
-
-Expect a ready line, one `PASS` line per selected scenario, `N of N selected scenarios
-passed.`, and `Headless Sway stopped; session files removed.` Shutdown sends `exit` to the
-private socket, waits up to five seconds, then kills only that compositor process. Its Foot
-clients must exit with it; they are observed, never signalled.
-
-The first failure stops the run. It prints `FAIL  STAGE: reason`, runs no further
-scenarios, closes nothing, and leaves remaining windows to the compositor's shutdown. The
-session directory is then kept and its path printed. Inspect `sway.log`;
-`final-tree.json`, the raw tree recorded just before shutdown (absent after Ctrl-C);
-`tmp/sway-stage-integration-*/` for the generated layouts, profiles, and captures; and
-`home/.local/state/sway-stage/last-run.log` for the last sway-stage load. Ctrl-C reaches
-both the launcher and the runner. The runner records it and fails at its next check, then
-the compositor is killed. The launcher kills the runner by PID if it has not stopped ten
-seconds after Ctrl-C, or if it outlasts a generous backstop of five minutes plus five per
-selected scenario. If the launcher itself is killed, the kernel kills the compositor
-(`setpriv --pdeathsig`). The harness kills only its own direct children, never process
-groups or applications.
-
-### Scenarios
 
 The suite runs twenty-one standard Foot scenarios, then four profile scenarios. The
 original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
@@ -220,19 +228,6 @@ flattening, retained empty groups, reparenting, or foreign-window changes stop c
 leave the remaining windows. Offline fixtures establish the verifier's reaction, not actual
 Sway transitions.
 
-For native-group manual acceptance:
-
-1. Record `sway --version`, then run `tools/integration/run.sh` and expect twenty-five
-   passes, including all four capture/reload scenarios. Keep the output and the preserved
-   session directory on failure.
-2. On a separate disposable workspace in your own session, visually check tab/stack header
-   order and singleton headers with a trusted local native-group layout. Confirm default
-   first-child selection, configured non-first selections in nested and inactive groups,
-   and explicit global focus taking precedence along its ancestry. Capture from a delayed
-   command on another workspace and compare the draft; fill only its null commands, check
-   it, then load on another empty target.
-3. Test interruption as described below; a passing run alone does not exercise it.
-
 In `duplicate-foot-ids`, both Foot windows share one run-specific app ID and differ only in
 a literal `--title` launch argument. Ownership therefore also requires each window's
 `/proc/PID/cmdline` to match its own leaf's launch arguments. Inferred commands must contain
@@ -282,24 +277,16 @@ literal process-argument evidence. Failure stops subsequent scenarios and closes
 remaining windows to the compositor's shutdown. Gaps, minimum sizes, or version differences
 can explain conservative failures.
 
-After harness safety changes, interrupt separate runs during a load, a capture, and a
-cleanup with Ctrl-C. Expect a `FAIL` line naming the interrupted stage, no subsequent
-scenarios or closes, a killed compositor, and a preserved session directory. An already
-dispatched close may complete. Repeat once by killing the launcher from another terminal
-with `kill -KILL "$(pgrep -o -x integration)"` (the oldest `integration` process); the
-kernel then kills the compositor, and the runner fails on its own. A few seconds after each
-run, this must print nothing, showing that no compositor, Foot window, or other process
-still carries the session's environment:
-
-```sh
-grep -l sway-stage-headless /proc/[0-9]*/environ 2>/dev/null
-```
-
 The harness's guards against unexpected focus changes, foreign-window changes, and
 owned-window state changes are covered by its offline tests; nothing else connects to the
 private compositor during a run.
 
 ## Manual application acceptance
+
+These user-only checks complement the headless suite on disposable workspaces in your own
+session. They cover applications other than Foot (including Xwayland), physical outputs,
+keybinding launch context, and visual rendering. Run them occasionally, such as before a
+release or after changing launching, window matching, or focus handling.
 
 Use fresh disposable targets and run checks separately. Build first and validate the examples
 with `sway-stage --layouts-dir examples check NAME`. Foot is required; adapt Firefox's
@@ -324,6 +311,13 @@ rounding/sizing differences (aim within 1 percentage point). Confirm floating, f
 and structural-container focus refuse capture without YAML. Native tabbed/stacked groups,
 including singletons, must capture successfully with weights only beneath splits. Capture must
 leave desktop state and the launch log unchanged.
+
+For the native-group visual check, record `sway --version`, then load a trusted local
+native-group layout on a disposable workspace. Check tab/stack header order and singleton
+headers visually. Confirm default first-child selection, configured non-first selections in
+nested and inactive groups, and explicit global focus taking precedence along its ancestry.
+Capture from a delayed command on another workspace and compare the draft; fill only its
+null commands, check it, then load on another empty target.
 
 Real AppImage, Flatpak, and desktop-launcher command inference has offline coverage only;
 to check it live, capture a disposable workspace manually and review the recovered command.
@@ -435,14 +429,9 @@ cover additional conditions and interference in your own session.
    edited. Repeat an existing name: it must fail without replacing files or the launch log.
    Use offline fixtures for `--all`; do not include unrelated real workspaces in live tests.
 
-The user ran the earlier live-desktop harness, including its since-removed optional
-application scenarios and the original three numeric profile scenarios, in their own Sway
-session, and the temporary two-Foot headless smoke test. On 2026-11-14 the user ran the
-25-scenario headless suite with `tools/integration/run.sh`, and all 25 scenarios passed.
-Its interruption and launcher-termination checks remain unverified, as do the additional
-manual variants above; cross-monitor and interference runs provide optional further
-coverage. A successful run does not establish broader compositor compatibility or
-transactional isolation.
+The additional manual profile variants above remain unverified; cross-monitor and
+interference runs provide optional further coverage. A passing headless suite does not
+establish broader compositor compatibility or transactional isolation.
 
 ## Maintainer notes
 
@@ -460,4 +449,6 @@ prove geometry changed. Detailed mechanics belong in source and comments.
 
 Development-only diagnostics are Cargo examples: `inspect_sway` prints a focused-workspace
 snapshot; `observe_sway` observes for ten seconds and sends visible tick fences. Neither is
-a user-facing layout command. All desktop verification remains user-run.
+a user-facing layout command. Both connect to the compositor named by `SWAYSOCK`, normally
+your own session, so they remain user-run; the headless harness permission does not extend
+to them.

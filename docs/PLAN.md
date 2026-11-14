@@ -5,8 +5,8 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
 [development](DEVELOPMENT.md). Remaining work:
 
 - **Native groups, visual verification.** Check tab/stack header order and singleton
-  headers against the installed Sway version, following the developer guide's separate
-  visual acceptance procedure.
+  headers against the installed Sway version, following the developer guide's
+  native-group visual check.
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
   and locked MSRV build; review repository contents, dependencies, licensing, and release
   metadata for public distribution.
@@ -18,15 +18,13 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   installation on the chosen baseline, including understandable failures for missing
   optional tools. Record the Sway version actually verified without implying broader
   compatibility.
-- **Headless harness interruption checks.** All 25 scenarios pass in the private headless
-  Sway. Interrupt runs with Ctrl-C and kill the launcher as the developer guide describes,
-  confirming that no compositor or Foot process outlives a run.
-- **Final acceptance.** Complete the optional unified-menu acceptance procedure, keybinding
-  launch-context and loader interference checks (including in-workspace focus restoration),
-  and additional manual profile variants in the developer guide. Real multi-monitor
-  verification remains incomplete; output-migration safeguards are implemented
-  and covered offline. Hardware checks are additional acceptance evidence, not a prerequisite
-  for continued development.
+- **Final acceptance.** Complete the developer guide's manual application acceptance with
+  applications other than Foot, which is the only application the headless suite launches.
+  Also complete the optional unified-menu acceptance procedure, keybinding launch-context
+  and loader interference checks (including in-workspace focus restoration), and additional
+  manual profile variants. Real multi-monitor verification remains incomplete;
+  output-migration safeguards are implemented and covered offline. Hardware checks are
+  additional acceptance evidence, not a prerequisite for continued development.
 - **Publish v0.1.0.** After acceptance, tag and publish the validated archives, checksums,
   installation instructions, and release notes.
 
