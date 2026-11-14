@@ -469,7 +469,6 @@ pub enum WindowChange {
 pub struct EventContainer {
     pub id: i64,
     pub app_id: Option<String>,
-    pub window_properties: Option<WindowProperties>,
 }
 
 #[derive(Debug, Deserialize)]

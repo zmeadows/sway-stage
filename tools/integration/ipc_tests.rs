@@ -88,16 +88,14 @@ fn monitor_lines_decode_by_their_distinct_keys() {
     assert_eq!(window.container.id, 20);
     assert_eq!(window.container.app_id.as_deref(), Some("foot"));
 
+    // Another client's Xwayland window has no app ID; its class is not modeled here.
     let xwayland = br#"{"change": "title", "container": {"id": 21, "app_id": null,
         "window_properties": {"class": "XTerm", "instance": "xterm"}}}"#;
     let Ok(Event::Window(xwayland)) = decode_event(xwayland) else {
         panic!("expected a window event");
     };
-    let class = xwayland
-        .container
-        .window_properties
-        .and_then(|properties| properties.class);
-    assert_eq!(class.as_deref(), Some("XTerm"));
+    assert_eq!(xwayland.container.id, 21);
+    assert_eq!(xwayland.container.app_id, None);
 
     let workspace = br#"{"change": "focus", "current": {"id": 7, "name": "9", "type": "workspace"},
         "old": {"id": 5, "name": "1", "type": "workspace"}}"#;

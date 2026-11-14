@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::ipc::{TreeNode, WindowEvent, Workspace};
 use crate::observation::{Failure, walk};
 use crate::ownership::AcceptedWindows;
-use crate::scenarios::{Scenario, extended_scenarios, standard_scenarios};
+use crate::scenarios::{Scenario, standard_scenarios};
 
 pub const RUN_ID: &str = "0123456789abcdef01234567";
 pub const FOOT: &str = "/usr/bin/foot";
@@ -27,13 +27,6 @@ pub fn standard_scenario(name: &str) -> Scenario {
         .into_iter()
         .find(|scenario| scenario.name == name)
         .expect("a standard scenario name")
-}
-
-pub fn extended_scenario(name: &str) -> Scenario {
-    extended_scenarios(RUN_ID, FOOT, SLEEP)
-        .into_iter()
-        .find(|scenario| scenario.name == name)
-        .expect("an extended scenario name")
 }
 
 /// The selector value configured for one of the scenario's windows.

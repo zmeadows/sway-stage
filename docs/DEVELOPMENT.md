@@ -49,8 +49,10 @@ required. Only one Sway seat is supported by the harness.
 ## Integration harness
 
 Prerequisites: `swaymsg`, Foot, and `sleep` on `PATH`, plus the two release executables.
-Profile scenarios also use `/bin/sh` to record launches before executing each configured
-command with its original argument boundaries.
+Foot is the only GUI application the harness launches. Linux `/proc` must expose process
+arguments for the process-execution and repeated-app-ID ownership checks. Profile scenarios
+also use `/bin/sh` to record launches before executing each configured command with its
+original argument boundaries.
 From the repository root, build (agents may perform these build steps):
 
 ```sh
@@ -71,7 +73,6 @@ Run manually, one invocation at a time:
 
 ```sh
 ./target/release/examples/integration --workspace 9 --foreign-workspace 8
-./target/release/examples/integration --workspace 9 --foreign-workspace 8 --extended
 ```
 
 To include multi-workspace profiles, reserve a third disposable workspace and launch
@@ -87,23 +88,22 @@ from another workspace, outside **all three** targets:
 All three numbers must be distinct and obey the same restrictions above. The additional
 profile target is preflighted before any desktop mutation and rechecked before each profile.
 It must be absent or completely empty; the harness never clears occupied workspaces.
-Omitting `--profile-workspace` keeps the existing two-workspace suite and reports four
-profile SKIPs. The flag also works with `--extended`.
+Omitting `--profile-workspace` keeps the two-workspace suite and reports four profile
+SKIPs.
 
 | Option | Meaning |
 | --- | --- |
 | `--workspace NUMBER` | Required disposable target; the harness explicitly switches to it. |
 | `--foreign-workspace NUMBER` | Required second disposable workspace, distinct from the target and starting workspace; holds one verified Foot fixture. |
 | `--profile-workspace NUMBER` | Optional third disposable workspace for the second profile target; enables four profile scenarios after the other scenarios, while the foreign fixture stays alive. |
-| `--extended` | Append Firefox, Xterm/Xwayland, nested browser, repeated-app-ID, desktop-launcher replay, and unresolved-command cases. |
 | `--binary PATH` | Select another sway-stage build; default is this checkout's `target/release/sway-stage`. |
-| `--firefox-app-id EXACT_ID` | Override the native ID inferred from adjacent `application.ini` metadata. |
 
-The standard run covers twenty Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
+The standard run covers twenty-one Foot scenarios. The original eleven cover: single window, horizontal/vertical pairs,
 uneven siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested
 groups, process execution, default final focus, occupied-workspace refusal, and capture/reload
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
-capture, and guarded cleanup. The nine native-group additions are:
+capture, and guarded cleanup. The nine native-group additions are listed below; the
+twenty-first, `duplicate-foot-ids`, gives two windows one shared app ID (described below).
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -127,14 +127,12 @@ no layout reset or placeholder windows are used. Sway's
 [`layout` implementation](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c)
 updates the empty workspace directly.
 
-Single-window, horizontal-pair, and extended duplicate-foot-ids cases also check inferred
-commands. Expect twenty passes and four profile SKIPs for the standard two-workspace suite.
-Extended runs add six cases, for twenty-six total, plus the separate foreign fixture.
-With all optional prerequisites available, an extended run reports twenty-six passes and
-four profile SKIPs; missing optional prerequisites produce explicit SKIPs.
+Single-window, horizontal-pair, and duplicate-foot-ids cases also check inferred commands.
+Expect twenty-one passes and four profile SKIPs for the two-workspace suite, plus the
+separate foreign fixture.
 
-With `--profile-workspace`, add four passes (twenty-four standard, or up to thirty
-extended) and remove the four profile SKIPs. Expected failures count as passes only after
+With `--profile-workspace`, add four passes (twenty-five total) and remove the four
+profile SKIPs. Expected failures count as passes only after
 independent verification, and the summary reports profile scenarios separately:
 
 | Scenario | Independent expectations |
@@ -198,9 +196,8 @@ cleaned again. The `independent-native-groups` and `outside-focus-capture-reload
 the same round-trip machinery to verify non-first selections in inactive and nested groups,
 including global focus in an unrelated branch. Expected `active` fields are checked in
 the captured YAML and each selected direct child is checked in both observed trees.
-The standard suite has four replay scenarios; the extended suite adds the
-existing desktop-launcher replay for five total. Replays are additional construction
-cycles within those passes, not additional scenario counts. Failure reports the
+The suite has four replay scenarios. Replays are additional construction cycles within
+those passes, not additional scenario counts. Failure reports the
 initial/replay phase and leaves remaining windows alone; no speculative cleanup or retry
 follows.
 
@@ -234,7 +231,7 @@ For native-group manual acceptance:
 
 1. Build both release executables with the commands above and record `sway --version`.
 2. From a third workspace, run the standard command above with two absent/empty disposable
-   workspace numbers. Leave input idle until it finishes; expect twenty passes, including
+   workspace numbers. Leave input idle until it finishes; expect twenty-one passes, including
    all four capture/reload scenarios. Preserve output on failure and inspect reported
    remaining windows manually before another run. Do not rerun into a partially populated target.
 3. On a separate disposable workspace, visually check tab/stack header order and singleton
@@ -244,60 +241,14 @@ For native-group manual acceptance:
    and compare the draft; fill only its null commands, check it, then load on another empty
    target. Do not interact with windows during the harness itself: it deliberately treats
    interference as failure.
-4. Run `--extended` separately for existing optional coverage. Repeat the interference/interrupt
-   procedures below as separate runs; a standard pass alone does not establish those guards live.
+4. Repeat the interference/interrupt procedures below as separate runs; a standard pass
+   alone does not establish those guards live.
 
-The fifth extended case, `desktop-launcher-roundtrip`, creates a uniquely named `.desktop`
-file under a private `XDG_DATA_HOME/applications` inside the harness's temporary directory,
-with a path containing spaces. Its ordinary `Type=Application` entry directly starts a
-Foot window with a run-unique app ID and a 300-second `sleep` child, using desktop-entry
-argument quoting without shell wrappers.
-The initial layout launches it through `gtk-launch`, with the private `XDG_DATA_HOME`
-supplied only to that fixture launcher. Ordered window events, independent Sway
-tree/layout/focus checks, exact Foot process arguments, and independently read GLib
-metadata must establish ownership: the recorded launcher PID must match Sway's window PID,
-and the path must exactly identify the unchanged private fixture. Every initial-cycle
-ownership check, including the checks immediately before cleanup, requires this evidence.
-
-Ordinary capture must match the structural draft; inferred capture must differ only in
-its command, exactly `[gio, launch, PRIVATE_DESKTOP_FILE_PATH]`. State, event-history, and
-foreign-window checks must remain unchanged. After verified initial cleanup, an empty
-workspace, and a fresh baseline, the harness checks and reloads the actual inferred YAML,
-without replacing its command or supplying private XDG overrides. Replay ownership requires
-fresh ordered window events, exact Foot argv, the unchanged fixture, and the same Sway
-identity, placement, layout, focus, and preservation checks. It does not claim launcher
-provenance: GLib 2.84.4's `gio launch` supplies the PID but loses the filename metadata.
-The second inferred capture must therefore either leave `command: null` (the conservative
-production behavior for PID-only metadata) or reconstruct the exact same `gio launch`
-array on newer GLib. Ordinary capture and final guarded cleanup still run.
-This intentionally uses a single window to keep launcher provenance focused;
-the standard round-trip scenario covers nested weights. Any uncertainty stops the case
-without speculative cleanup. The private launcher and replay YAML are removed with the
-harness's temporary files; global desktop configuration is untouched.
-
-The sixth extended case, `unresolved-launcher`, uses the same private GTK/Foot launcher
-infrastructure and prerequisites, with its own unique fixture. Exact Foot argv, matching
-GLib path/PID provenance, ordered window events, layout, focus, and foreign-window checks
-first establish ownership. The harness then renames only its private `.desktop` file within
-its private directory for one bounded `capture` invocation. It restores the
-same file and independently checks its inode and contents before any subsequent ownership
-check or cleanup, including when capture fails or interruption is requested. A retained
-`/proc` directory descriptor and exact process evidence before and after establish that the
-original Foot process remained present across capture without following a reused PID.
-
-The capture must exit zero, retain the inference-disabled draft's selectors, IDs, hierarchy, sizing,
-and focus, and leave its single `command: null`. Stdout is checked independently of stderr,
-which must report `Commands inferred: 0; unresolved: 1. Manual editing required.` No
-speculative launcher or executable may substitute for the null. Fresh snapshots and event
-history must show unchanged desktop state and foreign windows, with no additional window
-launch. Only complete success permits normal guarded cleanup. Any scenario failure stops
-the suite without retries, window cleanup, or workspace restoration. If the private file
-cannot be restored and verified, its directory is retained and reported for manual inspection;
-all windows remain untouched. This case adds no standard-suite dependencies and requires
-no application packages.
-
-For `duplicate-foot-ids`, inferred commands must contain both the shared app-ID argument and
-the correct distinct run-specific title argument from each leaf's original launch array.
+In `duplicate-foot-ids`, both Foot windows share one run-specific app ID and differ only in
+a literal `--title` launch argument. Ownership therefore also requires each window's
+`/proc/PID/cmdline` to match its own leaf's launch arguments. Inferred commands must contain
+both the shared app-ID argument and the correct distinct run-specific title argument from
+each leaf's original launch array.
 Swapped, duplicate, or missing titles fail, even though both selectors agree. Titles reported
 by Sway are never ownership evidence. Normalizing only the inferred command arrays must
 reproduce the verified inference-disabled capture exactly; tree, event-history, and foreign-window
@@ -310,7 +261,7 @@ specific occupied-workspace prelaunch diagnostic. Synchronized trees must preser
 modeled container ID, identity, wrapper, ordering, geometry, and focus across the refusal;
 unexpected window or non-urgent workspace events fail it. A timeout, interruption, or
 unrelated error never counts as an expected refusal. The suite reports this verification
-separately from successful layouts and optional SKIPs. Only this expected-refusal invocation
+separately from successful layouts and profile SKIPs. Only this expected-refusal invocation
 uses a private no-op `notify-send` stub on its child `PATH`, suppressing the intentional
 error notification while preserving stderr and exit-status checks. Other invocations retain
 normal notifications and the harness's environment is unchanged.
@@ -343,37 +294,14 @@ cannot be ruled out; a pass establishes unchanged observed state plus accepted e
 
 Sizing above 1 percentage point is diagnostic; above 5 fails a harness scenario.
 
-Extended prerequisites:
-
-- Native `firefox-esr` (preferred) or `firefox` on `PATH`, a valid `WAYLAND_DISPLAY`, and
-  readable `/proc/PID/cmdline` for Firefox and repeated-ID Foot ownership evidence.
-  Firefox must preserve literal launch arguments; wrappers/sandboxed builds obscuring them
-  fail conservatively. Use `--firefox-app-id` only after verifying your installation's ID.
-- Xterm coverage needs `xterm`, `Xwayland`, and `xdpyinfo` on `PATH`, and `DISPLAY` reaching
-  this session's Xwayland server with the `XWAYLAND` extension. An unavailable server/probe
-  skips the case; a subsequent launch or class mismatch fails it.
-- Desktop-launcher coverage needs `gtk-launch` and `gio` on `PATH` and readable
-  `/proc/PID/cmdline` and `/proc/PID/environ` for Foot. Missing either launcher explicitly
-  skips both optional launcher scenarios. The initial GTK launch must directly start the
-  observed Foot process with matching PID and filename metadata; wrappers, delegated server
-  processes, or missing/contradictory initial metadata fail conservatively. Replay uses
-  independent Foot argv and window-event evidence because older gio loses the filename.
-  No full desktop environment is required. Fixture paths containing `%` or control
-  characters are refused because the fixture deliberately avoids desktop field codes.
-
-Firefox uses private profiles/HOME/XDG directories and no normal profile. Browser directories
-are retained and reported on success and failure: remove them manually only after all their
-processes exit. Firefox has no automatic lifetime limit. Foot and Xterm commands normally
-expire within five minutes of launch. Missing optional subsystems skip; failures with
-available applications stop the suite.
+Scenario Foot terminals normally expire within five minutes of launch.
 
 Cleanup is an explicit success phase, never a failure handler. Each exact-ID close requires
 fresh independent ownership, event-history, state, and hierarchy evidence. Selectors alone
-are insufficient; Firefox and repeated-ID Foot additionally require literal process-argument
-evidence. The desktop-launcher case always requires Foot argv and an unchanged fixture;
-the initial GTK launch additionally requires exact launcher PID/path metadata.
+are insufficient; the process-execution and repeated-app-ID Foot windows additionally require
+literal process-argument evidence.
 Failure stops subsequent scenarios and closes, leaving remaining windows alone.
-Read reported container IDs, selectors, PIDs, and retained paths before manual intervention;
+Read reported container IDs, selectors, and PIDs before manual intervention;
 diagnostic candidates do not imply ownership. Rules, gaps, minimum sizes, desktop activity,
 or version differences can explain conservative failures.
 
@@ -384,7 +312,7 @@ not recreated. An ordinary check failure may permit guarded restoration; uncerta
 
 After harness safety changes, manually test separate runs interrupted during load, capture,
 and cleanup with Ctrl-C or SIGINT to the harness PID only. Expect failure, remaining-window
-and retained-profile diagnostics, no subsequent closes/scenarios, and no restoration once
+diagnostics, no subsequent closes/scenarios, and no restoration once
 interruption is observed. An already dispatched close may complete. The harness reaps only
 its direct children by PID; it must not signal application descendants or process groups.
 Also test away-and-back workspace focus, a foreign window, and an owned-window state change:
@@ -416,9 +344,9 @@ and structural-container focus refuse capture without YAML. Native tabbed/stacke
 including singletons, must capture successfully with weights only beneath splits. Capture must
 leave desktop state and the launch log unchanged.
 
-Real AppImage and Flatpak command inference has offline coverage only; to check it live,
-capture a disposable workspace manually and review the recovered command. General
-edited-draft replay remains covered by the existing round-trip scenarios.
+Real AppImage, Flatpak, and desktop-launcher command inference has offline coverage only;
+to check it live, capture a disposable workspace manually and review the recovered command.
+General edited-draft replay remains covered by the existing round-trip scenarios.
 
 For optional unified-menu acceptance, use one `sway-stage menu` keybinding with temporary
 layout and profile directories and trusted applications on disposable workspaces:
@@ -526,8 +454,10 @@ conditions and interference.
    edited. Repeat an existing name: it must fail without replacing files or the launch log.
    Use offline fixtures for `--all`; do not include unrelated real workspaces in live tests.
 
-The user has successfully run the complete extended harness, including the original three
-numeric profile scenarios, in their live Sway session. The new profile-capture harness steps have not yet been run live. The additional manual variants above remain unverified;
+The user has successfully run the earlier complete harness, including its since-removed
+optional application scenarios and the original three numeric profile scenarios, in their
+live Sway session. The reduced Foot-only suite and the new profile-capture harness steps have
+not yet been run live. The additional manual variants above remain unverified;
 cross-monitor and interference runs provide optional further coverage. A successful run does
 not establish broader compositor compatibility or transactional isolation.
 

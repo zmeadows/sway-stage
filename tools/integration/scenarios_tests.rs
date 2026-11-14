@@ -1,7 +1,6 @@
 use super::*;
-use crate::fixtures::{FOOT, RUN_ID, SLEEP, assert_contains, extended_scenario, standard_scenario};
+use crate::fixtures::{FOOT, RUN_ID, SLEEP, assert_contains, standard_scenario};
 use std::collections::HashSet;
-use std::os::unix::fs::{PermissionsExt, symlink};
 
 /// Groups use a short layout name; only split children carry weights after `@`.
 fn configured_layout_outline(node: &ConfiguredNode) -> String {
@@ -29,12 +28,6 @@ fn configured_layout_outline(node: &ConfiguredNode) -> String {
             format!("{label}({})", children.join(", "))
         }
     }
-}
-
-fn all_scenarios() -> Vec<Scenario> {
-    let mut scenarios = standard_scenarios(RUN_ID, FOOT, SLEEP);
-    scenarios.extend(extended_scenarios(RUN_ID, FOOT, SLEEP));
-    scenarios
 }
 
 #[test]
@@ -122,6 +115,7 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "v(t(s(window1), h(window2@3, window3@2))@3, window4@2)",
             "window4",
         ),
+        ("duplicate-foot-ids", "h(window1@3, window2@2)", "window2"),
     ];
     let expected: Vec<(&str, String, &str)> = expected
         .into_iter()
@@ -132,83 +126,13 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
 
     for scenario in standard_scenarios(RUN_ID, FOOT, SLEEP) {
         assert_eq!(scenario.window_timeout_ms, 20_000);
-        assert_eq!(scenario.extension, None);
-        assert_eq!(scenario.skip, None);
     }
-}
-
-#[test]
-fn extended_scenarios_keep_their_structures_timeouts_and_extensions() {
-    let observed_summaries: Vec<_> = extended_scenarios(RUN_ID, FOOT, SLEEP)
-        .iter()
-        .map(|scenario| {
-            (
-                scenario.name,
-                configured_layout_outline(&scenario.layout),
-                scenario.expected_focus,
-                scenario.window_timeout_ms,
-                scenario.extension,
-            )
-        })
-        .collect();
-    let expected = [
-        (
-            "firefox-two-foot",
-            "h(window1@44, window2@32, window3@24)",
-            "window2",
-            60_000,
-            Some(Extension::Firefox),
-        ),
-        (
-            "xterm-foot",
-            "h(window1@3, window2@2)",
-            "window2",
-            20_000,
-            Some(Extension::Xterm),
-        ),
-        (
-            "nested-firefox-foot",
-            "h(window1@44, window2@32, v(window3@77, window4@23)@24)",
-            "window4",
-            60_000,
-            Some(Extension::Firefox),
-        ),
-        (
-            "duplicate-foot-ids",
-            "h(window1@3, window2@2)",
-            "window2",
-            20_000,
-            Some(Extension::DuplicateFootIds),
-        ),
-        (
-            "desktop-launcher-roundtrip",
-            "window1",
-            "window1",
-            20_000,
-            Some(Extension::DesktopLauncher),
-        ),
-        (
-            "unresolved-launcher",
-            "window1",
-            "window1",
-            20_000,
-            Some(Extension::DesktopLauncher),
-        ),
-    ];
-    let expected: Vec<_> = expected
-        .into_iter()
-        .map(|(name, layout, focus, timeout, extension)| {
-            (name, layout.to_owned(), focus, timeout, extension)
-        })
-        .collect();
-
-    assert_eq!(observed_summaries, expected);
 }
 
 #[test]
 fn leaves_are_sequential_and_focus_selects_one_of_them() {
     let mut names = HashSet::new();
-    for scenario in all_scenarios() {
+    for scenario in standard_scenarios(RUN_ID, FOOT, SLEEP) {
         assert!(names.insert(scenario.name), "repeated {}", scenario.name);
 
         let layout_ids: Vec<String> = scenario
@@ -232,8 +156,8 @@ fn leaves_are_sequential_and_focus_selects_one_of_them() {
 #[test]
 fn foot_windows_have_unique_identifiers_and_bounded_lifetimes() {
     let mut app_ids = HashSet::new();
-    for scenario in all_scenarios() {
-        if scenario.extension == Some(Extension::DuplicateFootIds) {
+    for scenario in standard_scenarios(RUN_ID, FOOT, SLEEP) {
+        if scenario.name == "duplicate-foot-ids" {
             continue;
         }
         for leaf in scenario.layout.leaves() {
@@ -253,7 +177,7 @@ fn foot_windows_have_unique_identifiers_and_bounded_lifetimes() {
 
 #[test]
 fn duplicate_foot_ids_share_a_selector_but_not_launch_arguments() {
-    let scenario = extended_scenario("duplicate-foot-ids");
+    let scenario = standard_scenario("duplicate-foot-ids");
     let shared_app_id = format!("sway-stage-it-{RUN_ID}-duplicate-foot");
     let leaves = scenario.layout.leaves();
 
@@ -272,37 +196,6 @@ fn duplicate_foot_ids_share_a_selector_but_not_launch_arguments() {
         assert!(leaf.requires_process_evidence);
     }
     assert_ne!(leaves[0].command, leaves[1].command);
-}
-
-#[test]
-fn preparation_leaves_standard_and_duplicate_scenarios_runnable() {
-    let applications = OptionalApplications {
-        firefox: None,
-        firefox_app_id_override: None,
-        xterm: None,
-        gio: None,
-        gtk_launch: None,
-    };
-    let mut retained_profiles = Vec::new();
-    for name in ["horizontal-pair", "duplicate-foot-ids"] {
-        let mut scenario = match name {
-            "horizontal-pair" => standard_scenario(name),
-            _ => extended_scenario(name),
-        };
-        let configured_before = configuration_yaml(&scenario);
-        prepare_extended(
-            &mut scenario,
-            RUN_ID,
-            SLEEP,
-            &applications,
-            &mut retained_profiles,
-        )
-        .unwrap();
-        assert_eq!(scenario.skip, None);
-        assert_eq!(configuration_yaml(&scenario), configured_before);
-    }
-
-    assert!(retained_profiles.is_empty());
 }
 
 #[test]
@@ -445,349 +338,6 @@ fn describe_path_uses_field_path_notation() {
 }
 
 #[test]
-fn remoting_name_comes_only_from_the_app_section() {
-    let application_ini = "\
-; comment
-[Gecko]
-RemotingName=wrong
-[App]
-Vendor=Mozilla
-# remotingname=commented
-remotingname = firefox-esr
-";
-
-    assert_eq!(
-        remoting_name(application_ini).unwrap().as_deref(),
-        Some("firefox-esr")
-    );
-    assert_eq!(remoting_name("[App]\nName = Firefox\n").unwrap(), None);
-    assert_eq!(
-        remoting_name("[App]\nRemotingName: firefox\n")
-            .unwrap()
-            .as_deref(),
-        Some("firefox")
-    );
-
-    let repeated = "[App]\nRemotingName=firefox\nREMOTINGNAME=other\n";
-    assert_contains(&remoting_name(repeated).unwrap_err(), "repeated");
-    assert_contains(
-        &remoting_name("[App]\nRemotingName\n").unwrap_err(),
-        "malformed",
-    );
-}
-
-#[test]
-fn app_ids_must_be_simple_identifiers() {
-    for valid in ["firefox", "firefox-esr", "org.mozilla.firefox", "Fx_1"] {
-        assert!(is_simple_identifier(valid), "{valid}");
-    }
-    for invalid in [
-        "",
-        "1firefox",
-        "-firefox",
-        "fire fox",
-        "firefox:",
-        "fire\"fox",
-        "fírefox",
-    ] {
-        assert!(!is_simple_identifier(invalid), "{invalid}");
-    }
-}
-
-/// A private scratch directory for one test, removed afterwards.
-struct ScratchDirectory {
-    directory_path: PathBuf,
-}
-
-impl ScratchDirectory {
-    fn new(test_name: &str) -> Self {
-        let path = env::temp_dir().join(format!(
-            "sway-stage-integration-test-{}-{test_name}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir(&path).unwrap();
-        Self {
-            directory_path: path,
-        }
-    }
-}
-
-impl Drop for ScratchDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.directory_path);
-    }
-}
-
-#[test]
-fn desktop_fixture_is_private_literal_and_requires_independent_process_evidence() {
-    let scratch = ScratchDirectory::new("desktop-launcher");
-    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
-    let foot_command = scenario.layout.leaves()[0].command.clone();
-    let inherited_data_home = env::var_os("XDG_DATA_HOME");
-    configure_desktop_launcher(&mut scenario, &scratch.directory_path).unwrap();
-    let leaf = scenario.layout.leaves()[0];
-    let fixture = leaf.desktop_launcher.as_ref().unwrap();
-
-    assert!(fixture.path.is_absolute());
-    assert!(fixture.path.starts_with(&scratch.directory_path));
-    assert_eq!(fixture.foot_command, foot_command);
-    let data_home = scratch.directory_path.join("desktop data");
-    let desktop_id = format!("{}.desktop", leaf.selector.value());
-    assert_eq!(
-        fixture.path,
-        data_home.join("applications").join(&desktop_id)
-    );
-    assert_eq!(leaf.command, ["gtk-launch", &desktop_id]);
-    assert_eq!(
-        leaf.env,
-        [("XDG_DATA_HOME".into(), data_home.to_str().unwrap().into())]
-    );
-    assert_eq!(env::var_os("XDG_DATA_HOME"), inherited_data_home);
-    assert_eq!(fixture.launch_method, DesktopLaunchMethod::GtkLaunch);
-    for directory in [&data_home, &data_home.join("applications")] {
-        assert_eq!(
-            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
-    assert!(leaf.requires_process_evidence);
-    assert_eq!(fs::read_to_string(&fixture.path).unwrap(), fixture.contents);
-    assert_eq!(
-        fs::metadata(&fixture.path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    let exec = foot_command
-        .iter()
-        .map(|argument| format!("\"{argument}\""))
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert_eq!(
-        fixture.contents,
-        format!(
-            "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={exec}\nTerminal=false\n"
-        )
-    );
-
-    let replay = desktop_launcher_replay(&scenario);
-    let replay_leaf = replay.layout.leaves()[0];
-    assert_eq!(
-        replay_leaf.command,
-        ["gio", "launch", fixture.path.to_str().unwrap()]
-    );
-    assert!(replay_leaf.env.is_empty());
-    assert!(replay_leaf.requires_process_evidence);
-    let replay_fixture = replay_leaf.desktop_launcher.as_ref().unwrap();
-    assert_eq!(replay_fixture.launch_method, DesktopLaunchMethod::GioReplay);
-    assert_eq!(replay_fixture.path, fixture.path);
-    assert_eq!(replay_fixture.contents, fixture.contents);
-    assert_eq!(replay_fixture.foot_command, foot_command);
-    assert_eq!(replay_leaf.selector, leaf.selector);
-    assert_eq!(fixture.launch_method, DesktopLaunchMethod::GtkLaunch);
-    assert!(configure_desktop_launcher(&mut scenario, &scratch.directory_path).is_err());
-}
-
-#[test]
-fn desktop_exec_quoting_applies_both_escape_layers_without_shell_evaluation() {
-    assert_eq!(desktop_exec_argument("two words").unwrap(), "\"two words\"");
-    assert_eq!(
-        desktop_exec_argument("a\"$`\\b").unwrap(),
-        r#""a\\"\\$\\`\\\\b""#
-    );
-    for unsupported in ["%f", "line\nbreak", "nul\0", "tab\t"] {
-        assert!(desktop_exec_argument(unsupported).is_err());
-    }
-}
-
-#[test]
-fn desktop_scenario_explicitly_skips_without_either_launcher() {
-    for (gio, gtk_launch, expected_skip) in [
-        (
-            None,
-            Some("/usr/bin/gtk-launch"),
-            Some("gio is not installed"),
-        ),
-        (
-            Some("/usr/bin/gio"),
-            None,
-            Some("gtk-launch is not installed"),
-        ),
-        (Some("/usr/bin/gio"), Some("/usr/bin/gtk-launch"), None),
-    ] {
-        let mut scenario = extended_scenario("desktop-launcher-roundtrip");
-        let applications = OptionalApplications {
-            firefox: None,
-            firefox_app_id_override: None,
-            xterm: None,
-            gio: gio.map(PathBuf::from),
-            gtk_launch: gtk_launch.map(PathBuf::from),
-        };
-        prepare_extended(&mut scenario, RUN_ID, SLEEP, &applications, &mut Vec::new()).unwrap();
-        assert_eq!(scenario.skip.as_deref(), expected_skip);
-        assert!(scenario.layout.leaves()[0].desktop_launcher.is_none());
-    }
-}
-
-/// An installation like Debian's: a `bin` symlink to the executable beside its metadata.
-/// The fake executable is never run.
-fn fake_firefox(scratch: &ScratchDirectory, application_ini: Option<&str>) -> PathBuf {
-    let installation = scratch.directory_path.join("lib");
-    fs::create_dir(&installation).unwrap();
-    fs::write(installation.join("firefox-esr"), "").unwrap();
-    if let Some(application_ini) = application_ini {
-        fs::write(installation.join("application.ini"), application_ini).unwrap();
-    }
-
-    let bin = scratch.directory_path.join("bin");
-    fs::create_dir(&bin).unwrap();
-    symlink("../lib/firefox-esr", bin.join("firefox-esr")).unwrap();
-    bin.join("firefox-esr")
-}
-
-#[test]
-fn firefox_gets_a_private_retained_profile_and_unresolved_executable() {
-    let scratch = ScratchDirectory::new("firefox-profile");
-    let firefox = fake_firefox(&scratch, Some("[App]\nRemotingName=firefox-esr\n"));
-    let profile_root = scratch.directory_path.join("profile-root");
-    let mut scenario = extended_scenario("firefox-two-foot");
-    let mut retained_profiles = Vec::new();
-
-    configure_firefox(
-        scenario.layout.first_leaf_mut(),
-        &firefox,
-        None,
-        &profile_root,
-        &mut retained_profiles,
-    )
-    .unwrap();
-
-    assert_eq!(retained_profiles, [profile_root.as_path()]);
-    let root_mode = fs::metadata(&profile_root).unwrap().permissions().mode();
-    assert_eq!(root_mode & 0o777, 0o700);
-    let preferences = fs::read_to_string(profile_root.join("profile/user.js")).unwrap();
-    assert_eq!(preferences, FIREFOX_PREFERENCES);
-
-    let root = profile_root.to_str().unwrap();
-    let leaf = scenario.layout.first_leaf_mut();
-    let profile = format!("{root}/profile");
-    let expected_command = [
-        firefox.to_str().unwrap(),
-        "--no-remote",
-        "--new-instance",
-        "--profile",
-        &profile,
-        "--new-window",
-        "about:blank",
-    ];
-    assert_eq!(leaf.command, expected_command);
-    assert_eq!(leaf.selector, Selector::AppId("firefox-esr".into()));
-    assert!(leaf.requires_process_evidence);
-
-    let env: Vec<(&str, &str)> = leaf
-        .env
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    let config = format!("{root}/config");
-    let cache = format!("{root}/cache");
-    let data = format!("{root}/data");
-    let state = format!("{root}/state");
-    let expected_env = [
-        ("HOME", root),
-        ("XDG_CONFIG_HOME", &config),
-        ("XDG_CACHE_HOME", &cache),
-        ("XDG_DATA_HOME", &data),
-        ("XDG_STATE_HOME", &state),
-        ("MOZ_ENABLE_WAYLAND", "1"),
-        ("GDK_BACKEND", "wayland"),
-        ("XDG_ACTIVATION_TOKEN", ""),
-        ("DESKTOP_STARTUP_ID", ""),
-        ("XRE_PROFILE_PATH", ""),
-        ("XRE_PROFILE_LOCAL_PATH", ""),
-        ("XRE_PROFILE_NAME", ""),
-    ];
-    assert_eq!(env, expected_env);
-
-    // The other leaves stay Foot windows, and the configuration carries the environment.
-    let yaml = configuration_yaml(&scenario);
-    assert_contains(&yaml, "window_timeout_ms: 60000\n");
-    assert_contains(&yaml, &format!("      env: {{\"HOME\": \"{root}\", "));
-    assert_contains(&yaml, "        app_id: firefox-esr\n");
-    assert_eq!(yaml.matches("/usr/bin/foot").count(), 2);
-
-    // An existing path is never reused, and nothing more is retained.
-    let mut another = extended_scenario("firefox-two-foot");
-    let error = configure_firefox(
-        another.layout.first_leaf_mut(),
-        &firefox,
-        None,
-        &profile_root,
-        &mut retained_profiles,
-    )
-    .unwrap_err();
-    assert_contains(&error, "create Firefox directory");
-    assert_eq!(retained_profiles.len(), 1);
-}
-
-#[test]
-fn firefox_app_id_failures_still_retain_the_created_profile() {
-    let scratch = ScratchDirectory::new("firefox-app-id");
-    let firefox = fake_firefox(&scratch, None);
-    let mut retained_profiles = Vec::new();
-
-    let missing_metadata_root = scratch.directory_path.join("missing-metadata");
-    let mut scenario = extended_scenario("nested-firefox-foot");
-    let error = configure_firefox(
-        scenario.layout.first_leaf_mut(),
-        &firefox,
-        None,
-        &missing_metadata_root,
-        &mut retained_profiles,
-    )
-    .unwrap_err();
-
-    assert_contains(&error, "cannot determine Firefox Wayland app ID from");
-    assert_contains(&error, "lib/application.ini");
-    assert_contains(&error, "supply --firefox-app-id");
-
-    let invalid_override_root = scratch.directory_path.join("invalid-override");
-    let error = configure_firefox(
-        scenario.layout.first_leaf_mut(),
-        &firefox,
-        Some("firefox esr"),
-        &invalid_override_root,
-        &mut retained_profiles,
-    )
-    .unwrap_err();
-    assert_eq!(error, "Firefox app ID must be a simple literal identifier");
-
-    assert_eq!(
-        retained_profiles,
-        [missing_metadata_root, invalid_override_root]
-    );
-    assert!(
-        retained_profiles
-            .iter()
-            .all(|root| root.join("profile/user.js").is_file())
-    );
-
-    // A valid override needs no metadata.
-    let override_root = scratch.directory_path.join("override");
-    configure_firefox(
-        scenario.layout.first_leaf_mut(),
-        &firefox,
-        Some("org.mozilla.firefox"),
-        &override_root,
-        &mut retained_profiles,
-    )
-    .unwrap();
-    assert_eq!(
-        scenario.layout.first_leaf_mut().selector,
-        Selector::AppId("org.mozilla.firefox".into())
-    );
-}
-
-#[test]
 fn process_settings_preserve_literals_and_absolute_cwd() {
     let mut scenario = standard_scenario("process-execution");
     configure_process_execution(
@@ -886,16 +436,11 @@ fn native_group_yaml_uses_parent_dependent_weights_and_no_root_weight() {
 fn only_initial_layout_cases_prepare_layout_and_reuse_mixed_configuration() {
     let standard = standard_scenarios(RUN_ID, FOOT, SLEEP);
     let mixed = standard_scenario("mixed-native-nesting");
-    assert_eq!(standard.len(), 20);
+    assert_eq!(standard.len(), 21);
     assert!(
         standard
             .iter()
             .filter(|scenario| !matches!(scenario.name, "initially-tabbed" | "initially-stacked"))
-            .all(|scenario| scenario.initial_workspace_layout.is_none())
-    );
-    assert!(
-        extended_scenarios(RUN_ID, FOOT, SLEEP)
-            .iter()
             .all(|scenario| scenario.initial_workspace_layout.is_none())
     );
     assert!(

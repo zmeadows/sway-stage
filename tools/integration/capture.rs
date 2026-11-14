@@ -3,8 +3,7 @@
 //! This is a narrow structural comparison with capture's one known serializer format:
 //! only command argument scalars use YAML decoding. A format change fails visibly, and
 //! `check` on the filled draft supplies authoritative syntax and semantic validation.
-//! Recovered command arguments never appear in messages. Only a verified private fixture
-//! command is saved for the desktop-launcher replay.
+//! Recovered command arguments never appear in messages.
 
 use crate::layout::LayoutMeasurements;
 use crate::scenarios::{ConfiguredNode, Scenario, Selector, expected_draft, json_sequence};
@@ -14,11 +13,11 @@ const WEIGHT_TOLERANCE: f64 = 0.02;
 
 /// Fields whose generated values contain no YAML punctuation, so a serializer that quotes
 /// them changes nothing a quote-stripping comparison would miss.
-const IDENTIFIER_KEYS: [&str; 5] = ["id", "focus", "app_id", "class", "group"];
+const IDENTIFIER_KEYS: [&str; 4] = ["id", "focus", "app_id", "group"];
 
 /// The lines of a draft that carry content: blank and comment lines are dropped and
 /// trailing whitespace and the generated version reminder are removed.
-pub fn capture_lines(draft: &str) -> Vec<&str> {
+fn capture_lines(draft: &str) -> Vec<&str> {
     draft
         .lines()
         .map(str::trim_end)
@@ -209,12 +208,7 @@ pub fn verify_inferred_capture(
         return Err("inferred command count differs".into());
     }
     for (arguments, leaf) in commands.iter().zip(&leaves) {
-        let Selector::AppId(app_id) = &leaf.selector else {
-            return Err(format!(
-                "inferred command checks need an app ID selector: {}",
-                leaf.layout_id
-            ));
-        };
+        let Selector::AppId(app_id) = &leaf.selector;
         if option_values(arguments, "--app-id") != [app_id.as_str()] {
             return Err(format!(
                 "inferred command does not identify the correct Foot window: {}",
@@ -238,54 +232,6 @@ pub fn verify_inferred_capture(
         }
     }
     Ok(())
-}
-
-/// Only this single-window fixture accepts a launcher intermediary. Its expected path
-/// comes from fixture creation, independently of both captured YAML and process metadata.
-pub fn verify_desktop_launcher_capture(
-    inferred_draft: &str,
-    default_draft: &str,
-    fixture: &crate::scenarios::DesktopLauncher,
-) -> Result<(), String> {
-    let commands = inferred_commands(inferred_draft, default_draft)?;
-    let path = fixture.path.to_str().ok_or("non-UTF-8 fixture path")?;
-    if commands != [vec!["gio".to_owned(), "launch".to_owned(), path.to_owned()]] {
-        return Err("inferred command does not identify the private desktop fixture".into());
-    }
-    Ok(())
-}
-
-/// The verified inference-disabled draft proves every structural field, including a single
-/// null command. Successful stderr is checked separately and never included in failures.
-pub fn verify_unresolved_capture(
-    output: &crate::process::CompletedProcess,
-    default_draft: &str,
-) -> Result<(), String> {
-    if !output.status.success() {
-        return Err("unresolved capture did not exit successfully".into());
-    }
-    if capture_lines(&output.stdout) != capture_lines(default_draft) {
-        return Err("unresolved capture changed the draft or substituted a command".into());
-    }
-    let expected_stderr = "sway-stage: capture completed. Commands inferred: 0; unresolved: 1. Manual editing required.\n";
-    if output.stderr != expected_stderr {
-        return Err("unresolved capture reporting differs".into());
-    }
-    Ok(())
-}
-
-/// gio on GLib 2.84 supplies only PID metadata, so production conservatively leaves the
-/// replay's command unresolved. Newer GLib preserves provenance and infers gio again.
-/// Neither outcome relaxes the initial fixture's exact launcher inference assertion.
-pub fn verify_desktop_replay_capture(
-    inferred_draft: &str,
-    default_draft: &str,
-    fixture: &crate::scenarios::DesktopLauncher,
-) -> Result<(), String> {
-    if capture_lines(inferred_draft) == capture_lines(default_draft) {
-        return Ok(());
-    }
-    verify_desktop_launcher_capture(inferred_draft, default_draft, fixture)
 }
 
 /// Parse command arrays and prove that normalizing only those arrays reproduces the

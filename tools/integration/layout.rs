@@ -28,12 +28,11 @@ pub fn class(node: &TreeNode) -> Option<&str> {
     node.window_properties.as_ref()?.class.as_deref()
 }
 
-/// The identifier of the selector's own kind: an app ID never satisfies a class selector,
-/// nor a class an app ID selector.
+/// The identifier of the selector's own kind: an Xwayland class never satisfies an app ID
+/// selector.
 pub fn observed_identifier<'a>(node: &'a TreeNode, selector: &Selector) -> Option<&'a str> {
     match selector {
         Selector::AppId(_) => node.app_id.as_deref(),
-        Selector::Class(_) => class(node),
     }
 }
 

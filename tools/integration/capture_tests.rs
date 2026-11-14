@@ -396,62 +396,6 @@ fn inferred_capture_needs_one_command_per_window() {
 }
 
 #[test]
-fn desktop_capture_requires_the_exact_fixture_command_and_unchanged_structure() {
-    let scenario = crate::fixtures::extended_scenario("desktop-launcher-roundtrip");
-    let fixture = crate::scenarios::DesktopLauncher {
-        path: "/private/test launcher.desktop".into(),
-        contents: "independent fixture".into(),
-        foot_command: scenario.layout.leaves()[0].command.clone(),
-        launch_method: crate::scenarios::DesktopLaunchMethod::GtkLaunch,
-    };
-    let default = expected_draft(&scenario, &BTreeMap::new()).unwrap();
-    let inferred = default.replace(
-        "command: null",
-        "command:\n    - gio\n    - launch\n    - /private/test launcher.desktop",
-    );
-    verify_desktop_launcher_capture(&inferred, &default, &fixture).unwrap();
-    verify_desktop_replay_capture(&inferred, &default, &fixture).unwrap();
-    verify_desktop_replay_capture(&default, &default, &fixture).unwrap();
-    // GLib 2.84's replay miss cannot satisfy initial inference verification.
-
-    assert!(verify_desktop_launcher_capture(&default, &default, &fixture).is_err());
-    // Preserve the existing Foot-only assertion: gio argv cannot satisfy it.
-    assert!(verify_inferred_capture(&inferred, &default, &scenario.layout).is_err());
-    for bad in [
-        inferred.replace("- gio", "- gtk-launch"),
-        inferred.replace("- launch", "- open"),
-        inferred.replace("test launcher.desktop", "different.desktop"),
-        inferred.replace("    - launch\n", ""),
-        inferred.replace("  match:", "    - secret\n  match:"),
-        inferred.replace("focus: window1", "focus: window2"),
-        inferred.replace("id: window1", "id: other"),
-        default.clone(),
-    ] {
-        let error = verify_desktop_launcher_capture(&bad, &default, &fixture).unwrap_err();
-        assert!(!error.contains("secret") && !error.contains("/private"));
-        if bad != default {
-            assert!(verify_desktop_replay_capture(&bad, &default, &fixture).is_err());
-        }
-    }
-    let foot_arguments = fixture
-        .foot_command
-        .iter()
-        .map(|argument| format!("    - {argument}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let foot_inferred = default.replace("command: null", &format!("command:\n{foot_arguments}"));
-    assert!(verify_desktop_replay_capture(&foot_inferred, &default, &fixture).is_err());
-    assert!(
-        verify_desktop_replay_capture(
-            &default.replace("focus: window1", "focus: window2"),
-            &default,
-            &fixture
-        )
-        .is_err()
-    );
-}
-
-#[test]
 fn executable_replay_edits_only_captured_placeholders_with_literal_commands() {
     let mut scenario = standard_scenario("horizontal-pair");
     scenario.layout.first_leaf_mut().command.extend([
@@ -597,7 +541,7 @@ fn nested_replay_retains_focus_shape_and_every_captured_weight() {
 
 #[test]
 fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
-    let scenario = crate::fixtures::extended_scenario("duplicate-foot-ids");
+    let scenario = standard_scenario("duplicate-foot-ids");
     let shares = BTreeMap::from([(vec![0], 59.9), (vec![1], 40.1)]);
     let default = expected_draft(&scenario, &shares).unwrap();
     let leaves = scenario.layout.leaves();
@@ -662,55 +606,6 @@ fn duplicate_id_inference_requires_each_launches_distinct_literal_title() {
             )
             .is_err()
         );
-    }
-}
-
-#[test]
-fn unresolved_capture_requires_null_commands_success_and_independent_stderr() {
-    use std::os::unix::process::ExitStatusExt;
-    let scenario = crate::fixtures::extended_scenario("unresolved-launcher");
-    let default = expected_draft(&scenario, &BTreeMap::new()).unwrap();
-    let valid = || {
-        crate::process::CompletedProcess {
-        status: std::process::ExitStatus::from_raw(0),
-        stdout: default.clone(),
-        stderr: "sway-stage: capture completed. Commands inferred: 0; unresolved: 1. Manual editing required.\n".into(),
-    }
-    };
-    verify_unresolved_capture(&valid(), &default).unwrap();
-    for (stdout, stderr, status) in [
-        (
-            default.replace("command: null", "command: [secret]"),
-            valid().stderr,
-            0,
-        ),
-        (
-            default.replace("focus: window1", "focus: secret"),
-            valid().stderr,
-            0,
-        ),
-        (default.replace("app_id:", "secret:"), valid().stderr, 0),
-        (format!("{default}secret diagnostics\n"), valid().stderr, 0),
-        (default.clone(), "secret stderr".into(), 0),
-        (
-            default.clone(),
-            valid().stderr.replace("unresolved: 1", "unresolved: 0"),
-            0,
-        ),
-        (
-            default.clone(),
-            valid().stderr.replace(" Manual editing required.", ""),
-            0,
-        ),
-        (default.clone(), valid().stderr, 1),
-    ] {
-        let output = crate::process::CompletedProcess {
-            status: std::process::ExitStatus::from_raw(status << 8),
-            stdout,
-            stderr,
-        };
-        let error = verify_unresolved_capture(&output, &default).unwrap_err();
-        assert!(!error.contains("secret"));
     }
 }
 

@@ -1,37 +1,21 @@
-//! Scenario definitions, preparation of the optional extended scenarios, and the YAML the
-//! harness expects sway-stage to accept and `capture` to print.
+//! Scenario definitions and the YAML the harness expects sway-stage to accept and
+//! `capture` to print. Every scenario window is a Foot terminal.
 //!
 //! Configured layouts are the harness's own description of what sway-stage should build,
 //! independent of the production `LayoutNode` and configuration parser. Definitions are
-//! pure; preparation configures executable paths, creates private files, or runs a probe.
+//! pure; `configure_process_execution` later adds the run's private paths.
 
 use std::collections::BTreeMap;
-use std::env;
-use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{self, Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use serde_json::Value;
 
-use crate::ipc::{IPC_TIMEOUT, InitialWorkspaceLayout, Layout};
-use crate::process;
+use crate::ipc::{InitialWorkspaceLayout, Layout};
 
 /// sway-stage's default wait for each window.
 pub const WINDOW_TIMEOUT_MS: u64 = 20_000;
-/// A layout has one timeout for every leaf, so Foot windows beside Firefox share this one.
-pub const FIREFOX_TIMEOUT_MS: u64 = 60_000;
 /// How long each test terminal's `sleep` runs, bounding what an aborted run leaves behind.
 const TERMINAL_LIFETIME_SECONDS: u32 = 300;
-
-/// Keeps a fresh Firefox profile from opening first-run and default-browser prompts.
-const FIREFOX_PREFERENCES: &str = r#"user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.aboutwelcome.enabled", false);
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("startup.homepage_welcome_url", "");
-user_pref("startup.homepage_welcome_url.additional", "");
-"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupLayout {
@@ -68,11 +52,10 @@ impl GroupLayout {
     }
 }
 
-/// An exact window selector: a native Wayland app ID or an Xwayland `WM_CLASS` class.
+/// An exact window selector: a native Wayland app ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selector {
     AppId(String),
-    Class(String),
 }
 
 impl Selector {
@@ -80,13 +63,12 @@ impl Selector {
     pub fn kind(&self) -> &'static str {
         match self {
             Selector::AppId(_) => "app_id",
-            Selector::Class(_) => "class",
         }
     }
 
     pub fn value(&self) -> &str {
         match self {
-            Selector::AppId(value) | Selector::Class(value) => value,
+            Selector::AppId(value) => value,
         }
     }
 }
@@ -123,25 +105,6 @@ pub struct ConfiguredWindow {
     /// The selector alone cannot attribute the window to this launch, so ownership also
     /// requires Sway's PID to show the expected application's literal arguments.
     pub requires_process_evidence: bool,
-    /// Independent fixture evidence when the loader command starts an intermediary.
-    pub desktop_launcher: Option<DesktopLauncher>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DesktopLauncher {
-    pub path: PathBuf,
-    pub contents: String,
-    pub foot_command: Vec<String>,
-    pub launch_method: DesktopLaunchMethod,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DesktopLaunchMethod {
-    /// Initial fixture: exact GLib filename/PID metadata must prove provenance.
-    GtkLaunch,
-    /// Actual inferred YAML: GLib 2.84's gio omits filename metadata. Ownership still
-    /// requires independent Foot argv and fresh window events, without claiming provenance.
-    GioReplay,
 }
 
 impl ConfiguredNode {
@@ -211,10 +174,6 @@ pub struct Scenario {
     /// Optional top-level focus field to write into the input YAML.
     pub configured_focus: Option<&'static str>,
     pub window_timeout_ms: u64,
-    /// What an extended scenario tests beyond plain Foot windows; `None` for standard ones.
-    pub extension: Option<Extension>,
-    /// Set by `prepare_extended` when an optional application or subsystem is unavailable.
-    pub skip: Option<String>,
 }
 
 impl Scenario {
@@ -229,19 +188,7 @@ impl Scenario {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Extension {
-    /// The first window is a native Wayland Firefox with a private, retained profile.
-    Firefox,
-    /// The first window is an Xterm under Xwayland, matched by class.
-    Xterm,
-    /// Foot windows share one app ID, distinguished only by launch arguments.
-    DuplicateFootIds,
-    /// Private GLib launcher captured and reloaded without editing its inferred command.
-    DesktopLauncher,
-}
-
-/// The Foot-only scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
+/// The integration scenarios. `foot` and `sleep` are absolute executables found on `PATH`.
 pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
     use GroupLayout::{Horizontal, Stacked, Tabbed, Vertical};
 
@@ -425,8 +372,6 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
             expected_focus: focus,
             configured_focus: Some(focus),
             window_timeout_ms: WINDOW_TIMEOUT_MS,
-            extension: None,
-            skip: None,
         };
         use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
         if matches!(name, "default-focus" | "root-tabbed" | "singleton-groups") {
@@ -470,6 +415,17 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
     *active = 2;
     use_unique_foot_windows(&mut outside_focus, run_id, foot, sleep);
     scenarios.push(outside_focus);
+
+    // Both windows share one app ID, so only their distinct literal launch arguments tell
+    // them apart, both as ownership evidence and in inferred commands.
+    let mut duplicate_ids = scenarios
+        .iter()
+        .find(|scenario| scenario.name == "horizontal-pair")
+        .expect("standard scenarios include horizontal pair")
+        .clone();
+    duplicate_ids.name = "duplicate-foot-ids";
+    use_shared_foot_app_id(&mut duplicate_ids, run_id, foot, sleep);
+    scenarios.push(duplicate_ids);
     scenarios
 }
 
@@ -482,103 +438,16 @@ pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenar
         expected_focus: "window1",
         configured_focus: Some("window1"),
         window_timeout_ms: WINDOW_TIMEOUT_MS,
-        extension: None,
-        skip: None,
     };
     use_unique_foot_windows(&mut scenario, run_id, foot, sleep);
-    // The extended suite can outlast ordinary scenario terminals. Still bound what an
-    // aborted run leaves behind; disappearance at any point fails preservation.
+    // The whole suite can outlast ordinary scenario terminals. Still bound what an aborted
+    // run leaves behind; disappearance at any point fails preservation.
     let leaf = scenario.layout.first_leaf_mut();
     *leaf
         .command
         .last_mut()
         .expect("Foot command ends with sleep duration") = "3600".into();
     scenario
-}
-
-/// The six optional scenarios, each to be passed to `prepare_extended` immediately before
-/// it runs. Until then, Firefox, Xterm, and desktop-launcher leaves are ordinary Foot windows.
-pub fn extended_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario> {
-    use GroupLayout::{Horizontal, Vertical};
-
-    let firefox_column = group(Vertical, 24, vec![window(3, 77), window(4, 23)]);
-
-    let layouts = [
-        (
-            "firefox-two-foot",
-            group(
-                Horizontal,
-                1,
-                vec![window(1, 44), window(2, 32), window(3, 24)],
-            ),
-            "window2",
-            Extension::Firefox,
-        ),
-        (
-            "xterm-foot",
-            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
-            "window2",
-            Extension::Xterm,
-        ),
-        (
-            "nested-firefox-foot",
-            group(
-                Horizontal,
-                1,
-                vec![window(1, 44), window(2, 32), firefox_column],
-            ),
-            "window4",
-            Extension::Firefox,
-        ),
-        (
-            "duplicate-foot-ids",
-            group(Horizontal, 1, vec![window(1, 3), window(2, 2)]),
-            "window2",
-            Extension::DuplicateFootIds,
-        ),
-        (
-            "desktop-launcher-roundtrip",
-            window(1, 1),
-            "window1",
-            Extension::DesktopLauncher,
-        ),
-        (
-            "unresolved-launcher",
-            window(1, 1),
-            "window1",
-            Extension::DesktopLauncher,
-        ),
-    ];
-
-    let mut scenarios = Vec::new();
-    for (name, layout, focus, extension) in layouts {
-        let window_timeout_ms = match extension {
-            Extension::Firefox => FIREFOX_TIMEOUT_MS,
-            Extension::Xterm | Extension::DuplicateFootIds | Extension::DesktopLauncher => {
-                WINDOW_TIMEOUT_MS
-            }
-        };
-        let mut scenario = Scenario {
-            name,
-            initial_workspace_layout: None,
-            layout,
-            expected_focus: focus,
-            configured_focus: Some(focus),
-            window_timeout_ms,
-            extension: Some(extension),
-            skip: None,
-        };
-        match extension {
-            Extension::DuplicateFootIds => {
-                use_shared_foot_app_id(&mut scenario, run_id, foot, sleep)
-            }
-            Extension::Firefox | Extension::Xterm | Extension::DesktopLauncher => {
-                use_unique_foot_windows(&mut scenario, run_id, foot, sleep)
-            }
-        }
-        scenarios.push(scenario);
-    }
-    scenarios
 }
 
 /// A leaf named `window{number}`. Its command and selector are placeholders that the
@@ -592,7 +461,6 @@ fn window(number: u32, weight: u32) -> ConfiguredNode {
         env: Vec::new(),
         cwd: None,
         requires_process_evidence: false,
-        desktop_launcher: None,
     })
 }
 
@@ -649,387 +517,6 @@ fn foot_command(foot: &str, app_id: &str, title: Option<&str>, sleep: &str) -> V
     command.push(sleep.to_owned());
     command.push(TERMINAL_LIFETIME_SECONDS.to_string());
     command
-}
-
-/// Optional applications for the extended scenarios, looked up once per run. Paths are
-/// kept as found on `PATH`, unresolved, so a wrapper or multi-call link still works.
-pub struct OptionalApplications {
-    /// `firefox-esr` if installed, otherwise `firefox`.
-    firefox: Option<PathBuf>,
-    /// An exact native app ID to expect instead of the installation's `RemotingName`.
-    firefox_app_id_override: Option<String>,
-    xterm: Option<PathBuf>,
-    gio: Option<PathBuf>,
-    gtk_launch: Option<PathBuf>,
-}
-
-impl OptionalApplications {
-    pub fn find(firefox_app_id_override: Option<String>) -> Self {
-        let firefox =
-            process::find_on_path("firefox-esr").or_else(|| process::find_on_path("firefox"));
-        Self {
-            firefox,
-            firefox_app_id_override,
-            xterm: process::find_on_path("xterm"),
-            gio: process::find_on_path("gio"),
-            gtk_launch: process::find_on_path("gtk-launch"),
-        }
-    }
-}
-
-/// Decides whether an extended scenario can run and configures its optional application.
-/// Call it immediately before the scenario runs. An unavailable application or subsystem
-/// sets `scenario.skip`; an error means a failure with an available application.
-///
-/// Firefox preparation creates a private profile directory, pushes it onto
-/// `retained_profiles` as soon as it exists, and prints its path; it is never removed. The
-/// Xterm check runs a bounded, read-only X query.
-pub fn prepare_extended(
-    scenario: &mut Scenario,
-    run_id: &str,
-    sleep: &str,
-    applications: &OptionalApplications,
-    retained_profiles: &mut Vec<PathBuf>,
-) -> Result<(), String> {
-    let Some(extension) = scenario.extension else {
-        return Ok(());
-    };
-
-    // All extensions except Xterm need independent process evidence.
-    let needs_process_evidence = extension != Extension::Xterm;
-    if needs_process_evidence && File::open("/proc/self/cmdline").is_err() {
-        scenario.skip =
-            Some("Linux /proc process arguments unavailable for ownership checks".into());
-        return Ok(());
-    }
-
-    match extension {
-        Extension::Firefox => {
-            let Some(firefox) = &applications.firefox else {
-                scenario.skip = Some("neither firefox-esr nor firefox is installed".into());
-                return Ok(());
-            };
-            if !environment_is_set("WAYLAND_DISPLAY") {
-                scenario.skip = Some("native Wayland display unavailable".into());
-                return Ok(());
-            }
-
-            let temporary_directory = path::absolute(env::temp_dir())
-                .map_err(|error| format!("locate the temporary directory: {error}"))?;
-            // The run ID makes the name unique; creation still refuses any existing path.
-            let profile_root =
-                temporary_directory.join(format!("sway-stage-firefox-{run_id}-{}", scenario.name));
-            configure_firefox(
-                scenario.layout.first_leaf_mut(),
-                firefox,
-                applications.firefox_app_id_override.as_deref(),
-                &profile_root,
-                retained_profiles,
-            )
-        }
-        Extension::Xterm => {
-            let Some(xterm) = &applications.xterm else {
-                scenario.skip = Some("xterm is not installed".into());
-                return Ok(());
-            };
-            if let Some(reason) = xwayland_unavailable() {
-                scenario.skip = Some(reason);
-                return Ok(());
-            }
-
-            let window_class = format!("sway-stage-it-{run_id}-xterm");
-            let leaf = scenario.layout.first_leaf_mut();
-            // Xterm's -class sets WM_CLASS's class, not its instance. -e must come last: it
-            // takes every remaining argument as the command.
-            leaf.command = vec![
-                utf8(xterm)?.to_owned(),
-                "-class".into(),
-                window_class.clone(),
-                "+hold".into(),
-                "-e".into(),
-                sleep.to_owned(),
-                TERMINAL_LIFETIME_SECONDS.to_string(),
-            ];
-            leaf.selector = Selector::Class(window_class);
-            Ok(())
-        }
-        // Configured with the scenario: it needs nothing beyond Foot and /proc.
-        Extension::DuplicateFootIds => Ok(()),
-        Extension::DesktopLauncher => {
-            if applications.gio.is_none() {
-                scenario.skip = Some("gio is not installed".into());
-            } else if applications.gtk_launch.is_none() {
-                scenario.skip = Some("gtk-launch is not installed".into());
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Create only our private fixture, leaving desktop entry interpretation to GLib.
-pub fn configure_desktop_launcher(scenario: &mut Scenario, directory: &Path) -> Result<(), String> {
-    let directory = path::absolute(directory)
-        .map_err(|error| format!("locate private desktop directory: {error}"))?;
-    let leaf = scenario.layout.first_leaf_mut();
-    let foot_command = leaf.command.clone();
-    if foot_command
-        .first()
-        .is_none_or(|program| program.contains('='))
-    {
-        return Err("desktop fixture executable cannot contain an equal sign".into());
-    }
-    let arguments = foot_command
-        .iter()
-        .map(|argument| desktop_exec_argument(argument))
-        .collect::<Result<Vec<_>, _>>()?;
-    let contents = format!(
-        "[Desktop Entry]\nType=Application\nName=sway-stage integration fixture\nExec={}\nTerminal=false\n",
-        arguments.join(" ")
-    );
-    let data_home = directory.join(if scenario.name == "unresolved-launcher" {
-        "unresolved desktop data"
-    } else {
-        "desktop data"
-    });
-    let applications = data_home.join("applications");
-    for private_directory in [&data_home, &applications] {
-        DirBuilder::new()
-            .mode(0o700)
-            .create(private_directory)
-            .map_err(|error| format!("create private desktop directory: {error}"))?;
-    }
-    let desktop_id = format!("{}.desktop", leaf.selector.value());
-    let path = applications.join(&desktop_id);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|error| format!("create private desktop fixture: {error}"))?;
-    file.write_all(contents.as_bytes())
-        .map_err(|error| format!("write private desktop fixture: {error}"))?;
-
-    // Only this fixture launcher gets the private search directory. Capture and replay
-    // use the absolute filename, so neither needs an XDG override.
-    leaf.command = vec!["gtk-launch".into(), desktop_id];
-    leaf.env = vec![("XDG_DATA_HOME".into(), utf8(&data_home)?.into())];
-    leaf.requires_process_evidence = true;
-    leaf.desktop_launcher = Some(DesktopLauncher {
-        path,
-        contents,
-        foot_command,
-        launch_method: DesktopLaunchMethod::GtkLaunch,
-    });
-    Ok(())
-}
-
-/// Independent expectations for the already verified, unedited inferred YAML. This does
-/// not render the replay file; it changes only the harness's launch/evidence expectations.
-pub fn desktop_launcher_replay(scenario: &Scenario) -> Scenario {
-    let mut replay = scenario.clone();
-    let leaf = replay.layout.first_leaf_mut();
-    let fixture = leaf
-        .desktop_launcher
-        .as_mut()
-        .expect("prepared desktop fixture");
-    leaf.command = vec![
-        "gio".into(),
-        "launch".into(),
-        fixture.path.to_str().expect("UTF-8 fixture path").into(),
-    ];
-    leaf.env.clear();
-    fixture.launch_method = DesktopLaunchMethod::GioReplay;
-    replay
-}
-
-fn desktop_exec_argument(argument: &str) -> Result<String, String> {
-    // Field codes inside quoted arguments are undefined. Refuse such unusual fixture
-    // paths, and control characters, instead of expanding the fixture's quoting scope.
-    if argument.contains('%') || argument.chars().any(char::is_control) {
-        return Err("desktop fixture argument contains unsupported characters".into());
-    }
-    let mut quoted = String::from("\"");
-    for character in argument.chars() {
-        if matches!(character, '"' | '`' | '$' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(character);
-    }
-    quoted.push('"');
-    // The desktop string-value escape layer is decoded before Exec argument quoting.
-    Ok(quoted.replace('\\', "\\\\"))
-}
-
-/// Makes `leaf` a native Wayland Firefox window whose profile, HOME, and XDG directories
-/// live under `profile_root`, a new private directory. The directory is retained: closing
-/// a window cannot prove that Firefox's other processes have finished using it.
-fn configure_firefox(
-    leaf: &mut ConfiguredWindow,
-    firefox: &Path,
-    app_id_override: Option<&str>,
-    profile_root: &Path,
-    retained_profiles: &mut Vec<PathBuf>,
-) -> Result<(), String> {
-    // Paths go into a UTF-8 configuration file; check them before creating anything.
-    let executable = utf8(firefox)?;
-    let root = utf8(profile_root)?;
-
-    // Fails if anything, including a symlink, already exists at the path.
-    DirBuilder::new()
-        .mode(0o700)
-        .create(profile_root)
-        .map_err(|error| format!("create Firefox directory {root}: {error}"))?;
-    retained_profiles.push(profile_root.to_owned());
-    println!(
-        "      Firefox files retained at {root} (remove manually after all its processes exit)"
-    );
-
-    let profile = format!("{root}/profile");
-    fs::create_dir(&profile).map_err(|error| format!("create {profile}: {error}"))?;
-    fs::write(format!("{profile}/user.js"), FIREFOX_PREFERENCES)
-        .map_err(|error| format!("write {profile}/user.js: {error}"))?;
-
-    let app_id = match app_id_override {
-        Some(app_id) => app_id.to_owned(),
-        None => installed_remoting_name(firefox)?,
-    };
-    if !is_simple_identifier(&app_id) {
-        return Err("Firefox app ID must be a simple literal identifier".into());
-    }
-    println!("      Firefox executable={executable} expected app_id={app_id}");
-
-    let env = [
-        ("HOME", root.to_owned()),
-        ("XDG_CONFIG_HOME", format!("{root}/config")),
-        ("XDG_CACHE_HOME", format!("{root}/cache")),
-        ("XDG_DATA_HOME", format!("{root}/data")),
-        ("XDG_STATE_HOME", format!("{root}/state")),
-        ("MOZ_ENABLE_WAYLAND", "1".into()),
-        ("GDK_BACKEND", "wayland".into()),
-        ("XDG_ACTIVATION_TOKEN", String::new()),
-        ("DESKTOP_STARTUP_ID", String::new()),
-        // Inherited Firefox restart paths must not override the explicit private profile.
-        ("XRE_PROFILE_PATH", String::new()),
-        ("XRE_PROFILE_LOCAL_PATH", String::new()),
-        ("XRE_PROFILE_NAME", String::new()),
-    ];
-    leaf.env = env
-        .into_iter()
-        .map(|(name, value)| (name.to_owned(), value))
-        .collect();
-
-    // --new-instance is needed too: newer Firefox versions ignore --no-remote.
-    leaf.command = [
-        executable,
-        "--no-remote",
-        "--new-instance",
-        "--profile",
-        &profile,
-        "--new-window",
-        "about:blank",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    leaf.selector = Selector::AppId(app_id);
-    leaf.requires_process_evidence = true;
-    Ok(())
-}
-
-/// The native Wayland app ID of a Firefox installation, including `firefox-esr`: the
-/// `[App]` `RemotingName` in the `application.ini` beside the resolved executable.
-fn installed_remoting_name(firefox: &Path) -> Result<String, String> {
-    let resolved = fs::canonicalize(firefox)
-        .map_err(|error| format!("resolve {}: {error}", firefox.display()))?;
-    let metadata = resolved
-        .parent()
-        .unwrap_or(Path::new("/"))
-        .join("application.ini");
-    let undetermined = |detail: &str| {
-        format!(
-            "cannot determine Firefox Wayland app ID from {}{detail}; \
-             supply --firefox-app-id for this installation",
-            metadata.display()
-        )
-    };
-
-    let text =
-        fs::read_to_string(&metadata).map_err(|error| undetermined(&format!(": {error}")))?;
-    remoting_name(&text)
-        .map_err(|error| undetermined(&format!(": {error}")))?
-        .ok_or_else(|| undetermined(""))
-}
-
-/// Reads `RemotingName` from the `[App]` section of `application.ini` text. Keys are
-/// case-insensitive, and full-line `#` or `;` comments are ignored.
-/// A malformed line or repeated key in that section is an error rather than a guess.
-fn remoting_name(application_ini: &str) -> Result<Option<String>, String> {
-    let mut in_app_section = false;
-    let mut remoting_name = None;
-    for line in application_ini.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(['#', ';']) {
-            continue;
-        }
-        if let Some(section) = line
-            .strip_prefix('[')
-            .and_then(|rest| rest.strip_suffix(']'))
-        {
-            in_app_section = section == "App";
-            continue;
-        }
-        if !in_app_section {
-            continue;
-        }
-
-        let Some(delimiter_index) = line.find(['=', ':']) else {
-            return Err("malformed line in [App]".into());
-        };
-        let key = line[..delimiter_index].trim();
-        let value = line[delimiter_index + 1..].trim();
-        if key.eq_ignore_ascii_case("RemotingName")
-            && remoting_name.replace(value.to_owned()).is_some()
-        {
-            return Err("RemotingName is repeated in [App]".into());
-        }
-    }
-    Ok(remoting_name)
-}
-
-/// `[A-Za-z][A-Za-z0-9_.-]*`: safe to write unquoted into YAML and to compare exactly.
-fn is_simple_identifier(text: &str) -> bool {
-    let mut characters = text.chars();
-    characters
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic())
-        && characters.all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
-        })
-}
-
-/// Why Xterm cannot run under the session's Xwayland, if it cannot. The read-only X query
-/// distinguishes a disabled or unreachable server from an Xterm launch failure, which must
-/// still fail rather than become a skip.
-fn xwayland_unavailable() -> Option<String> {
-    if process::find_on_path("Xwayland").is_none() || !environment_is_set("DISPLAY") {
-        return Some("Xwayland executable or DISPLAY unavailable".into());
-    }
-    let Some(xdpyinfo) = process::find_on_path("xdpyinfo") else {
-        return Some("xdpyinfo unavailable (needed for the read-only Xwayland probe)".into());
-    };
-
-    let mut query = Command::new(xdpyinfo);
-    query.arg("-queryExtensions");
-    match process::run(query, "Xwayland availability probe", IPC_TIMEOUT) {
-        Err(error) => Some(error),
-        Ok(extensions) if !extensions.contains("XWAYLAND") => {
-            Some("DISPLAY does not advertise the XWAYLAND extension".into())
-        }
-        Ok(_) => None,
-    }
-}
-
-fn environment_is_set(name: &str) -> bool {
-    env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
 /// Configuration files are UTF-8, so every path written into one must be too.

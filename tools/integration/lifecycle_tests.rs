@@ -53,8 +53,7 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         .unwrap();
         assert_eq!(arguments.workspace, workspace);
         assert_eq!(arguments.foreign_workspace, "8");
-        assert!(!arguments.extended);
-        assert_eq!(arguments.firefox_app_id, None);
+        assert_eq!(arguments.profile_workspace, None);
         assert_eq!(
             arguments.binary,
             concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage")
@@ -66,15 +65,13 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         "9",
         "--foreign-workspace",
         "8",
-        "--extended",
-        "--firefox-app-id",
-        "firefox-esr",
+        "--profile-workspace",
+        "10",
         "--binary",
         "/a path/sway-stage",
     ])
     .unwrap();
-    assert!(arguments.extended);
-    assert_eq!(arguments.firefox_app_id.as_deref(), Some("firefox-esr"));
+    assert_eq!(arguments.profile_workspace.as_deref(), Some("10"));
     assert_eq!(arguments.binary, "/a path/sway-stage");
 
     for invalid in [
@@ -107,6 +104,29 @@ fn cli_requires_an_explicit_workspace_and_preserves_optional_arguments() {
         vec!["integration", "--workspace", "9", "--unknown"],
         vec!["integration", "--workspace", "9", "extra"],
         vec!["integration", "--workspace"],
+        // Removed optional-application options fail rather than silently reducing coverage.
+        vec!["integration", "--workspace", "9", "--extended"],
+        vec![
+            "integration",
+            "--workspace",
+            "9",
+            "--firefox-app-id",
+            "firefox",
+        ],
+        vec![
+            "integration",
+            "--workspace",
+            "9",
+            "--appimage",
+            "/apps/a.AppImage",
+        ],
+        vec![
+            "integration",
+            "--workspace",
+            "9",
+            "--flatpak",
+            "org.example.App",
+        ],
     ] {
         let mut arguments = arguments;
         arguments.extend(["--foreign-workspace", "8"]);
@@ -604,8 +624,6 @@ fn operation_deadlines_keep_their_established_limits() {
         load_timeout(&standard_scenario("deep-nesting")),
         Duration::from_secs(130)
     );
-    let firefox = crate::fixtures::extended_scenario("nested-firefox-foot");
-    assert_eq!(load_timeout(&firefox), Duration::from_secs(270));
 }
 
 #[test]
@@ -1285,115 +1303,6 @@ fn replay_needs_a_fresh_baseline_and_cannot_cleanup_with_first_cycle_evidence() 
             true
         )
         .is_err()
-    );
-}
-
-#[test]
-fn unavailable_launcher_is_restored_before_returning_capture_success_or_failure() {
-    for outcome in [0, 1, 2] {
-        let test_id = format!("{RUN_ID}-{}-hidden-{outcome}", std::process::id());
-        let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
-        let mut scenario = crate::fixtures::extended_scenario("unresolved-launcher");
-        configure_desktop_launcher(&mut scenario, &directory.path).unwrap();
-        let fixture = scenario.layout.leaves()[0]
-            .desktop_launcher
-            .as_ref()
-            .unwrap();
-        let original = fs::metadata(&fixture.path).unwrap();
-        let hidden = fixture.path.with_extension("desktop.unavailable");
-        let result = directory.with_unavailable_launcher(fixture, || {
-            assert!(!fixture.path.exists());
-            assert!(hidden.exists());
-            if outcome == 2 {
-                Err("simulated bounded runner failure or interruption".into())
-            } else {
-                Ok(refused_output(outcome, "private captured stderr"))
-            }
-        });
-        assert_eq!(result.is_err(), outcome == 2);
-        assert!(private_launcher_matches(fixture));
-        assert_eq!(fs::metadata(&fixture.path).unwrap().ino(), original.ino());
-        assert!(!hidden.exists());
-        assert!(!directory.retain.get());
-    }
-}
-
-#[test]
-fn failed_launcher_restoration_retains_evidence_and_never_overwrites_a_replacement() {
-    for failure in [
-        "occupied",
-        "missing-backup",
-        "changed-backup",
-        "replaced-backup",
-    ] {
-        let test_id = format!("{RUN_ID}-{}-restore-{failure}", std::process::id());
-        let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
-        let mut scenario = crate::fixtures::extended_scenario("unresolved-launcher");
-        configure_desktop_launcher(&mut scenario, &directory.path).unwrap();
-        let fixture = scenario.layout.leaves()[0]
-            .desktop_launcher
-            .as_ref()
-            .unwrap();
-        let hidden = fixture.path.with_extension("desktop.unavailable");
-        let result = directory.with_unavailable_launcher(fixture, || {
-            match failure {
-                "occupied" => fs::write(&fixture.path, "replacement").unwrap(),
-                "missing-backup" => fs::remove_file(&hidden).unwrap(),
-                "changed-backup" => fs::write(&hidden, "changed").unwrap(),
-                "replaced-backup" => {
-                    // Keep the original inode alive to make replacement deterministic.
-                    fs::rename(&hidden, hidden.with_extension("retired")).unwrap();
-                    fs::write(&hidden, &fixture.contents).unwrap();
-                }
-                _ => unreachable!(),
-            }
-            Ok(refused_output(0, ""))
-        });
-        let message = uncertain_message(result.map(|_| ()));
-        assert!(message.contains("restoration failed"));
-        assert!(message.contains("files retained at"));
-        if failure == "occupied" {
-            assert_eq!(fs::read(&fixture.path).unwrap(), b"replacement");
-            assert_eq!(fs::read(&hidden).unwrap(), fixture.contents.as_bytes());
-        }
-        let path = directory.path.clone();
-        drop(directory);
-        assert!(path.exists());
-        fs::remove_dir_all(path).unwrap();
-    }
-}
-
-#[test]
-fn hiding_a_launcher_refuses_unverified_or_out_of_scope_files_before_capture() {
-    let test_id = format!("{RUN_ID}-{}-hide-preconditions", std::process::id());
-    let directory = TemporaryConfigurations::new(&env::temp_dir(), &test_id).unwrap();
-    let mut scenario = crate::fixtures::extended_scenario("unresolved-launcher");
-    configure_desktop_launcher(&mut scenario, &directory.path).unwrap();
-    let fixture = scenario.layout.leaves()[0]
-        .desktop_launcher
-        .as_ref()
-        .unwrap();
-    let mut outside = fixture.clone();
-    outside.path = directory.path.join("outside.desktop");
-
-    assert!(
-        directory
-            .with_unavailable_launcher(&outside, || panic!("outside file"))
-            .is_err()
-    );
-    let hidden = fixture.path.with_extension("desktop.unavailable");
-    fs::write(&hidden, "occupied").unwrap();
-    assert!(
-        directory
-            .with_unavailable_launcher(fixture, || panic!("occupied backup"))
-            .is_err()
-    );
-    fs::remove_file(&hidden).unwrap();
-    fs::write(&fixture.path, "changed").unwrap();
-    assert!(
-        directory
-            .with_unavailable_launcher(fixture, || panic!("unverified file"))
-            .is_err()
     );
 }
 

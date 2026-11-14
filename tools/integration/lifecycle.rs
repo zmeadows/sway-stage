@@ -2,14 +2,12 @@
 //! A failure leaves windows alone. Only the success path enters cleanup; restoration is
 //! a separate, guarded operation. Files and the IPC helper may be dropped, never windows.
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{self, Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -17,10 +15,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use crate::capture::{
-    executable_capture, verify_capture, verify_desktop_launcher_capture,
-    verify_desktop_replay_capture, verify_inferred_capture, verify_unresolved_capture,
-};
+use crate::capture::{executable_capture, verify_capture, verify_inferred_capture};
 use crate::ipc::{
     IPC_TIMEOUT, InitialWorkspaceLayout, Swaymsg, TreeNode, validate_restoration_name,
     workspace_number,
@@ -34,13 +29,11 @@ use crate::observation::{
 };
 use crate::ownership::{
     AcceptedWindows, ExpectedClose, bind_launches, require_quiet, verify_ownership,
-    verify_process_evidence,
 };
 use crate::preservation::ForeignWindows;
 use crate::scenarios::{
-    ConfiguredNode, DesktopLauncher, Extension, OptionalApplications, Scenario, configuration_yaml,
-    configure_desktop_launcher, configure_process_execution, desktop_launcher_replay,
-    extended_scenarios, foreign_fixture_scenario, prepare_extended, standard_scenarios,
+    ConfiguredNode, Scenario, configuration_yaml, configure_process_execution,
+    foreign_fixture_scenario, standard_scenarios,
 };
 use crate::{process, profile};
 
@@ -65,16 +58,6 @@ pub struct Arguments {
     #[arg(long, value_parser = workspace_number,
         help = "Third empty disposable workspace; enables four multi-workspace profile scenarios")]
     profile_workspace: Option<String>,
-    #[arg(
-        long,
-        help = "Also test Firefox, Xterm/Xwayland, duplicate Foot IDs, desktop launcher replay, and unresolved capture"
-    )]
-    extended: bool,
-    #[arg(
-        long,
-        help = "Exact native Firefox app ID, overriding application.ini RemotingName"
-    )]
-    firefox_app_id: Option<String>,
     #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/sway-stage"))]
     binary: String,
 }
@@ -154,7 +137,6 @@ struct Harness {
     stage: String,
     passed: usize,
     skipped: usize,
-    retained_profiles: Vec<PathBuf>,
     restoration: Option<String>,
 }
 
@@ -232,12 +214,6 @@ pub fn run(arguments: Arguments) -> bool {
         "{} profile scenarios verified (including expected failures).",
         harness.profile_passed
     );
-    for profile in harness.retained_profiles {
-        println!(
-            "Retained Firefox files: {}; remove only after all associated processes exit.",
-            profile.display()
-        );
-    }
     if let Some(restoration) = harness.restoration {
         println!("{restoration}");
     }
@@ -279,7 +255,6 @@ impl Harness {
             stage: "preflight".into(),
             passed: 0,
             skipped: 0,
-            retained_profiles: Vec::new(),
             restoration: None,
         })
     }
@@ -318,16 +293,6 @@ impl Harness {
             directory.write(scenario.name, &configuration_yaml(scenario))?;
             check_configuration(&self.binary, &directory.path, scenario.name, &self.stage)?;
         }
-        // Discovery only searches PATH. Profiles, probes, and launches wait for preparation
-        // immediately before each extended scenario.
-        let optional_applications = if self.arguments.extended {
-            scenarios.extend(extended_scenarios(&self.run_id, &self.foot, &self.sleep));
-            Some(OptionalApplications::find(
-                self.arguments.firefox_app_id.clone(),
-            ))
-        } else {
-            None
-        };
         self.stage = "preflight".into();
         self.prepare_fixture(&directory)?;
         self.stage = "primary target: preflight".into();
@@ -365,20 +330,7 @@ impl Harness {
                 preexisting_ids: None,
                 accepted: AcceptedWindows::new(),
             });
-            if let Err(failure) =
-                self.run_scenario(&directory, optional_applications.as_ref(), &target_baseline)
-            {
-                if self
-                    .current_scenario
-                    .as_ref()
-                    .is_some_and(|progress| progress.scenario.name == "unresolved-launcher")
-                {
-                    self.events.distrust_focus_history(
-                        "unresolved-launcher failed; no restoration permitted",
-                    );
-                }
-                return Err(failure);
-            }
+            self.run_scenario(&directory, &target_baseline)?;
         }
 
         self.current_scenario = None;
@@ -846,44 +798,21 @@ impl Harness {
     fn run_scenario(
         &mut self,
         directory: &TemporaryConfigurations,
-        optional_applications: Option<&OptionalApplications>,
         target_baseline: &ForeignWindows,
     ) -> Result<(), Failure> {
         let progress = self
             .current_scenario
             .as_mut()
             .expect("scenario loop set progress");
-        let scenario = &mut progress.scenario;
+        let scenario = &progress.scenario;
         let name = scenario.name;
         self.stage = format!("{name}: empty-workspace precondition");
         let before = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&before.window_events, None)?;
         require_empty(before.focused_workspace())?;
 
-        self.stage = format!("{name}: scenario preparation");
-        interruption_check()?;
-        if scenario.extension.is_some() {
-            let applications = optional_applications
-                .expect("extended scenarios run only after optional application discovery");
-            prepare_extended(
-                scenario,
-                &self.run_id,
-                &self.sleep,
-                applications,
-                &mut self.retained_profiles,
-            )?;
-        }
-        interruption_check()?;
-        if let Some(reason) = &scenario.skip {
-            self.skipped += 1;
-            println!("SKIP  {name:19} {reason}");
-            return Ok(());
-        }
-        if scenario.extension == Some(Extension::DesktopLauncher) {
-            configure_desktop_launcher(scenario, &directory.path)?;
-        }
-
         self.stage = format!("{name}: check");
+        interruption_check()?;
         directory.write(name, &configuration_yaml(scenario))?;
         check_configuration(&self.binary, &directory.path, name, &self.stage)?;
 
@@ -1054,64 +983,9 @@ impl Harness {
                 "check filled capture",
             )?;
 
-            if name == "unresolved-launcher" {
-                self.stage = format!("{cycle_name}: unresolved inferred capture");
-                let leaf = progress.scenario.layout.leaves()[0];
-                let fixture = leaf
-                    .desktop_launcher
-                    .as_ref()
-                    .expect("prepared desktop fixture");
-                let window_id = *progress
-                    .accepted
-                    .keys()
-                    .next()
-                    .expect("verified single window");
-                let pid = walk(&after_capture.tree)
-                    .into_iter()
-                    .find(|placed| placed.node.id == window_id)
-                    .and_then(|placed| placed.node.pid)
-                    .filter(|pid| *pid > 0)
-                    .ok_or_else(|| Failure::Uncertain("launcher window lost its PID".into()))?;
-
-                // Hold this proc directory across capture. Reads through the descriptor
-                // cannot silently follow a reused PID to a replacement process.
-                let process_directory = File::open(format!("/proc/{pid}")).map_err(|_| {
-                    Failure::Uncertain("cannot retain launcher process identity".into())
-                })?;
-                let retained_process =
-                    PathBuf::from(format!("/proc/self/fd/{}", process_directory.as_raw_fd()));
-                verify_process_evidence(&retained_process, pid, leaf)
-                    .map_err(|reason| Failure::Uncertain(reason.into()))?;
-                let mut capture = Command::new(&self.binary);
-                capture.arg("capture");
-                self.sway.select_socket(&mut capture);
-                let revision = self.events.workspace_revision();
-                let output = directory.with_unavailable_launcher(fixture, || {
-                    process::run_with_status(capture, &self.stage, CAPTURE_TIMEOUT)
-                })?;
-
-                // Restoration and independent file verification precede ALL subsequent
-                // process/Sway ownership checks, even when the capture command failed.
-                verify_process_evidence(&retained_process, pid, leaf)
-                    .map_err(|reason| Failure::Uncertain(reason.into()))?;
-                let after_unresolved = snapshot(&self.sway, &mut self.events, None)?;
-                foreign.verify(&after_unresolved)?;
-                verify_unchanged(&after_unresolved, target.id, progress, &before_capture)?;
-                if revision != self.events.workspace_revision() {
-                    return Err(Failure::Uncertain(
-                        "workspace activity during unresolved capture".into(),
-                    ));
-                }
-                verify_unresolved_capture(&output, &draft)?;
-            }
-
-            let mut inferred_replay = None;
             if matches!(
                 name,
-                "single-window"
-                    | "horizontal-pair"
-                    | "duplicate-foot-ids"
-                    | "desktop-launcher-roundtrip"
+                "single-window" | "horizontal-pair" | "duplicate-foot-ids"
             ) {
                 self.stage = format!("{cycle_name}: inferred capture");
                 let mut capture = Command::new(&self.binary);
@@ -1121,29 +995,10 @@ impl Harness {
                 let after_inferred = snapshot(&self.sway, &mut self.events, None)?;
                 foreign.verify(&after_inferred)?;
                 verify_unchanged(&after_inferred, target.id, progress, &before_capture)?;
-                if name == "desktop-launcher-roundtrip" {
-                    let fixture = progress.scenario.layout.leaves()[0]
-                        .desktop_launcher
-                        .as_ref()
-                        .expect("prepared desktop fixture");
-                    if replay_cycle {
-                        verify_desktop_replay_capture(&inferred, &draft, fixture)?;
-                    } else {
-                        verify_desktop_launcher_capture(&inferred, &draft, fixture)?;
-                        inferred_replay = Some(inferred);
-                    }
-                } else {
-                    verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
-                }
+                verify_inferred_capture(&inferred, &draft, &progress.scenario.layout)?;
             }
 
-            let replay = if let Some(inferred) = inferred_replay {
-                self.stage = format!("{cycle_name}: save inferred replay");
-                // This fixture has one root window, so no measured weights need copying
-                // into the independent model. Save the actual, fully verified YAML.
-                directory.write("replay", &inferred)?;
-                Some(desktop_launcher_replay(&progress.scenario))
-            } else if progress.scenario.captures_and_reloads() && !replay_cycle {
+            let replay = if progress.scenario.captures_and_reloads() && !replay_cycle {
                 self.stage = format!("{cycle_name}: executable capture check");
                 let (yaml, replay) = executable_capture(&draft, &progress.scenario, &measurements)?;
                 directory.write("replay", &yaml)?;
@@ -1186,9 +1041,6 @@ impl Harness {
                 // Reached only after exact-ID cleanup, a synchronized empty tree, and
                 // foreign preservation. Any earlier error returns without another launch.
                 self.stage = format!("{cycle_name}: prepare replay");
-                if name == "desktop-launcher-roundtrip" {
-                    check_configuration(&self.binary, &directory.path, "replay", &self.stage)?;
-                }
                 progress.prepare_replay(&cleaned, &foreign, replay, &mut retired_ids)?;
                 previous_foreign = Some(foreign);
                 replay_cycle = true;
@@ -1200,10 +1052,6 @@ impl Harness {
         self.passed += 1;
         let coverage = if name == "occupied-workspace-refusal" {
             "hierarchy, sizing, focus, identity, capture, occupied refusal"
-        } else if name == "unresolved-launcher" {
-            "GLib provenance, unresolved capture/reporting, restored fixture, unchanged desktop"
-        } else if name == "desktop-launcher-roundtrip" {
-            "hierarchy, focus, ownership, GLib provenance, inferred capture/reload"
         } else if progress.scenario.captures_and_reloads() {
             "hierarchy, sizing, group selections, focus, identity, capture/reload round-trip"
         } else if matches!(
@@ -2056,7 +1904,7 @@ fn verify_close_observation(
 
 fn report_remaining(sway: &Swaymsg, run_id: &str, progress: Option<&ScenarioProgress>) {
     eprintln!(
-        "No further cleanup attempted. Scenario terminals expire after 300 seconds; the foreign fixture after 3600 seconds; Firefox has no lifetime limit."
+        "No further cleanup attempted. Scenario terminals expire after 300 seconds; the foreign fixture after 3600 seconds."
     );
     let empty = AcceptedWindows::new();
     let known = progress.map_or(&empty, |progress| &progress.accepted);
@@ -2147,11 +1995,10 @@ fn random_run_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Owns private YAML files, the refusal notification stub, and the process test cwd;
-/// never profiles or desktop windows.
+/// Owns private YAML files, profile-scenario directories, the refusal notification stub,
+/// and the process test cwd; never desktop windows.
 struct TemporaryConfigurations {
     path: PathBuf,
-    retain: Cell<bool>,
 }
 
 impl TemporaryConfigurations {
@@ -2165,10 +2012,7 @@ impl TemporaryConfigurations {
             .map_err(|error| {
                 format!("create private YAML directory {}: {error}", path.display())
             })?;
-        Ok(Self {
-            path,
-            retain: Cell::new(false),
-        })
+        Ok(Self { path })
     }
 
     fn subdirectory(&self, name: &str) -> Result<Self, String> {
@@ -2177,68 +2021,7 @@ impl TemporaryConfigurations {
             .mode(0o700)
             .create(&path)
             .map_err(|error| format!("create private profile directory: {error}"))?;
-        Ok(Self {
-            path,
-            retain: Cell::new(false),
-        })
-    }
-
-    /// Only our private launcher is hidden, only while this bounded inference runs.
-    /// Restoration is ordinary control flow and is attempted even on capture failure or
-    /// interruption. A restoration failure retains the files and forbids desktop cleanup.
-    fn with_unavailable_launcher(
-        &self,
-        fixture: &DesktopLauncher,
-        capture: impl FnOnce() -> Result<process::CompletedProcess, String>,
-    ) -> Result<process::CompletedProcess, Failure> {
-        let applications = self.path.join("unresolved desktop data/applications");
-        if fixture.path.parent() != Some(applications.as_path()) {
-            return Err(Failure::Uncertain(
-                "launcher is outside the private fixture directory".into(),
-            ));
-        }
-        let original = fs::symlink_metadata(&fixture.path)
-            .map_err(|_| Failure::Uncertain("cannot inspect private launcher".into()))?;
-        if !original.is_file() || !private_launcher_matches(fixture) {
-            return Err(Failure::Uncertain(
-                "private launcher changed before capture".into(),
-            ));
-        }
-        let hidden = fixture.path.with_extension("desktop.unavailable");
-        match fs::symlink_metadata(&hidden) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => {
-                return Err(Failure::Uncertain(
-                    "private launcher backup path is occupied or inaccessible".into(),
-                ));
-            }
-        }
-        fs::rename(&fixture.path, &hidden)
-            .map_err(|_| Failure::Uncertain("cannot hide private launcher".into()))?;
-
-        let result = capture();
-
-        // Do not overwrite an unexpected replacement, even inside our private directory.
-        let path_absent = match fs::symlink_metadata(&fixture.path) {
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-            Ok(_) => false,
-        };
-        let restored = path_absent && fs::rename(&hidden, &fixture.path).is_ok();
-        let verified = restored
-            && fs::symlink_metadata(&fixture.path).is_ok_and(|metadata| {
-                metadata.is_file()
-                    && metadata.dev() == original.dev()
-                    && metadata.ino() == original.ino()
-            })
-            && private_launcher_matches(fixture);
-        if !verified {
-            self.retain.set(true);
-            return Err(Failure::Uncertain(format!(
-                "private launcher restoration failed; files retained at {}; leave windows untouched",
-                applications.display()
-            )));
-        }
-        result.map_err(Failure::Uncertain)
+        Ok(Self { path })
     }
 
     fn create_process_cwd(&self) -> Result<(), String> {
@@ -2316,19 +2099,8 @@ impl TemporaryConfigurations {
     }
 }
 
-fn private_launcher_matches(fixture: &DesktopLauncher) -> bool {
-    let Ok(file) = File::open(&fixture.path) else {
-        return false;
-    };
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_ok() && bytes == fixture.contents.as_bytes()
-}
-
 impl Drop for TemporaryConfigurations {
     fn drop(&mut self) {
-        if self.retain.get() {
-            return;
-        }
         if let Err(error) = fs::remove_dir_all(&self.path) {
             eprintln!(
                 "Could not remove temporary YAML directory {}: {error}",

@@ -1,9 +1,8 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, SCRATCHPAD_WORKSPACE_ID, TARGET_WORKSPACE_ID,
-    accepted_windows, assert_contains, container_ids, desktop, extended_scenario, node_mut,
-    parse_tree, rect, selector_value, standard_scenario, uncertain_message, wayland_window,
-    window_event, xwayland_window,
+    accepted_windows, assert_contains, container_ids, desktop, node_mut, parse_tree, rect,
+    selector_value, standard_scenario, uncertain_message, wayland_window, window_event,
 };
 use crate::scenarios::Scenario;
 use serde_json::{Value, json};
@@ -274,51 +273,14 @@ fn ownership_rejects_uncertain_windows_anywhere() {
     }
 }
 
-/// xterm-foot as `prepare_extended` configures it, without looking for Xterm or Xwayland.
-fn xterm_scenario() -> (Scenario, String) {
-    let mut scenario = extended_scenario("xterm-foot");
-    let window_class = "sway-stage-it-run-xterm".to_owned();
-    scenario.layout.first_leaf_mut().selector = Selector::Class(window_class.clone());
-    (scenario, window_class)
-}
-
 #[test]
-fn ownership_distinguishes_native_wayland_from_xwayland_windows() {
-    let (scenario, window_class) = xterm_scenario();
-    let second_window_app_id = selector_value(&scenario, "window2");
+fn ownership_requires_native_wayland_windows_for_app_ids() {
+    let scenario = standard_scenario("horizontal-pair");
     let owned_windows = accepted_pair_windows();
-    let loaded = || {
-        desktop(
-            "splith",
-            vec![
-                xwayland_window(20, &window_class, rect(0, 0, 1152, 1080)),
-                wayland_window(21, &second_window_app_id, rect(1152, 0, 768, 1080)),
-            ],
-            21,
-        )
-    };
-    verify_recorded_ownership(loaded(), &scenario, &owned_windows).unwrap();
+    verify_recorded_ownership(loaded_pair_tree(&scenario), &scenario, &owned_windows).unwrap();
 
-    let mut xwayland_with_app_id = loaded();
-    node_mut(&mut xwayland_with_app_id, 20)["app_id"] = json!("xterm");
-    let message = uncertain_message(verify_recorded_ownership(
-        xwayland_with_app_id,
-        &scenario,
-        &owned_windows,
-    ));
-
-    assert_contains(&message, "expected an Xwayland window with class: 20:xterm");
-
-    let mut class_without_x11_window = loaded();
-    node_mut(&mut class_without_x11_window, 20)["window"] = Value::Null;
-    let message = uncertain_message(verify_recorded_ownership(
-        class_without_x11_window,
-        &scenario,
-        &owned_windows,
-    ));
-    assert_contains(&message, "expected an Xwayland window");
-
-    let mut app_id_under_xwayland = loaded();
+    // An Xwayland window reporting the expected app ID is not the launched Foot window.
+    let mut app_id_under_xwayland = loaded_pair_tree(&scenario);
     node_mut(&mut app_id_under_xwayland, 21)["shell"] = json!("xwayland");
     let message = uncertain_message(verify_recorded_ownership(
         app_id_under_xwayland,
@@ -327,7 +289,7 @@ fn ownership_distinguishes_native_wayland_from_xwayland_windows() {
     ));
     assert_contains(&message, "expected a native Wayland window: 21:");
 
-    let mut app_id_with_x11_window = loaded();
+    let mut app_id_with_x11_window = loaded_pair_tree(&scenario);
     node_mut(&mut app_id_with_x11_window, 21)["window"] = json!(1234);
     let message = uncertain_message(verify_recorded_ownership(
         app_id_with_x11_window,
@@ -410,7 +372,7 @@ fn window_of_this_process(pid: Option<i64>) -> TreeNode {
 
 #[test]
 fn process_evidence_reads_the_windows_process_arguments() {
-    let mut scenario = extended_scenario("duplicate-foot-ids");
+    let mut scenario = standard_scenario("duplicate-foot-ids");
     let this_process = Some(i64::from(std::process::id()));
     let leaf = scenario.layout.first_leaf_mut();
 
@@ -456,7 +418,7 @@ fn process_evidence_reads_the_windows_process_arguments() {
 
 #[test]
 fn ownership_requires_process_evidence_for_repeated_app_ids() {
-    let scenario = extended_scenario("duplicate-foot-ids");
+    let scenario = standard_scenario("duplicate-foot-ids");
     let shared = selector_value(&scenario, "window1");
     let mut loaded = desktop(
         "splith",
@@ -478,129 +440,4 @@ fn ownership_requires_process_evidence_for_repeated_app_ids() {
         &message,
         "process argv does not prove this launch: container=20",
     );
-}
-
-#[test]
-fn desktop_ownership_requires_exact_foot_argv_and_independent_glib_identity() {
-    use crate::scenarios::configure_desktop_launcher;
-    let directory = env::temp_dir().join(format!(
-        "sway-stage-desktop-evidence-{}",
-        std::process::id()
-    ));
-    fs::create_dir(&directory).unwrap();
-    let process_directory = directory.join("101");
-    fs::create_dir(&process_directory).unwrap();
-    let mut scenario = extended_scenario("desktop-launcher-roundtrip");
-    configure_desktop_launcher(&mut scenario, &directory).unwrap();
-    let leaf = scenario.layout.leaves()[0];
-    let fixture = leaf.desktop_launcher.as_ref().unwrap();
-    let argv = fixture.foot_command.join("\0") + "\0";
-    fs::write(process_directory.join("cmdline"), &argv).unwrap();
-    let environment = format!(
-        "PRIVATE=\u{00ff}\0GIO_LAUNCHED_DESKTOP_FILE={}\0GIO_LAUNCHED_DESKTOP_FILE_PID=101\0",
-        fixture.path.display()
-    );
-    fs::write(process_directory.join("environ"), &environment).unwrap();
-    verify_process_evidence(&process_directory, 101, leaf).unwrap();
-    for bad_environment in [
-        environment.replace("PID=101", "PID=102"),
-        environment.replace("PID=101", "PID=bad"),
-        environment.replace("PID=101\0", "PID=101"),
-        environment.replace(fixture.path.to_str().unwrap(), "/foreign.desktop"),
-        format!("{environment}GIO_LAUNCHED_DESKTOP_FILE_PID=101\0"),
-        format!("{environment}GIO_LAUNCHED_DESKTOP_FILE\0"),
-        "GIO_LAUNCHED_DESKTOP_FILE_PID=101\0".into(),
-        "PRIVATE=secret\0".into(),
-    ] {
-        fs::write(process_directory.join("environ"), &bad_environment).unwrap();
-        let error = verify_process_evidence(&process_directory, 101, leaf).unwrap_err();
-        assert_eq!(
-            error,
-            "desktop launcher metadata does not prove this launch"
-        );
-        assert!(!error.contains("secret"));
-    }
-    fs::write(process_directory.join("environ"), &environment).unwrap();
-    // The intermediary argv cannot substitute for the observed Foot process's argv.
-    fs::write(
-        process_directory.join("cmdline"),
-        leaf.command.join("\0") + "\0",
-    )
-    .unwrap();
-
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, leaf),
-        Err("process argv does not prove this launch")
-    );
-    fs::write(process_directory.join("cmdline"), &argv).unwrap();
-    fs::write(&fixture.path, "changed").unwrap();
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, leaf),
-        Err("private desktop fixture changed")
-    );
-    fs::write(&fixture.path, &fixture.contents).unwrap();
-    fs::remove_file(process_directory.join("environ")).unwrap();
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, leaf),
-        Err("cannot verify desktop launcher environment")
-    );
-    fs::write(process_directory.join("environ"), vec![b'x'; 65537]).unwrap();
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, leaf),
-        Err("cannot verify desktop launcher environment")
-    );
-
-    // Only replay uses Foot argv and event binding without asserting launcher provenance.
-    // Both old gio (PID only) and newer gio (filename and PID) must be supported.
-    let replay = crate::scenarios::desktop_launcher_replay(&scenario);
-    let replay_leaf = replay.layout.leaves()[0];
-    for replay_environment in ["GIO_LAUNCHED_DESKTOP_FILE_PID=101\0", &environment] {
-        fs::write(process_directory.join("environ"), replay_environment).unwrap();
-        verify_process_evidence(&process_directory, 101, replay_leaf).unwrap();
-    }
-    for bad_argv in [
-        replay_leaf.command.join("\0") + "\0",
-        argv.replace("300", "301"),
-        argv.replace(leaf.selector.value(), "foreign-window"),
-        argv.trim_end_matches('\0').into(),
-    ] {
-        fs::write(process_directory.join("cmdline"), bad_argv).unwrap();
-        assert_eq!(
-            verify_process_evidence(&process_directory, 101, replay_leaf),
-            Err("process argv does not prove this launch")
-        );
-    }
-    fs::remove_file(process_directory.join("cmdline")).unwrap();
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, replay_leaf),
-        Err("cannot verify process argv")
-    );
-    fs::write(process_directory.join("cmdline"), &argv).unwrap();
-    fs::write(&fixture.path, "changed").unwrap();
-    assert_eq!(
-        verify_process_evidence(&process_directory, 101, replay_leaf),
-        Err("private desktop fixture changed")
-    );
-    fs::write(&fixture.path, &fixture.contents).unwrap();
-    let preexisting_ids = HashSet::from([20]);
-    let events = vec![window_event("new", 40, Some(leaf.selector.value()))];
-    let fresh = bind_launches(&events, &replay.layout, &preexisting_ids).unwrap();
-    assert_eq!(fresh, accepted_windows(&[(40, "window1")]));
-    assert!(bind_launches(&[], &replay.layout, &preexisting_ids).is_err());
-    let stale = vec![window_event("new", 20, Some(leaf.selector.value()))];
-    assert!(bind_launches(&stale, &replay.layout, &preexisting_ids).is_err());
-
-    // Even the exact run-unique app ID and ordered event binding do not authorize a
-    // close when independent process provenance cannot be read.
-    let window = wayland_window(20, leaf.selector.value(), rect(0, 0, 1920, 1080));
-    let tree = desktop("splith", vec![window], 20);
-    for phase in [&scenario, &replay] {
-        let message = uncertain_message(verify_recorded_ownership(
-            tree.clone(),
-            phase,
-            &accepted_windows(&[(20, "window1")]),
-        ));
-        assert_contains(&message, "cannot verify process argv");
-    }
-    fs::remove_dir_all(directory).unwrap();
 }

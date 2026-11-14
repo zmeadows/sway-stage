@@ -2,11 +2,8 @@
 //!
 //! Ordered `window::new` events bind sequential launches to layout leaves; selectors alone
 //! never establish ownership. Later checks require those container IDs on the target
-//! workspace in safe tiled state, the exact app ID or Xwayland class, and, where selectors
-//! cannot tell launches apart, the literal launch arguments in `/proc/PID/cmdline`.
-//! Desktop fixtures additionally require their expected Foot argv, unchanged launcher,
-//! and, for the initial gtk-launch fixture, exact GLib launcher PID/path fields. Replay
-//! requires the same Foot argv and window evidence without asserting GLib provenance.
+//! workspace in safe tiled state, as native Wayland windows with the exact app ID, and,
+//! where the leaf requires it, the literal launch arguments in `/proc/PID/cmdline`.
 //! Every failure here is `Uncertain`, which forbids cleanup and workspace restoration.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -17,7 +14,7 @@ use std::path::Path;
 use crate::ipc::{EventContainer, Shell, TreeNode, WindowChange, WindowEvent};
 use crate::layout::{class, is_window, observed_identifier, outline};
 use crate::observation::{Failure, walk};
-use crate::scenarios::{ConfiguredNode, ConfiguredWindow, DesktopLaunchMethod, Selector};
+use crate::scenarios::{ConfiguredNode, ConfiguredWindow, Selector};
 
 /// Sway container ID → configured layout ID, for windows this run launched and accepted.
 pub type AcceptedWindows = BTreeMap<i64, String>;
@@ -138,7 +135,6 @@ pub fn bind_launches(
 fn event_identifier<'a>(container: &'a EventContainer, selector: &Selector) -> Option<&'a str> {
     match selector {
         Selector::AppId(_) => container.app_id.as_deref(),
-        Selector::Class(_) => container.window_properties.as_ref()?.class.as_deref(),
     }
 }
 
@@ -146,7 +142,7 @@ fn event_identifier<'a>(container: &'a EventContainer, selector: &Selector) -> O
 /// its leaf, on the target workspace in safe tiled state, with process evidence where its
 /// leaf requires it. Candidates are accepted IDs, any window anywhere matching one of the
 /// layout's selectors, and any window on the target; any candidate that is not such an
-/// owned window is fatal. Preexisting windows elsewhere, such as existing Firefox windows,
+/// owned window is fatal. Preexisting windows elsewhere, such as the user's other windows,
 /// are expected and ignored.
 pub fn verify_ownership(
     tree: &TreeNode,
@@ -215,28 +211,12 @@ pub fn verify_ownership(
                 leaf.selector.value()
             )));
         }
-        match leaf.selector {
-            Selector::Class(_) => {
-                let is_xwayland = node.app_id.is_none()
-                    && node.window.is_some()
-                    && node.shell == Some(Shell::Xwayland);
-                if !is_xwayland {
-                    return Err(Failure::Uncertain(format!(
-                        "expected an Xwayland window with class: {}",
-                        outline(node)
-                    )));
-                }
-            }
-            Selector::AppId(_) => {
-                let is_native_wayland =
-                    node.shell == Some(Shell::XdgShell) && node.window.is_none();
-                if !is_native_wayland {
-                    return Err(Failure::Uncertain(format!(
-                        "expected a native Wayland window: {}",
-                        outline(node)
-                    )));
-                }
-            }
+        let is_native_wayland = node.shell == Some(Shell::XdgShell) && node.window.is_none();
+        if !is_native_wayland {
+            return Err(Failure::Uncertain(format!(
+                "expected a native Wayland window: {}",
+                outline(node)
+            )));
         }
         if leaf.requires_process_evidence {
             require_process_command(node, leaf)?;
@@ -254,8 +234,7 @@ pub fn verify_ownership(
 }
 
 /// Requires Sway's PID for `window` to show the configured application's literal argv.
-/// Desktop launches compare Foot's argv rather than the intermediary's. Initial fixture
-/// launches additionally require GLib provenance. Recovered arguments never appear in messages.
+/// Recovered arguments never appear in messages.
 pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Result<(), Failure> {
     let Some(pid) = window.pid.filter(|pid| *pid > 0) else {
         return Err(Failure::Uncertain(format!(
@@ -263,41 +242,19 @@ pub fn require_process_command(window: &TreeNode, leaf: &ConfiguredWindow) -> Re
             window.id, leaf.layout_id
         )));
     };
-
-    verify_process_evidence(Path::new(&format!("/proc/{pid}")), pid, leaf).map_err(|reason| {
+    let refuse = |reason: &str| {
         Failure::Uncertain(format!(
             "{reason}: container={} pid={pid} leaf={}; refusing cleanup",
             window.id, leaf.layout_id
         ))
-    })
-}
-
-pub(super) fn verify_process_evidence(
-    process_directory: &Path,
-    pid: i32,
-    leaf: &ConfiguredWindow,
-) -> Result<(), &'static str> {
-    let command_line = read_process_bytes(&process_directory.join("cmdline"))
-        .ok_or("cannot verify process argv")?;
-    let expected_command = if let Some(fixture) = &leaf.desktop_launcher {
-        if fixture.launch_method == DesktopLaunchMethod::GtkLaunch {
-            let environment = read_process_bytes(&process_directory.join("environ"))
-                .ok_or("cannot verify desktop launcher environment")?;
-            if !launcher_environment_proves_launch(&environment, pid, &fixture.path) {
-                return Err("desktop launcher metadata does not prove this launch");
-            }
-        }
-        let contents =
-            read_process_bytes(&fixture.path).ok_or("cannot verify private desktop fixture")?;
-        if contents != fixture.contents.as_bytes() {
-            return Err("private desktop fixture changed");
-        }
-        &fixture.foot_command
-    } else {
-        &leaf.command
     };
-    if !command_line_proves_launch(&command_line, expected_command) {
-        return Err("process argv does not prove this launch");
+
+    let command_line_path = format!("/proc/{pid}/cmdline");
+    let Some(command_line) = read_process_bytes(Path::new(&command_line_path)) else {
+        return Err(refuse("cannot verify process argv"));
+    };
+    if !command_line_proves_launch(&command_line, &leaf.command) {
+        return Err(refuse("process argv does not prove this launch"));
     }
     Ok(())
 }
@@ -313,43 +270,10 @@ fn read_process_bytes(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() <= LIMIT).then_some(bytes)
 }
 
-/// Independent of production inference: compare the two exact fixture fields as bytes,
-/// rejecting duplicates, malformed entries, inherited PIDs, and incomplete observations.
-fn launcher_environment_proves_launch(environment: &[u8], pid: i32, path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-
-    if environment.last() != Some(&0) {
-        return false;
-    }
-    let expected_pid = pid.to_string();
-    for (key, expected) in [
-        (
-            b"GIO_LAUNCHED_DESKTOP_FILE".as_slice(),
-            path.as_os_str().as_bytes(),
-        ),
-        (
-            b"GIO_LAUNCHED_DESKTOP_FILE_PID".as_slice(),
-            expected_pid.as_bytes(),
-        ),
-    ] {
-        let fields: Vec<&[u8]> = environment
-            .split(|byte| *byte == 0)
-            .filter(|entry| entry.split(|byte| *byte == b'=').next() == Some(key))
-            .collect();
-        let mut expected_entry = key.to_vec();
-        expected_entry.push(b'=');
-        expected_entry.extend_from_slice(expected);
-        if fields != [expected_entry.as_slice()] {
-            return false;
-        }
-    }
-    true
-}
-
 /// Whether raw `/proc/PID/cmdline` bytes hold exactly `command`'s arguments after the
 /// executable, byte for byte, with argument boundaries intact. argv[0] may differ after an
 /// exec through a distribution wrapper; every other literal argument must agree, including
-/// a private Firefox profile path or a per-leaf Foot title.
+/// a per-leaf Foot title or the process probe's literal arguments.
 fn command_line_proves_launch(command_line: &[u8], command: &[String]) -> bool {
     // The kernel terminates every argument, including the last, with NUL.
     let Some(arguments) = command_line.strip_suffix(&[0]) else {
