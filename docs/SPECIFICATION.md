@@ -745,10 +745,11 @@ notifications through `notify-send`. Sizing warnings also notify with counts of 
 outside size tolerance and groups whose geometry could not be verified; full diagnostics remain on stderr and in the launch log.
 Profiles combine sizing warnings into one notification only after successful completion.
 Warnings never turn a completed load into a failure. Save confirmations use low urgency;
-sizing warnings, capture/menu errors, configuration validation errors, and profile preflight
-refusals use normal urgency. Runtime loading failures use critical urgency, including
-workspace selection or IPC failures where desktop state may be uncertain. Missing notification
-tools or delivery failures never hide the primary result. Error notifications give concise
+sizing warnings, capture/menu errors, configuration validation errors, and known safe
+pre-construction refusals (occupied targets or unmet profile output expectations) use normal
+urgency. During loading, runtime interruptions, uncertain workspace state, IPC failures, and
+failures after applications launch use critical urgency, including during profile preflight
+or selection. Missing notification tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
 notification refers to `last-run.log` only when logging remains available for that attempt.
 Titles identify layout loading, profile loading, workspace capture, or profile capture,

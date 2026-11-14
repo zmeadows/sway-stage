@@ -104,10 +104,7 @@ impl ProfileProgress {
 
     fn notification(&self, preflight: bool) -> String {
         let Some(entry) = &self.current else {
-            return format!(
-                "Profile preflight stopped (0 of {} layouts completed).",
-                self.total
-            );
+            return format!("Profile preflight stopped (0/{} completed).", self.total);
         };
         // Even validated names can contain sensitive information. Use their YAML position.
         let location = match &entry.target {
@@ -120,7 +117,7 @@ impl ProfileProgress {
             "Profile stopped at"
         };
         format!(
-            "{phase} {location} ({} of {} layouts completed).",
+            "{phase} {location} ({}/{} completed).",
             self.completed.len(),
             self.total
         )
@@ -288,7 +285,7 @@ impl Diagnostics {
         }
         let notification = self.failure_notification(&error);
         if let Err(error) =
-            send_failure_notification(self.operation, &notification, self.failure_urgency())
+            send_failure_notification(self.operation, &notification, self.failure_urgency(&error))
         {
             self.record(&format!("secondary notification failure: {error}"));
         }
@@ -304,30 +301,48 @@ impl Diagnostics {
         {
             notification.push_str(&format!(" {context}"));
         }
+        if self.application_spawned {
+            notification.push_str(if self.profile_context.is_some() {
+                "\nWindows may remain across profile workspaces. Inspect before retrying."
+            } else {
+                "\nWindows may remain. Inspect before retrying."
+            });
+        }
         if let Some(progress) = &self.profile_context {
             notification.push('\n');
             notification
                 .push_str(&progress.notification(self.current_stage == "workspace preflight"));
         }
-        if self.application_spawned {
-            notification.push_str(if self.profile_context.is_some() {
-                "\nApplications started; windows may remain on earlier or current workspaces. Inspect them before retrying."
-            } else {
-                "\nApplications started; windows may remain. Inspect the workspace before retrying."
-            });
-        }
         with_log_reference(notification, self.log_file.is_some())
     }
 
-    fn failure_urgency(&self) -> &'static str {
-        if self.application_spawned
-            || (!self.current_stage.ends_with(": validation")
-                && self.current_stage != "validation"
-                && self.current_stage != "workspace preflight")
-        {
-            "critical"
-        } else {
+    fn failure_urgency(&self, error: &str) -> &'static str {
+        if self.application_spawned {
+            return "critical";
+        }
+
+        if self.current_stage.ends_with(": validation") || self.current_stage == "validation" {
+            return "normal";
+        }
+
+        // Only known refusals at the initial checks are safe. IPC failures and
+        // contradictory workspace history remain critical, even before a launch.
+        let cause = failure_cause(error);
+        let occupied_target = self.current_stage.starts_with("prelaunch workspace=")
+            && cause.starts_with("target workspace must be completely empty");
+        let profile_refusal = self.current_stage == "workspace preflight"
+            && [
+                "profile target occupied: ",
+                "profile output mismatch: ",
+                "profile output unavailable: ",
+            ]
+            .iter()
+            .any(|prefix| cause.starts_with(prefix));
+
+        if occupied_target || profile_refusal {
             "normal"
+        } else {
+            "critical"
         }
     }
 
@@ -480,6 +495,20 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
         return with_log_reference(summary.to_owned(), log_available);
     }
 
+    let cause = failure_cause(error);
+    let summary = recognized_failure_summary(cause).unwrap_or(match operation {
+        "load" => "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
+        "profile load" => "Unable to finish loading the profile. Inspect workspace state and diagnostics before retrying.",
+        "capture" => "Unable to capture the workspace.",
+        "profile capture" => "Unable to capture the profile.",
+        _ => "Unable to complete the menu action.",
+    });
+
+    with_log_reference(summary.to_owned(), log_available)
+}
+
+/// Remove only internal wrappers, shared by summary and safe-refusal urgency checks.
+fn failure_cause(error: &str) -> &str {
     let mut cause = error;
     // Named load wrappers contain validated ASCII configuration names. Remove only
     // known contexts; never search arbitrary error text for something recognizable.
@@ -503,34 +532,26 @@ fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) 
         }
     }
 
-    let summary = recognized_failure_summary(cause).unwrap_or(match operation {
-        "load" => "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
-        "profile load" => "Unable to finish loading the profile. Inspect workspace state and diagnostics before retrying.",
-        "capture" => "Unable to capture the workspace.",
-        "profile capture" => "Unable to capture the profile.",
-        _ => "Unable to complete the menu action.",
-    });
-
-    with_log_reference(summary.to_owned(), log_available)
+    cause
 }
 
 /// These prefixes belong to internal error producers, before any untrusted details.
 /// Capture arrangement errors instead carry a safe summary alongside their detail.
 fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
     let summary = if cause.starts_with("window timeout: ") {
-        "The expected window was not ready in time. Check its launch command, exact app ID/class, and single-instance behavior."
+        "Window timed out. Check launch command, exact app ID/class, and single-instance behavior."
     } else if cause.starts_with("placement failure: wrong workspace: ") {
         "A window for this layout opened on another workspace. Check Sway's window assignment rules."
     } else if cause.starts_with("matching window was in the scratchpad: ") {
         "A window for this layout opened in the scratchpad instead of the target workspace. Check Sway's scratchpad rules."
     } else if cause.starts_with("placement failure: unknown workspace: ") {
-        "A matching window's workspace could not be determined. Loading stopped because its placement is uncertain. Inspect Sway's workspace state before retrying."
+        "A matching window's workspace could not be determined. Inspect workspace state before retrying."
     } else if cause.starts_with("ambiguous new windows id=") {
         "Multiple new windows match the expected application. Use a more specific app ID/class or a command that opens one window."
     } else if cause.starts_with("matching window was floating/fullscreen: ")
         || cause.starts_with("matching window has unusable tiled state: ")
     {
-        "A matching window is floating, fullscreen, or has unknown fullscreen state. Loading requires tiled windows; check application settings and Sway rules."
+        "Loading requires tiled windows. A match is floating/fullscreen or has unknown fullscreen state; check app settings and Sway rules."
     } else if cause.starts_with("unexpected target-workspace window id=")
         || cause.starts_with("unexpected floating/fullscreen/scratchpad window id=")
     {
@@ -541,17 +562,17 @@ fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
         || cause.starts_with("focus left target id=")
         || cause.starts_with("focused workspace id=")
     {
-        "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes."
+        "The target workspace lost focus. Keep it focused while loading."
     } else if cause.starts_with("target workspace id=") {
-        "Loading stopped because the target workspace changed outputs. Keep it on its original output until loading finishes."
+        "The target workspace changed outputs. Keep it on its original output while loading."
     } else if cause.starts_with("target workspace was destroyed")
         || cause.starts_with("target workspace missing")
     {
         "The target workspace is no longer available. Check workspace state and retry."
     } else if cause.starts_with("target workspace must be completely empty") {
-        "The target workspace is occupied. Load on an empty workspace, including no floating windows or empty containers."
+        "The target workspace is occupied. Use a workspace with no windows or empty containers."
     } else if cause.starts_with("profile target occupied: ") {
-        "A workspace targeted by the profile is occupied. All profile targets must be empty, including floating windows and empty containers."
+        "A profile target is occupied. All profile targets must be empty, including floating windows and empty containers."
     } else if cause.starts_with("profile output mismatch: ") {
         "A profile workspace is on a different output than configured. Check the profile's output expectations and Sway workspace placement rules."
     } else if cause.starts_with("profile output unavailable: ") {
@@ -579,7 +600,7 @@ fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
     {
         "Sway reported inconsistent workspace identities or focus. Retry when workspace state is stable."
     } else if cause.starts_with("spawn application: ") {
-        "Unable to start an application. Check its executable, launch command, working directory, and permissions."
+        "Unable to start an application. Check its executable, command, working directory, and permissions."
     } else if cause.starts_with("Sway command failed: ")
         || cause.starts_with("workspace command rejected: ")
         || cause.starts_with("workspace command: ")
@@ -872,20 +893,107 @@ mod tests {
     }
 
     #[test]
-    fn failure_urgency_distinguishes_preparation_from_runtime_interruptions() {
+    fn failure_urgency_distinguishes_safe_refusals_from_uncertain_state() {
+        let occupied = "layout \"private\": target workspace must be completely empty";
         let mut diagnostics = without_log("load");
         diagnostics.stage("load private: validation");
-        assert_eq!(diagnostics.failure_urgency(), "normal");
-        diagnostics.stage("subscribe");
-        assert_eq!(diagnostics.failure_urgency(), "critical");
+        assert_eq!(
+            diagnostics.failure_urgency("untrusted parser text"),
+            "normal"
+        );
+
+        diagnostics.stage("prelaunch workspace=7");
+        assert_eq!(diagnostics.failure_urgency(occupied), "normal");
+        for cause in [
+            "workspace focus changed from target id=7",
+            "target workspace id=7 moved to another output",
+            "get tree: connection closed",
+            "unrecognized: target workspace must be completely empty",
+        ] {
+            assert_eq!(diagnostics.failure_urgency(cause), "critical", "{cause}");
+        }
+
+        diagnostics.operation = "profile load";
         diagnostics.profile_started(2);
         diagnostics.stage("workspace preflight");
-        assert_eq!(diagnostics.failure_urgency(), "normal");
-        diagnostics.stage("workspace selection");
-        assert_eq!(diagnostics.failure_urgency(), "critical");
+        for cause in [
+            "profile target occupied: workspace 3",
+            "profile output mismatch: workspace 3",
+            "profile output unavailable: workspace 3",
+        ] {
+            let wrapped = format!("profile \"private\": {cause}");
+            assert_eq!(diagnostics.failure_urgency(&wrapped), "normal");
+
+            diagnostics.stage("workspace selection");
+            assert_eq!(diagnostics.failure_urgency(&wrapped), "critical");
+            diagnostics.stage("workspace preflight");
+        }
+        for cause in [
+            "get tree: connection closed",
+            "workspace snapshot: inconsistent identities",
+            "unexpected workspace change Focus",
+            "profile target changed: workspace 3",
+            "window activity id=20 during prelaunch fence",
+            "unrecognized error",
+        ] {
+            assert_eq!(diagnostics.failure_urgency(cause), "critical", "{cause}");
+        }
+
         diagnostics.spawned(42);
-        diagnostics.stage("workspace preflight");
-        assert_eq!(diagnostics.failure_urgency(), "critical");
+        assert_eq!(
+            diagnostics.failure_urgency("profile target occupied: workspace 3"),
+            "critical"
+        );
+        diagnostics.stage("prelaunch workspace=7");
+        assert_eq!(diagnostics.failure_urgency(occupied), "critical");
+    }
+
+    #[test]
+    fn combined_profile_failures_keep_cause_progress_windows_and_log_concise() {
+        use crate::profile::WorkspaceTarget;
+
+        for target in [
+            WorkspaceTarget::Number(999_999_999),
+            WorkspaceTarget::Name("private name".into()),
+        ] {
+            for log_available in [false, true] {
+                for cause in [
+                    "window timeout: private",
+                    "placement failure: unknown workspace: private",
+                    "matching window has unusable tiled state: private",
+                    "ambiguous new windows id=20 private",
+                    "spawn application: private",
+                ] {
+                    let mut diagnostics = without_log("profile load");
+                    diagnostics.profile_started(256);
+                    diagnostics.profile_workspace(&WorkspaceTarget::Number(1), "private", 1);
+                    diagnostics.spawned(42);
+                    diagnostics.profile_workspace_completed(101);
+                    diagnostics.profile_workspace(&target, "private", 256);
+                    if cause.starts_with("window timeout: ") {
+                        diagnostics.window_timeout("private", Some(ExitStatus::from_raw(11)));
+                    }
+
+                    diagnostics.log_file = log_available.then(|| File::open("/dev/null").unwrap());
+                    let body = diagnostics.failure_notification(cause);
+                    assert!(body.starts_with(recognized_failure_summary(cause).unwrap()));
+                    assert!(body.contains("Windows may remain across profile workspaces."));
+                    assert!(body.contains("Inspect before retrying."));
+                    assert!(body.contains("1/256 completed"));
+                    assert!(body.contains(match target {
+                        WorkspaceTarget::Number(_) => "workspace 999999999",
+                        WorkspaceTarget::Name(_) => "entry 256",
+                    }));
+                    assert_eq!(body.contains("last-run.log"), log_available);
+                    assert_eq!(
+                        body.contains("signal 11"),
+                        cause.starts_with("window timeout: ")
+                    );
+                    assert!(!body.contains("private"));
+                    assert!(body.len() < 300, "{} characters: {body}", body.len());
+                }
+            }
+        }
     }
 
     #[test]
@@ -907,14 +1015,12 @@ mod tests {
         let mut diagnostics = without_log("load");
         let failed_spawn = diagnostics.failure_notification("spawn application: private command");
         assert!(failed_spawn.contains("Check its executable"));
-        assert!(!failed_spawn.contains("Applications started"));
+        assert!(!failed_spawn.contains("Windows may remain"));
         assert!(!failed_spawn.contains("nothing changed"));
 
         diagnostics.spawned(42);
         let body = diagnostics.failure_notification("window timeout: private selector");
-        assert!(body.contains(
-            "Applications started; windows may remain. Inspect the workspace before retrying."
-        ));
+        assert!(body.contains("Windows may remain. Inspect before retrying."));
         assert!(!body.contains("last-run.log"));
         assert!(!body.contains("private"));
     }
@@ -932,39 +1038,38 @@ mod tests {
         diagnostics.profile_started(3);
         diagnostics.stage("workspace preflight");
         let initial = diagnostics.failure_notification("get tree: failed");
-        assert!(initial.contains("Profile preflight stopped (0 of 3 layouts completed)."));
+        assert!(initial.contains("Profile preflight stopped (0/3 completed)."));
         diagnostics.profile_workspace(
             &WorkspaceTarget::Name("<b>private</b>\n".into()),
             "secret",
             3,
         );
         let preflight = diagnostics.failure_notification("profile target occupied: private");
-        assert!(
-            preflight.contains("Profile preflight stopped at entry 3 (0 of 3 layouts completed).")
-        );
-        assert!(!preflight.contains("Applications started"));
+        assert!(preflight.contains("Profile preflight stopped at entry 3 (0/3 completed)."));
+        assert!(!preflight.contains("Windows may remain"));
         assert!(!preflight.contains("private"));
         assert!(!preflight.contains("secret"));
 
         diagnostics.profile_workspace(&WorkspaceTarget::Number(4), "secret", 1);
         diagnostics.stage("workspace selection");
         let selection = diagnostics.failure_notification("workspace command rejected: private");
-        assert!(selection.contains("Profile stopped at workspace 4 (0 of 3 layouts completed)."));
-        assert!(!selection.contains("Applications started"));
+        assert!(selection.contains("Profile stopped at workspace 4 (0/3 completed)."));
+        assert!(!selection.contains("Windows may remain"));
         assert!(!selection.contains("nothing changed"));
 
         diagnostics.spawned(42);
         diagnostics.stage("workspace completion verification");
         let unverified = diagnostics.failure_notification("unexpected workspace change Focus");
-        assert!(unverified.contains("0 of 3 layouts completed"));
+        assert!(unverified.contains("0/3 completed"));
         diagnostics.profile_workspace_completed(104);
         diagnostics.profile_workspace(&WorkspaceTarget::Name("sensitive name".into()), "secret", 2);
         diagnostics.stage("launch leaf=private workspace=105");
         let partial = diagnostics.failure_notification("spawn application: private");
-        assert!(partial.contains("Profile stopped at entry 2 (1 of 3 layouts completed)."));
-        assert!(partial.contains(
-            "windows may remain on earlier or current workspaces. Inspect them before retrying."
-        ));
+        assert!(partial.contains("Profile stopped at entry 2 (1/3 completed)."));
+        assert!(
+            partial
+                .contains("Windows may remain across profile workspaces. Inspect before retrying.")
+        );
         assert!(!partial.contains("sensitive"));
         assert!(!partial.contains("private"));
         assert!(!partial.contains("secret"));
@@ -1018,7 +1123,7 @@ mod tests {
                 // including the layout wrapper applied by its caller.
                 let body =
                     diagnostics.failure_notification(&format!("layout \"development\": {error}"));
-                assert!(body.starts_with("The expected window was not ready in time."));
+                assert!(body.starts_with("Window timed out."));
                 assert_eq!(
                     body.contains("Launch process"),
                     expected_notification,
@@ -1042,15 +1147,15 @@ mod tests {
         for (error, expected) in [
             (
                 "layout \"development\": window timeout: elapsed=10000ms observed=[]",
-                "The expected window was not ready in time. Check its launch command, exact app ID/class, and single-instance behavior.",
+                "Window timed out. Check launch command, exact app ID/class, and single-instance behavior.",
             ),
             (
                 "layout \"development\": workspace focus changed from target id=7",
-                "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes.",
+                "The target workspace lost focus. Keep it focused while loading.",
             ),
             (
                 "snapshot: focus left target id=7",
-                "Loading stopped because the target workspace lost focus. Keep it focused until loading finishes.",
+                "The target workspace lost focus. Keep it focused while loading.",
             ),
             (
                 "connect to SWAYSOCK: connection refused",
@@ -1062,11 +1167,11 @@ mod tests {
             ),
             (
                 "spawn application: executable missing; child PATH and cwd",
-                "Unable to start an application. Check its executable, launch command, working directory, and permissions.",
+                "Unable to start an application. Check its executable, command, working directory, and permissions.",
             ),
             (
                 "target workspace must be completely empty, including tiled/floating containers",
-                "The target workspace is occupied. Load on an empty workspace, including no floating windows or empty containers.",
+                "The target workspace is occupied. Use a workspace with no windows or empty containers.",
             ),
             (
                 "unexpected failure: window timeout: untrusted text",
@@ -1167,7 +1272,7 @@ mod tests {
         let long_name = "a".repeat(10000);
         let timeout = format!("layout \"{long_name}\": window timeout: leaf=<b>private</b>");
         let body = failure_body("load", &timeout, "wait", true);
-        assert!(body.starts_with("The expected window was not ready in time."));
+        assert!(body.starts_with("Window timed out."));
         assert!(!body.contains(&long_name));
         assert!(!body.contains("private"));
 
@@ -1243,7 +1348,7 @@ mod tests {
         assert!(diagnostics.log_file.is_none());
         let notification = diagnostics.failure_notification(error);
         assert!(!notification.contains("last-run.log"));
-        assert!(notification.contains("Applications started; windows may remain"));
+        assert!(notification.contains("Windows may remain"));
     }
 
     #[test]
