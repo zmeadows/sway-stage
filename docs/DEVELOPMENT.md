@@ -34,8 +34,9 @@ never read `SWAYSOCK`, connect to Sway, or start processes.
 
 ## Live testing: user only
 
-**AI agents must never execute the live integration harness, even with `--help`, partial
-runs, or trial runs.** Agents may compile it, inspect it, and run its offline tests only.
+**AI agents must never execute the live integration harness or the headless launcher, even
+with `--help`, partial runs, or trial runs.** Agents may compile them, inspect them, and run
+their offline tests only.
 Agents must never issue commands that mutate the user's live Sway desktop, including
 loads, application launches/termination, focus changes, or window moves/resizes.
 All live commands below are exclusively for the user's manual execution.
@@ -45,6 +46,36 @@ A disposable workspace is **not compositor isolation**: rules, outputs, focus, a
 are shared with the rest of the session. Leave input idle during harness runs; do not rely
 on guards for transactional protection. No nested compositor, VNC, or virtual monitor is
 required. Only one Sway seat is supported by the harness.
+
+## Headless smoke test
+
+User only. This temporary check prepares the move of the integration scenarios into a
+private headless compositor. Prerequisites: `sway`, `swaymsg`, Foot, and `setpriv`
+(util-linux) on `PATH`. From the repository root, run:
+
+```sh
+tools/integration/run.sh
+```
+
+It builds `sway-stage` and the `headless_smoke` example, then starts a separate Sway on the
+wlroots headless backend with one 2560×1440 `HEADLESS-1` output and no Xwayland, bar,
+decorations, or startup applications. Everything runs in a new owner-only directory under
+`$TMPDIR` (default `/tmp`), with an environment built from nothing but `PATH`: private
+runtime, home, XDG, and temporary directories, and a deliberately nonexistent D-Bus bus.
+It never connects to your session's compositor, notification daemon, or launch log, so it
+is safe to start from a terminal inside your Sway session. Before anything runs, it
+verifies the private IPC and Wayland sockets and the single virtual output. It then loads a
+two-Foot `splith` layout with the real `sway-stage` and checks both app IDs, the exact
+half-output geometry, and left-window focus over the headless IPC socket.
+
+Expect a ready line, `PASS  headless two-Foot smoke test: …`, and
+`Headless Sway stopped; session files removed.` with exit status 0. Shutdown sends `exit`
+to the private socket, waits up to five seconds, then kills only that compositor process;
+its Foot clients must exit with it. On failure, or after Ctrl-C, the compositor is stopped
+and the session directory is preserved and printed: inspect `sway.log`, `layouts/`, and
+`home/.local/state/sway-stage/last-run.log`. If the launcher itself is killed, the kernel
+kills the compositor (`setpriv --pdeathsig`). The 2560×1440 mode and this launcher have not
+yet been run; the existing live harness below is unchanged.
 
 ## Integration harness
 

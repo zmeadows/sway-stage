@@ -48,6 +48,13 @@ path = "tools/integration/main.rs"
 test = false
 bench = false
 
+# Temporary headless smoke test, run by tools/integration/run.sh; user-run only.
+[[example]]
+name = "headless_smoke"
+path = "tools/integration/headless_smoke.rs"
+test = false
+bench = false
+
 # Offline tests of the harness modules. A separate crate root without main.rs, so no test
 # can reach the harness entry point.
 [[test]]

@@ -157,8 +157,8 @@ Each kind of information has one home:
 - `docs/PLAN.md`: outstanding release work and explicitly undecided ideas only.
 - `examples/`: user-facing illustrative YAML configurations, linked to the specification.
 - `tools/`: development-only Rust diagnostics and the integration harness, registered in
-  `Cargo.toml` as Cargo examples. The harness's offline tests are a separate
-  `integration_harness` test target.
+  `Cargo.toml` as Cargo examples, plus the headless launcher `tools/integration/run.sh`.
+  The harness's offline tests are a separate `integration_harness` test target.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help describes current commands.
   Keep it consistent with the specification.
@@ -183,6 +183,13 @@ entry point; its tests must never read `SWAYSOCK`, connect to a compositor, or s
 processes. The harness's explicit switch to a disposable workspace and its owned-window
 cleanup are development-harness exceptions to the ordinary loader's no-switch policy and
 the CLI's no-close policy, not permission for agents to perform desktop operations.
+
+The headless launcher, `tools/integration/run.sh`, and the temporary `headless_smoke`
+Cargo example it runs are likewise exclusively for the user's manual execution. Agents must
+never execute either, including partial or trial runs; validate them only by compilation,
+static inspection, and the offline `integration_harness` tests. The launcher starts a
+private headless Sway with an environment built from nothing, never connects to the user's
+compositor, and signals only its own compositor process.
 
 Window cleanup must remain an explicit verified success phase that closes only windows
 independently proven to belong to the run, never a destructor or failure handler. SIGINT
