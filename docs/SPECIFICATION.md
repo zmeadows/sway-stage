@@ -429,7 +429,12 @@ App IDs/classes identify a window type, not which process created it. Concurrent
 with the same selector can be indistinguishable; distinct IDs reduce ambiguity. Sway rules,
 inherited activation context, and single-instance applications can place a window elsewhere;
 the loader refuses rather than moving it. IPC observations and commands are not atomic:
-these safeguards do not provide isolation from concurrent desktop activity.
+these safeguards do not provide isolation from concurrent desktop activity. For example,
+Sway cannot target a workspace's own layout by criteria, so construction focuses the
+workspace through its first child container in the same request. If that container
+closes or moves at that instant, the layout change can reach another container or
+workspace. A focus command that races a switch to another workspace can likewise return
+focus to the target. The run then stops without undoing either.
 
 ## Capture workflow
 

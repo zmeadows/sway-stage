@@ -365,11 +365,14 @@ impl<'a> Construction<'a> {
     }
 
     /// Prefixes a criteria-free command so that it acts on the frozen workspace itself.
-    /// Workspace IDs cannot be selected with con_id criteria; reach the workspace through
-    /// its verified direct child. Sway runs one request's commands in order without
-    /// handling input between them, so pointer focus cannot redirect the final command.
-    /// This narrows a race but is not atomic: a failed criteria command does not stop
-    /// later ones, so every reply and the resulting hierarchy are still verified.
+    /// Criteria cannot select a workspace, and `layout` or `split` given a child container
+    /// acts on that child or wraps the workspace's children instead, so focus the workspace
+    /// through its verified direct child. Sway handles no input between one request's
+    /// commands, so pointer focus cannot redirect the final command as it could between
+    /// separate requests. The request is still not atomic: Sway runs the final command even
+    /// after the criteria commands fail. If the child closes or moves just before Sway runs
+    /// the request, that command acts on whatever is focused then, possibly outside the
+    /// target. Checking every reply and the resulting hierarchy only detects this afterward.
     fn with_workspace_focus(&mut self, criteria_free_command: &str) -> String {
         let direct_child_id = self.expected_hierarchy.subtree_mut(&[0]).id();
         format!(
