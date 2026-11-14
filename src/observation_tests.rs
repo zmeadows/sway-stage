@@ -2,6 +2,7 @@ use super::fixtures::*;
 use super::*;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 #[test]
@@ -338,6 +339,107 @@ fn overflow_invalidates_all_history() {
     let error = observer.next_until(ipc_deadline()).unwrap_err();
 
     assert!(error.contains("overflow"), "{error}");
+}
+
+static CHECKED_EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn count_checked_event(_: &Event) -> Result<(), String> {
+    CHECKED_EVENT_COUNT.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+#[test]
+fn unconsumed_events_are_checked_without_queueing_until_the_next_snapshot() {
+    let (mut observer, mut events) = initialized_observer();
+    observer
+        .check_events_until_next_snapshot(count_checked_event)
+        .unwrap();
+
+    // Twice what the queue holds; none of them may be retained.
+    let checked_event_count = 2 * EVENT_QUEUE_CAPACITY;
+    for index in 0..checked_event_count {
+        send_message(
+            &mut events,
+            WINDOW_EVENT,
+            window_event("title", 20 + index as i64),
+        );
+    }
+    let limit = ipc_deadline();
+    while CHECKED_EVENT_COUNT.load(Ordering::SeqCst) < checked_event_count {
+        assert!(Instant::now() < limit, "reader did not check every event");
+        thread::yield_now();
+    }
+
+    let resumed = snapshot(
+        &mut observer,
+        &mut events,
+        focused_workspace_reply(),
+        empty_workspace_tree(),
+    )
+    .unwrap();
+    assert!(resumed.events.is_empty());
+
+    // The snapshot resumed queueing: later events reach the next history in wire order.
+    send_message(&mut events, WINDOW_EVENT, window_event("new", 30));
+    send_message(&mut events, WINDOW_EVENT, window_event("close", 31));
+    let queued = snapshot(
+        &mut observer,
+        &mut events,
+        focused_workspace_reply(),
+        empty_workspace_tree(),
+    )
+    .unwrap();
+    let queued_window_ids: Vec<_> = queued
+        .events
+        .iter()
+        .map(|event| {
+            let Event::Window(window) = event else {
+                panic!("expected window")
+            };
+            window.container.id
+        })
+        .collect();
+    assert_eq!(queued_window_ids, [30, 31]);
+    assert_eq!(
+        CHECKED_EVENT_COUNT.load(Ordering::SeqCst),
+        checked_event_count
+    );
+}
+
+fn reject_workspace_events(event: &Event) -> Result<(), String> {
+    match event {
+        Event::Workspace(_) => Err("rejected workspace event".into()),
+        _ => Ok(()),
+    }
+}
+
+#[test]
+fn a_failed_unconsumed_event_check_is_a_sticky_failure() {
+    let (mut observer, mut events) = initialized_observer();
+    observer
+        .check_events_until_next_snapshot(reject_workspace_events)
+        .unwrap();
+    send_message(&mut events, WINDOW_EVENT, window_event("title", 20));
+    send_message(&mut events, WORKSPACE_EVENT, workspace_move_event(11));
+    let limit = ipc_deadline();
+    while !observer.reader.as_ref().unwrap().is_finished() {
+        assert!(Instant::now() < limit, "reader failed to stop on the check");
+        thread::yield_now();
+    }
+
+    // The next snapshot refuses before it queries anything.
+    let (unused_query, _server) = socket_pair();
+    let error = observer
+        .snapshot(unused_query, ipc_deadline())
+        .err()
+        .unwrap();
+    assert!(error.contains("rejected workspace event"), "{error}");
+    assert!(observer.next_until(ipc_deadline()).is_err());
+    assert!(
+        observer
+            .check_events_until_next_snapshot(reject_workspace_events)
+            .is_err()
+    );
 }
 
 #[test]

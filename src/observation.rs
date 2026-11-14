@@ -54,6 +54,9 @@ pub struct WorkspaceSnapshot {
     pub events: Vec<Event>,
 }
 
+/// Checks one event that arrives while the observer's owner cannot consume its history.
+pub type UnconsumedEventCheck = fn(&Event) -> Result<(), String>;
+
 pub struct Observer {
     /// A clone of the reader thread's event socket, kept only to shut it down.
     event_socket: UnixStream,
@@ -61,6 +64,8 @@ pub struct Observer {
     messages: mpsc::Receiver<Message>,
     /// A terminal failure, set by the reader thread or the observer; never cleared.
     failure: Arc<Mutex<Option<String>>>,
+    /// While set, the reader checks each new event with this instead of queueing it.
+    unconsumed_event_check: Arc<Mutex<Option<UnconsumedEventCheck>>>,
     /// The focused workspace frozen by the first snapshot.
     target_workspace_id: Option<i64>,
     /// Containing output's container ID, frozen with the target workspace.
@@ -84,6 +89,9 @@ impl Observer {
         let (sender, messages) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
         let reader_failure = Arc::clone(&failure);
+        let unconsumed_event_check: Arc<Mutex<Option<UnconsumedEventCheck>>> =
+            Arc::new(Mutex::new(None));
+        let reader_unconsumed_event_check = Arc::clone(&unconsumed_event_check);
         let reader = thread::Builder::new()
             .name("sway-events".into())
             .spawn(move || {
@@ -100,6 +108,17 @@ impl Observer {
                             .next()
                             .ok_or("event stream ended")?
                             .map_err(|error| format!("read Sway event: {error}"))?;
+
+                        let unconsumed_check = *reader_unconsumed_event_check
+                            .lock()
+                            .map_err(|_| "unconsumed event check poisoned".to_owned())?;
+                        if let Some(check) = unconsumed_check {
+                            // Nothing reads the queue now. The first failure ends this reader
+                            // and so invalidates all later history, as overflow does.
+                            check(&event)?;
+                            continue;
+                        }
+
                         sender.try_send(Message::Event(event)).map_err(|_| {
                             "event history unavailable: queue overflow or receiver closed"
                                 .to_owned()
@@ -121,6 +140,7 @@ impl Observer {
             reader: Some(reader),
             messages,
             failure,
+            unconsumed_event_check,
             target_workspace_id: None,
             target_output_id: None,
         };
@@ -251,12 +271,36 @@ impl Observer {
         }
     }
 
+    /// For an owner that must wait for other work and cannot consume events meanwhile, as
+    /// the profile coordinator waits for each layout construction. The reader applies `check`
+    /// to every newly read event instead of queueing it, so a long wait cannot overflow the
+    /// bounded queue, and nothing is retained. The first failure is this observer's sticky
+    /// failure. The next snapshot resumes queueing before its queries.
+    pub fn check_events_until_next_snapshot(
+        &mut self,
+        check: UnconsumedEventCheck,
+    ) -> Result<(), String> {
+        self.check_health()?;
+        *self
+            .unconsumed_event_check
+            .lock()
+            .map_err(|_| "unconsumed event check poisoned")? = Some(check);
+        Ok(())
+    }
+
     fn query_workspace_tree(
         &mut self,
         socket: UnixStream,
         deadline: Instant,
     ) -> Result<(Vec<Workspace>, Node, String), String> {
         self.check_health()?;
+
+        // Queue again before the fence is requested, so the fence and every later event
+        // reach this snapshot's ordered history. Earlier events were already checked.
+        *self
+            .unconsumed_event_check
+            .lock()
+            .map_err(|_| "unconsumed event check poisoned")? = None;
 
         let shutdown_socket = socket
             .try_clone()

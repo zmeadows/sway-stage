@@ -35,6 +35,15 @@ pub struct ExpectedSwitch {
     pub destination_name: String,
 }
 
+/// Everything one fence read before its own tick, apart from other ticks.
+struct FencedEvents {
+    window_events: Vec<WindowEvent>,
+    /// Non-urgent workspace events, in order, each already accepted by the fence.
+    workspace_events: Vec<WorkspaceEvent>,
+    /// How many window events preceded the expected switch's focus event.
+    switch_window_index: Option<usize>,
+}
+
 /// The event subscription and the focus history derived from it.
 pub struct Events {
     subscription: EventSubscription,
@@ -107,7 +116,7 @@ impl Events {
         swaymsg: &Swaymsg,
         expected_switch: Option<&ExpectedSwitch>,
         expected_rename: Option<&WorkspaceIdentity>,
-    ) -> Result<(Vec<WindowEvent>, Option<usize>), String> {
+    ) -> Result<FencedEvents, String> {
         if !self.focus_history_trusted {
             return Err("event history is no longer trusted; refusing another fence".into());
         }
@@ -124,13 +133,14 @@ impl Events {
         swaymsg: &Swaymsg,
         expected_switch: Option<&ExpectedSwitch>,
         expected_rename: Option<&WorkspaceIdentity>,
-    ) -> Result<(Vec<WindowEvent>, Option<usize>), String> {
+    ) -> Result<FencedEvents, String> {
         // The tick request counts against the same deadline as the events before it.
         let deadline = Instant::now() + IPC_TIMEOUT;
         let token = fence_token()?;
         swaymsg.send_tick(&token)?;
 
         let mut window_events = Vec::new();
+        let mut workspace_events = Vec::new();
         let mut switch_window_index = None;
         let mut observed_rename = false;
         for _ in 0..MAX_FENCE_EVENTS {
@@ -144,7 +154,11 @@ impl Events {
                         if expected_rename.is_some() && !observed_rename {
                             return Err("workspace rename produced no expected event".into());
                         }
-                        return Ok((window_events, switch_window_index));
+                        return Ok(FencedEvents {
+                            window_events,
+                            workspace_events,
+                            switch_window_index,
+                        });
                     }
                     continue;
                 }
@@ -154,9 +168,10 @@ impl Events {
                 }
                 Event::Workspace(workspace_event) => workspace_event,
             };
-            if workspace_event.change != WorkspaceChange::Urgent {
-                self.workspace_revision += 1;
+            if workspace_event.change == WorkspaceChange::Urgent {
+                continue;
             }
+            self.workspace_revision += 1;
             if let Some(renamed) = expected_rename {
                 if workspace_event.change == WorkspaceChange::Rename && !observed_rename {
                     accept_disposable_rename(
@@ -165,11 +180,10 @@ impl Events {
                         &mut self.current_workspace,
                     )?;
                     observed_rename = true;
+                    workspace_events.push(workspace_event);
                     continue;
                 }
-                if workspace_event.change != WorkspaceChange::Urgent {
-                    return Err("unexpected workspace activity during disposable rename".into());
-                }
+                return Err("unexpected workspace activity during disposable rename".into());
             }
             apply_workspace_event(
                 &workspace_event,
@@ -178,6 +192,7 @@ impl Events {
                 window_events.len(),
                 &mut self.current_workspace,
             )?;
+            workspace_events.push(workspace_event);
         }
         Err(format!("event history exceeded {MAX_FENCE_EVENTS} events"))
     }
@@ -273,6 +288,9 @@ pub struct Snapshot {
     /// The uniquely focused workspace, validated to be present in `tree`.
     pub focused_workspace_id: i64,
     pub window_events: Vec<WindowEvent>,
+    /// Non-urgent workspace events through the fence, in order, after the fence's own
+    /// focus and identity checks accepted them.
+    pub workspace_events: Vec<WorkspaceEvent>,
 }
 
 impl Snapshot {
@@ -359,8 +377,7 @@ fn synchronized_snapshot(
 ) -> Result<(Snapshot, Option<usize>), String> {
     let workspaces = swaymsg.get_workspaces()?;
     let tree = swaymsg.get_tree()?;
-    let (window_events, switch_window_index) =
-        events.fence(swaymsg, expected_switch, expected_rename)?;
+    let fenced = events.fence(swaymsg, expected_switch, expected_rename)?;
 
     let focused_workspace_id = validate_snapshot(&tree, &workspaces, events.current_workspace())
         .map_err(|error| events.distrust_focus_history(error))?;
@@ -369,9 +386,10 @@ fn synchronized_snapshot(
             tree,
             workspaces,
             focused_workspace_id,
-            window_events,
+            window_events: fenced.window_events,
+            workspace_events: fenced.workspace_events,
         },
-        switch_window_index,
+        fenced.switch_window_index,
     ))
 }
 

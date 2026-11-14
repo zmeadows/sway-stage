@@ -26,6 +26,9 @@ enum Step {
         replies: Option<Value>,
         events: Vec<(u32, Value)>,
     },
+    /// A snapshot connection closed without any request: the observer's history had
+    /// already failed, so it refused to query.
+    RefusedSnapshot,
 }
 
 fn snapshot(tree: &Value) -> Step {
@@ -104,6 +107,18 @@ fn focus_event(number: i64, old: i64) -> (u32, Value) {
         WORKSPACE_EVENT,
         json!({"change": "focus", "current": workspace(number, true), "old": workspace(old, false)}),
     )
+}
+
+/// Other IPC clients' ticks reach every tick subscriber, exactly as each loader fence does.
+fn foreign_ticks(count: usize) -> Vec<(u32, Value)> {
+    (0..count)
+        .map(|_| {
+            (
+                TICK_EVENT,
+                json!({"first": false, "payload": "another-client"}),
+            )
+        })
+        .collect()
 }
 
 fn selection_steps(
@@ -238,6 +253,10 @@ fn run_transcript(
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                if matches!(step, Step::RefusedSnapshot) {
+                    assert_eq!(socket.read(&mut [0]).unwrap(), 0, "step {index}");
+                    break socket;
+                }
                 let (kind, payload) = read_ipc_message(&mut socket);
                 if kind == 2 {
                     assert_eq!(
@@ -269,6 +288,7 @@ fn run_transcript(
                             "step {index}"
                         );
                     }
+                    Step::RefusedSnapshot => unreachable!("handled before reading"),
                 }
                 break socket;
             };
@@ -316,6 +336,7 @@ fn run_transcript(
                         assert_eq!(socket.read(&mut [0]).unwrap(), 0);
                     }
                 }
+                Step::RefusedSnapshot => {}
             }
         }
         finished.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -348,8 +369,12 @@ fn run_transcript(
         process.args(["profile", "load", "work"]);
     }
     let output = process.output().unwrap();
-    done.send(()).unwrap();
-    server.join().unwrap();
+    let _ = done.send(());
+    // An unconsumed or mismatched transcript names the step; sway-stage's own error explains
+    // why it stopped early.
+    if server.join().is_err() {
+        panic!("transcript server failed; sway-stage output: {output:?}");
+    }
     output
 }
 
@@ -911,6 +936,103 @@ fn coordinator_history_across_a_completed_load_prevents_the_next_switch() {
 }
 
 #[test]
+fn event_heavy_construction_cannot_overflow_the_waiting_coordinator() {
+    let fixture = fixture();
+    fixture.file(
+        "work.yaml",
+        "version: 1\nworkspaces: [{workspace: 3, layout: first}, {workspace: 1, layout: second}]\n",
+    );
+    let initial = tree();
+    let selected = focus_workspace(&initial, 3);
+    let mut steps = vec![snapshot(&initial)];
+    steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+
+    // The loader's initial, prelaunch, provisional-recheck, and pre-focus fences each read
+    // only their own 100 ticks, but the coordinator, waiting for the whole construction,
+    // receives all 400: more than its 256-event queue holds.
+    let (mut construction, first_done) = construction_steps(&selected, 3, 20);
+    for loader_step in [0, 1, 3, 4] {
+        if let Step::Snapshot { events, .. } = &mut construction[loader_step] {
+            events.extend(foreign_ticks(100));
+        }
+    }
+    steps.extend(construction);
+
+    // The second selection's transition history must be queued and checked again.
+    let mut second_selected = first_done.clone();
+    second_selected["nodes"][0]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(workspace(1, false));
+    second_selected = focus_workspace(&second_selected, 1);
+    steps.extend(selection_steps(&first_done, &second_selected, 1, 3, true));
+    steps.extend(construction_steps(&second_selected, 1, 21).0);
+
+    let output = run(&fixture, steps, false);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("launches")).unwrap(),
+        "first\nsecond\n"
+    );
+    let log =
+        fs::read_to_string(fixture.path.join(".local/state/sway-stage/last-run.log")).unwrap();
+    assert!(
+        log.contains("completed 2 workspaces [(3, 103), (1, 101)]"),
+        "{log}"
+    );
+}
+
+#[test]
+fn unrelated_workspace_changes_during_event_heavy_construction_stop_the_profile() {
+    for (change, reported_change) in [
+        ("init", "Init"),
+        ("empty", "Empty"),
+        ("rename", "Rename"),
+        ("move", "Move"),
+    ] {
+        let fixture = fixture();
+        let initial = tree();
+        let selected = focus_workspace(&initial, 3);
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+
+        // The loader permits each change to another workspace; the coordinator does not.
+        // It follows more ticks than the coordinator's queue holds, early in construction.
+        // Later steps stay small: unlike Sway, this server blocks writing to a full socket,
+        // and the coordinator stops reading at the change.
+        let (mut construction, _) = construction_steps(&selected, 3, 20);
+        for loader_step in [0, 1] {
+            if let Step::Snapshot { events, .. } = &mut construction[loader_step] {
+                events.extend(foreign_ticks(150));
+            }
+        }
+        if let Step::Snapshot { events, .. } = &mut construction[1] {
+            events.push((
+                WORKSPACE_EVENT,
+                json!({"change": change, "current": workspace(7, false), "old": null}),
+            ));
+        }
+        // The coordinator's recorded failure refuses its completion snapshot before querying.
+        construction.pop();
+        steps.extend(construction);
+        steps.push(Step::RefusedSnapshot);
+
+        let output = run(&fixture, steps, false);
+        assert_failure(
+            &fixture,
+            &output,
+            &format!("unexpected workspace change {reported_change} id=107"),
+            0,
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\n"
+        );
+    }
+}
+
+#[test]
 fn in_workspace_focus_restoration_keeps_profile_transition_checks() {
     for switch_during_restoration in [false, true] {
         let fixture = fixture();
@@ -1132,6 +1254,7 @@ fn named_steps(mut steps: Vec<Step>, targets: &[(i64, &str)]) -> Vec<Step> {
                         name_workspace_nodes(event, number, name);
                     }
                 }
+                Step::RefusedSnapshot => {}
             }
         }
     }

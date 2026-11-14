@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,16 @@ impl Swaymsg {
         }
         let executable = process::find_executable("swaymsg")?;
         Ok(Self { executable, socket })
+    }
+
+    /// The `swaymsg` executable behind every query, for a script that must use the same one.
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// The private socket this client always names explicitly.
+    pub fn socket(&self) -> &Path {
+        &self.socket
     }
 
     pub fn get_tree(&self) -> Result<TreeNode, String> {

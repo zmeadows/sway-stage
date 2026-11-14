@@ -3,17 +3,20 @@
 
 use std::collections::HashSet;
 
-use crate::ipc::{TreeNode, WindowChange, WindowEvent};
+use crate::ipc::{
+    EventWorkspace, NodeType, TreeNode, WindowChange, WindowEvent, WorkspaceChange, WorkspaceEvent,
+};
 use crate::observation::{Snapshot, WorkspaceIdentity, walk};
 use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
 use crate::preservation::output_ancestry;
 use crate::scenarios::{Scenario, foreign_fixture_scenario, standard_scenarios};
 
-pub const CASES: [Case; 4] = [
+pub const CASES: [Case; 5] = [
     Case::Success,
     Case::Occupied,
     Case::Partial,
     Case::NamedSuccess,
+    Case::EventBurst,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,6 +25,9 @@ pub enum Case {
     NamedSuccess,
     Occupied,
     Partial,
+    /// A successful profile whose first construction carries more events than the production
+    /// coordinator's queue can hold while it waits for the layout loader.
+    EventBurst,
 }
 
 impl Case {
@@ -31,6 +37,7 @@ impl Case {
             Self::NamedSuccess => "profile-named-success",
             Self::Occupied => "profile-occupied-refusal",
             Self::Partial => "profile-partial-failure",
+            Self::EventBurst => "profile-event-burst",
         }
     }
 }
@@ -40,6 +47,42 @@ impl Case {
 pub const LAUNCH_SCRIPT: &str =
     "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$2\" || exit 1\nshift 2\nexec \"$@\"\n";
 
+/// Ticks sent during the event-burst case's first construction: well over the 256 events
+/// that the production profile coordinator's queue holds.
+pub const TICK_BURST_COUNT: u32 = 400;
+
+/// Arguments: swaymsg, the private IPC socket, sleep, and the tick count, then the window's
+/// own command. Each tick goes through the explicitly named socket and must succeed; a
+/// failure exits before the window starts, so the load and the scenario fail rather than
+/// silently sending fewer ticks. Pausing after every ten ticks (at most 100 per second)
+/// lets sway-stage's own loader and the harness subscription keep draining their events.
+pub const TICK_BURST_SCRIPT: &str = "\
+#!/bin/sh
+swaymsg=$1 socket=$2 sleep=$3 remaining=$4
+shift 4
+while [ \"$remaining\" -gt 0 ]; do
+    \"$swaymsg\" -s \"$socket\" -t send_tick sway-stage-integration-burst >/dev/null || exit 1
+    remaining=$((remaining - 1))
+    if [ $((remaining % 10)) -eq 0 ]; then
+        \"$sleep\" 0.1 || exit 1
+    fi
+done
+exec \"$@\"
+";
+
+/// The command prefix that runs `TICK_BURST_SCRIPT` before a window's own command.
+pub fn tick_burst_command(script: &str, swaymsg: &str, socket: &str, sleep: &str) -> Vec<String> {
+    vec![
+        "/bin/sh".into(),
+        script.into(),
+        swaymsg.into(),
+        socket.into(),
+        sleep.into(),
+        TICK_BURST_COUNT.to_string(),
+    ]
+}
+
+/// `tick_burst` is the `tick_burst_command` prefix, used only by the event-burst case.
 pub fn layouts(
     case: Case,
     run_id: &str,
@@ -47,6 +90,7 @@ pub fn layouts(
     sleep: &str,
     launch_script: &str,
     launch_record: &str,
+    tick_burst: &[String],
 ) -> [Scenario; 2] {
     let unique_id = format!("{run_id}-{}", case.name());
     let scenarios = standard_scenarios(&unique_id, foot, sleep);
@@ -71,6 +115,15 @@ pub fn layouts(
         second.name = "profile-second";
         second.window_timeout_ms = 500;
         second.layout.first_leaf_mut().command = vec![sleep.into(), "0".into()];
+    }
+    if case == Case::EventBurst {
+        // sway-stage spawns this first window only after its loader has subscribed, and the
+        // coordinator subscribed before preflight. Foot starts only after the last tick, so
+        // the whole burst falls inside the first construction.
+        let first_leaf = first.layout.first_leaf_mut();
+        let mut command = tick_burst.to_vec();
+        command.append(&mut first_leaf.command);
+        first_leaf.command = command;
     }
 
     for scenario in [&mut first, &mut second] {
@@ -315,6 +368,61 @@ pub fn verify_rename_result(
         return Err("another workspace changed during disposable rename".into());
     }
     Ok(())
+}
+
+/// One workspace event a profile load must produce. Each workspace is matched exactly: its
+/// container ID, its name, and the number Sway derives from a purely numeric name.
+#[derive(Debug)]
+pub enum ExpectedWorkspaceEvent<'a> {
+    Init(&'a WorkspaceIdentity),
+    Focus {
+        from_id: i64,
+        to: &'a WorkspaceIdentity,
+    },
+}
+
+/// A fence's non-urgent workspace events must be exactly `expected`, in order. A missing,
+/// extra, or reordered creation, focus change, or any other workspace change fails.
+pub fn verify_workspace_events(
+    observed: &[WorkspaceEvent],
+    expected: &[ExpectedWorkspaceEvent],
+) -> Result<(), String> {
+    let all_match = observed.len() == expected.len()
+        && observed
+            .iter()
+            .zip(expected)
+            .all(|(event, expected_event)| workspace_event_matches(event, expected_event));
+    if !all_match {
+        return Err(format!(
+            "workspace events differ: expected {expected:?}, observed {observed:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_event_matches(event: &WorkspaceEvent, expected: &ExpectedWorkspaceEvent) -> bool {
+    let is_workspace = |node: Option<&EventWorkspace>, workspace: &WorkspaceIdentity| {
+        node.is_some_and(|node| {
+            node.node_type == Some(NodeType::Workspace)
+                && node.id == workspace.id
+                && node.name.as_ref() == Some(&workspace.name)
+                && node.num == Some(workspace.name.parse::<i32>().unwrap_or(-1))
+        })
+    };
+    let current = event.current.as_ref();
+
+    match expected {
+        ExpectedWorkspaceEvent::Init(workspace) => {
+            event.change == WorkspaceChange::Init
+                && is_workspace(current, workspace)
+                && event.old.is_none()
+        }
+        ExpectedWorkspaceEvent::Focus { from_id, to } => {
+            event.change == WorkspaceChange::Focus
+                && is_workspace(current, to)
+                && event.old.as_ref().is_some_and(|old| old.id == *from_id)
+        }
+    }
 }
 
 #[cfg(test)]

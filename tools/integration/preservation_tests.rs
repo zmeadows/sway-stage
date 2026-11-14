@@ -12,6 +12,7 @@ fn recorded_snapshot(tree: Value) -> Snapshot {
         workspaces: workspaces_reply("9"),
         focused_workspace_id: TARGET_WORKSPACE_ID,
         window_events: Vec::new(),
+        workspace_events: Vec::new(),
     }
 }
 

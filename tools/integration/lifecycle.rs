@@ -388,6 +388,24 @@ impl Harness {
         let record_path = files.path.join("launches");
         fs::write(&script_path, profile::LAUNCH_SCRIPT)
             .map_err(|error| format!("write profile launch recorder: {error}"))?;
+        let tick_burst = if case == profile::Case::EventBurst {
+            let burst_script_path = files.path.join("tick-burst.sh");
+            fs::write(&burst_script_path, profile::TICK_BURST_SCRIPT)
+                .map_err(|error| format!("write profile tick burst: {error}"))?;
+            let utf8 = |path: &Path| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("tick burst path {} is not UTF-8", path.display()))
+            };
+            profile::tick_burst_command(
+                &utf8(&burst_script_path)?,
+                &utf8(self.sway.executable())?,
+                &utf8(self.sway.socket())?,
+                &self.sleep,
+            )
+        } else {
+            Vec::new()
+        };
         let layouts = profile::layouts(
             case,
             &self.run_id,
@@ -399,6 +417,7 @@ impl Harness {
             record_path
                 .to_str()
                 .ok_or_else(|| "profile record path is not UTF-8".to_owned())?,
+            &tick_burst,
         );
         for layout in &layouts {
             layouts_directory.write(layout.name, &configuration_yaml(layout))?;
@@ -470,6 +489,18 @@ impl Harness {
         let timeout = load_timeout(&layouts[0]) + load_timeout(&layouts[1]);
         let completed = process::run_with_status(command, &self.stage, timeout)?;
         process::check_interruption()?;
+        // Report an unexpected failure with sway-stage's own diagnostic, before requiring a
+        // workspace switch that it may never have made.
+        let expects_success = matches!(
+            case,
+            profile::Case::Success | profile::Case::NamedSuccess | profile::Case::EventBurst
+        );
+        if expects_success && !completed.status.success() {
+            return Err(format!(
+                "profile success failed: {}: {}",
+                completed.status, completed.stderr
+            ));
+        }
         let (loaded, switch_index) = if case == profile::Case::Occupied {
             (snapshot(&self.sway, &mut self.events, None)?, None)
         } else {
@@ -517,6 +548,23 @@ impl Harness {
                 expected.verify(&loaded)?;
             } else if preexisting.contains(&second.workspace.id) {
                 return Err("created workspace reused a preexisting ID".into());
+            }
+            if case == profile::Case::EventBurst {
+                // However many ticks arrived, the only workspace changes are the one selection
+                // and, when the target was absent, its creation.
+                let switch = profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: primary.id,
+                    to: &second.workspace,
+                };
+                let expected_events = if second_before.is_some() {
+                    vec![switch]
+                } else {
+                    vec![
+                        profile::ExpectedWorkspaceEvent::Init(&second.workspace),
+                        switch,
+                    ]
+                };
+                profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
             }
             // A created target must belong to an output that existed before loading.
             let output = crate::preservation::output_ancestry(&loaded.tree, second.workspace.id)?;

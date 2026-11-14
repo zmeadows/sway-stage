@@ -14,6 +14,7 @@ fn recorded_snapshot(tree: Value, focused_name: &str, focused_workspace_id: i64)
         workspaces: workspaces_reply(focused_name),
         focused_workspace_id,
         window_events: Vec::new(),
+        workspace_events: Vec::new(),
     }
 }
 
@@ -42,7 +43,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 25] = [
+const SUITE_ORDER: [&str; 26] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -68,6 +69,7 @@ const SUITE_ORDER: [&str; 25] = [
     "profile-occupied-refusal",
     "profile-partial-failure",
     "profile-named-success",
+    "profile-event-burst",
 ];
 
 #[test]
@@ -103,7 +105,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-success",
             "profile-occupied-refusal",
             "profile-partial-failure",
-            "profile-named-success"
+            "profile-named-success",
+            "profile-event-burst"
         ]
     );
     assert_eq!(
@@ -150,6 +153,7 @@ fn fresh_compositor_snapshot(tree: Value) -> Snapshot {
         workspaces,
         focused_workspace_id: OTHER_WORKSPACE_ID,
         window_events: Vec::new(),
+        workspace_events: Vec::new(),
     }
 }
 
@@ -1548,6 +1552,7 @@ fn profile_launch_record_distinguishes_refusal_order_and_no_window_launches() {
         "/sleep",
         "/script",
         "/record",
+        &[],
     );
     layouts_directory
         .write("profile-first", &configuration_yaml(&layouts[0]))

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use swayipc::{Event, NodeType, WorkspaceChange};
+use swayipc::{Event, NodeType, WorkspaceChange, WorkspaceEvent};
 
 // Match the layout node limit: profiles are bounded plans for interactive construction.
 pub(crate) const MAX_WORKSPACES: usize = 256;
@@ -244,11 +244,15 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
             entry.workspace,
             selected.id
         ));
+        // The coordinator stays subscribed but cannot read events while the loader runs, and
+        // a long construction can exceed its bounded queue. Its observer therefore checks
+        // each event on arrival, including the gap before the loader subscribes.
+        observer.check_events_until_next_snapshot(check_event_during_construction)?;
         launch::load(&entry.config, Some(selected.id), diagnostics)
             .map_err(|error| format!("layout construction: {error}"))?;
 
-        // The coordinator stayed subscribed during construction. Check that history,
-        // including the gap before the loader subscribed, before another switch.
+        // Construction's events were checked as they arrived; this snapshot resumes the
+        // queued history and checks everything since, before another switch.
         diagnostics.stage("workspace completion verification");
         let finished = observer.workspace_snapshot(
             observation::connect(&socket_path)?,
@@ -528,6 +532,59 @@ struct WorkspaceTransition<'a> {
     allow_previous_destruction: bool,
 }
 
+/// Rejects malformed events and reloads. Returns the workspace change, if any, that only an
+/// explicitly requested transition can permit; window, tick, and urgency events need none.
+fn workspace_change_requiring_transition(
+    event: &Event,
+) -> Result<Option<(&WorkspaceEvent, &swayipc::Node)>, String> {
+    if let Event::Window(event) = event
+        && !matches!(
+            event.container.node_type,
+            NodeType::Con | NodeType::FloatingCon
+        )
+    {
+        return Err("window event has an invalid container node".into());
+    }
+    let Event::Workspace(event) = event else {
+        return Ok(None);
+    };
+    if event.change == WorkspaceChange::Reload {
+        return Err("workspace reload: revalidation required".into());
+    }
+    let current = event
+        .current
+        .as_ref()
+        .ok_or("workspace event has no current workspace")?;
+    if current.node_type != NodeType::Workspace
+        || event
+            .old
+            .as_ref()
+            .is_some_and(|old| old.node_type != NodeType::Workspace)
+    {
+        return Err("workspace event has an invalid workspace node".into());
+    }
+    if event.change == WorkspaceChange::Urgent {
+        return Ok(None);
+    }
+    Ok(Some((event, current)))
+}
+
+fn unexpected_workspace_change(event: &WorkspaceEvent, current: &swayipc::Node) -> String {
+    format!(
+        "unexpected workspace change {:?} id={}",
+        event.change, current.id
+    )
+}
+
+/// No transition is permitted while a layout loads: the same rule the completion snapshot
+/// applies, checked event by event because the coordinator cannot queue them meanwhile.
+fn check_event_during_construction(event: &Event) -> Result<(), String> {
+    match workspace_change_requiring_transition(event)? {
+        None => Ok(()),
+        Some((event, current)) => Err(unexpected_workspace_change(event, current)),
+    }
+}
+
 /// Permit only the one requested transition. Away-and-back focus, reload, migration,
 /// rename, and unexpected workspace creation/destruction invalidate coordination.
 fn validate_workspace_history(
@@ -539,40 +596,11 @@ fn validate_workspace_history(
     let mut observed_creation = false;
     let mut observed_previous_destruction = false;
     for event in &snapshot.events {
-        if let Event::Window(event) = event
-            && !matches!(
-                event.container.node_type,
-                NodeType::Con | NodeType::FloatingCon
-            )
-        {
-            return Err("window event has an invalid container node".into());
-        }
-        let Event::Workspace(event) = event else {
+        let Some((event, current)) = workspace_change_requiring_transition(event)? else {
             continue;
         };
-        if event.change == WorkspaceChange::Reload {
-            return Err("workspace reload: revalidation required".into());
-        }
-        let current = event
-            .current
-            .as_ref()
-            .ok_or("workspace event has no current workspace")?;
-        if current.node_type != NodeType::Workspace
-            || event
-                .old
-                .as_ref()
-                .is_some_and(|old| old.node_type != NodeType::Workspace)
-        {
-            return Err("workspace event has an invalid workspace node".into());
-        }
-        if event.change == WorkspaceChange::Urgent {
-            continue;
-        }
         let Some(transition) = transition.as_ref() else {
-            return Err(format!(
-                "unexpected workspace change {:?} id={}",
-                event.change, current.id
-            ));
+            return Err(unexpected_workspace_change(event, current));
         };
         let target = transition.selected;
 
@@ -606,12 +634,7 @@ fn validate_workspace_history(
             {
                 observed_previous_destruction = true;
             }
-            _ => {
-                return Err(format!(
-                    "unexpected workspace change {:?} id={}",
-                    event.change, current.id
-                ));
-            }
+            _ => return Err(unexpected_workspace_change(event, current)),
         }
     }
 

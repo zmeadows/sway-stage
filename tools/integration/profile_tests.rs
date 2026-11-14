@@ -4,6 +4,19 @@ use crate::fixtures::{
     accepted_windows, container_ids, desktop, parse_tree, window_event, workspaces_reply,
 };
 use crate::scenarios::configuration_yaml;
+use serde_json::json;
+
+const SWAYMSG: &str = "/usr/bin/swaymsg";
+const PRIVATE_SOCKET: &str = "/private path/runtime/sway-ipc.sock";
+
+fn tick_burst() -> Vec<String> {
+    tick_burst_command(
+        "/private path/tick-burst.sh",
+        SWAYMSG,
+        PRIVATE_SOCKET,
+        SLEEP,
+    )
+}
 
 fn fixtures(case: Case) -> [Scenario; 2] {
     layouts(
@@ -13,6 +26,7 @@ fn fixtures(case: Case) -> [Scenario; 2] {
         SLEEP,
         "/private path/record.sh",
         "/private path/launches",
+        &tick_burst(),
     )
 }
 
@@ -29,15 +43,22 @@ fn fixtures_use_unique_selectors_preserve_argv_and_render_ordered_profiles() {
                 assert!(leaf.app_id.as_str().contains(RUN_ID));
                 assert_eq!(&leaf.command[..2], &["/bin/sh", "/private path/record.sh"]);
                 assert_eq!(leaf.command[3], "/private path/launches");
+                let is_burst_leaf = case == Case::EventBurst
+                    && scenario.name == "profile-first"
+                    && leaf.layout_id == "window1";
+                let application = if is_burst_leaf {
+                    // The recorder stays outermost; the burst then execs the window's command.
+                    assert_eq!(leaf.command[4..10], tick_burst());
+                    &leaf.command[10..]
+                } else {
+                    &leaf.command[4..]
+                };
                 if case == Case::Partial && scenario.name == "profile-second" {
-                    assert_eq!(&leaf.command[4..], &[SLEEP, "0"]);
+                    assert_eq!(application, &[SLEEP, "0"]);
                     assert_eq!(scenario.window_timeout_ms, 500);
                 } else {
-                    assert_eq!(leaf.command[4], FOOT);
-                    assert_eq!(
-                        leaf.command[5],
-                        format!("--app-id={}", leaf.app_id.as_str())
-                    );
+                    assert_eq!(application[0], FOOT);
+                    assert_eq!(application[1], format!("--app-id={}", leaf.app_id.as_str()));
                 }
             }
         }
@@ -129,6 +150,7 @@ fn empty_target() -> Snapshot {
         workspaces: workspaces_reply("1"),
         focused_workspace_id: OTHER_WORKSPACE_ID,
         window_events: Vec::new(),
+        workspace_events: Vec::new(),
     }
 }
 
@@ -299,5 +321,101 @@ fn captured_profile_references_preserve_targets_and_ordinal_order() {
         ] {
             assert!(verify_captured_references(&changed, primary, "10").is_err());
         }
+    }
+}
+
+#[test]
+fn tick_burst_checks_every_tick_through_the_private_socket_before_starting_the_window() {
+    assert_eq!(
+        tick_burst(),
+        [
+            "/bin/sh",
+            "/private path/tick-burst.sh",
+            SWAYMSG,
+            PRIVATE_SOCKET,
+            SLEEP,
+            "400"
+        ]
+    );
+    for required in [
+        "\"$swaymsg\" -s \"$socket\" -t send_tick",
+        "|| exit 1\n    remaining=",
+        "\"$sleep\" 0.1 || exit 1",
+        "exec \"$@\"",
+    ] {
+        assert!(TICK_BURST_SCRIPT.contains(required), "{required}");
+    }
+}
+
+/// A workspace event as Sway reports it; `num` is separate so that it can disagree.
+fn workspace_event(
+    change: &str,
+    workspace_id: i64,
+    name: &str,
+    num: i32,
+    old_id: Option<i64>,
+) -> WorkspaceEvent {
+    let old = old_id.map(|id| json!({"type": "workspace", "id": id, "name": "old", "num": -1}));
+    serde_json::from_value(json!({
+        "change": change,
+        "current": {"type": "workspace", "id": workspace_id, "name": name, "num": num},
+        "old": old,
+    }))
+    .expect("a workspace event in Sway's format")
+}
+
+#[test]
+fn workspace_events_must_match_the_expected_sequence_exactly() {
+    let created = WorkspaceIdentity {
+        id: 30,
+        name: "3".into(),
+    };
+    let expected = [
+        ExpectedWorkspaceEvent::Init(&created),
+        ExpectedWorkspaceEvent::Focus {
+            from_id: 10,
+            to: &created,
+        },
+    ];
+    let init = || workspace_event("init", 30, "3", 3, None);
+    let focus = || workspace_event("focus", 30, "3", 3, Some(10));
+    verify_workspace_events(&[init(), focus()], &expected).unwrap();
+
+    for (case, observed) in [
+        ("missing focus", vec![init()]),
+        (
+            "extra destruction",
+            vec![init(), focus(), workspace_event("empty", 20, "2", 2, None)],
+        ),
+        ("reordered", vec![focus(), init()]),
+        (
+            "other workspace created",
+            vec![workspace_event("init", 31, "3", 3, None), focus()],
+        ),
+        (
+            "renamed creation",
+            vec![workspace_event("init", 30, "3: x", 3, None), focus()],
+        ),
+        (
+            "renumbered creation",
+            vec![workspace_event("init", 30, "3", -1, None), focus()],
+        ),
+        (
+            "creation with old",
+            vec![workspace_event("init", 30, "3", 3, Some(10)), focus()],
+        ),
+        (
+            "focus from elsewhere",
+            vec![init(), workspace_event("focus", 30, "3", 3, Some(11))],
+        ),
+        (
+            "move instead of creation",
+            vec![workspace_event("move", 30, "3", 3, None), focus()],
+        ),
+    ] {
+        assert!(
+            verify_workspace_events(&observed, &expected).is_err(),
+            "{case}"
+        );
     }
 }
