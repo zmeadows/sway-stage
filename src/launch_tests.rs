@@ -2596,9 +2596,10 @@ fn minimum_constraints_stagnation_and_three_pass_limit_warn_without_failing() {
             let mut warnings = Vec::new();
             session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
             assert_eq!(warnings.len(), 1);
-            assert!(warnings[0].contains("group=10"));
-            assert!(warnings[0].contains("targets=[90.00%, 10.00%]"));
-            assert!(warnings[0].contains(if stagnant {
+            assert!(warnings[0].detail.contains("group=10"));
+            assert!(!warnings[0].geometry_unverified);
+            assert!(warnings[0].detail.contains("targets=[90.00%, 10.00%]"));
+            assert!(warnings[0].detail.contains(if stagnant {
                 "observed=[50.00%, 50.00%]"
             } else {
                 "observed=[56.00%, 44.00%]"
@@ -2637,7 +2638,8 @@ fn already_close_and_uninterpretable_geometry_never_issue_resize_commands() {
                 session.apply_sizing(&config.layout.value, &[], &mut warnings)?;
                 assert_eq!(!warnings.is_empty(), warning);
                 if warning {
-                    assert!(warnings[0].contains("observed=unavailable"));
+                    assert!(warnings[0].detail.contains("observed=unavailable"));
+                    assert!(warnings[0].geometry_unverified);
                 }
                 Ok(())
             },

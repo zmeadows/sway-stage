@@ -266,6 +266,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         previous_snapshot = finished;
     }
 
+    diagnostics.notify_sizing_warnings();
     Ok(())
 }
 

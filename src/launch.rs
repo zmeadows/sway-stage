@@ -1,7 +1,7 @@
 //! Sequential launch and guarded, recursive tiled construction.
 
 use crate::config::{Config, GroupLayout, LayoutNode, Matcher, NodeKind};
-use crate::diagnostics::Diagnostics;
+use crate::diagnostics::{Diagnostics, SizingWarning};
 use crate::observation::{
     self, Observer, Snapshot, app_id, class, locate_windows, proportions, sibling_dimensions,
 };
@@ -54,7 +54,7 @@ fn load_with(
     expected_workspace_id: Option<i64>,
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<SizingWarning>, String> {
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot_for_workspace(
@@ -454,7 +454,7 @@ impl<'a> Construction<'a> {
         &mut self,
         layout_node: &LayoutNode,
         path: &[usize],
-        warnings: &mut Vec<String>,
+        warnings: &mut Vec<SizingWarning>,
     ) -> Result<(), String> {
         let NodeKind::Group {
             layout, children, ..
@@ -483,7 +483,7 @@ impl<'a> Construction<'a> {
         children: &[serde_saphyr::Spanned<LayoutNode>],
         path: &[usize],
         axis: &str,
-        warnings: &mut Vec<String>,
+        warnings: &mut Vec<SizingWarning>,
     ) -> Result<(), String> {
         let group_id = self.expected_hierarchy.subtree_mut(path).id();
         let weights: Vec<_> = children.iter().map(|child| child.value.weight()).collect();
@@ -590,6 +590,7 @@ impl<'a> Construction<'a> {
             }
         }
 
+        let geometry_unverified = unavailable_geometry.is_some();
         let residual = if let Some(reason) = unavailable_geometry {
             Some(format!("observed=unavailable ({reason})"))
         } else {
@@ -603,7 +604,10 @@ impl<'a> Construction<'a> {
                 format_shares(&target_shares)
             );
             self.diagnostics.record(&format!("warning: {warning}"));
-            warnings.push(warning);
+            warnings.push(SizingWarning {
+                detail: warning,
+                geometry_unverified,
+            });
         }
 
         Ok(())

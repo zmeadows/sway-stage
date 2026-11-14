@@ -711,11 +711,12 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   staging files are reported on stderr without automatic cleanup or retry.
   Use the existing profile-last publication rules and `NAME-NNN.yaml` layout names,
   respecting independent `--layouts-dir` and `--profiles-dir` overrides. Only a fully
-  published profile triggers `Saved profile 'NAME' (N workspaces).` as a bounded,
-  best-effort notification.
+  published profile triggers a bounded, best-effort `Profile saved` notification with
+  the number of workspace drafts, any unresolved launch-command count, and review guidance.
 
-After a successful individual-workspace save, the bounded, best-effort notification says
-only `Saved draft 'NAME'.`.
+After a successful individual-workspace save, the bounded, best-effort `Layout draft saved`
+notification reports any unresolved launch-command count and asks you to review commands
+and validate before loading. Save notifications omit names and paths.
 Notification failure does not fail the save. Cancellation and failed captures do not report
 success. `menu --no-infer-commands` disables inference for both workspace and profile
 capture; it does not affect discovery, presentation, layout loading, or profile loading.
@@ -731,7 +732,7 @@ Saving requires hard-link support in that directory. Publish only complete draft
 exclusively, without overwriting an existing `.yaml`. Cross-suffix concurrent external
 changes are not atomic. On write/publication failure, retain the reported `.partial` file
 for inspection; it is outside discovery. Do not automatically remove uncertain files.
-A successful save attempts a path notification; notification failure does not fail the save.
+A successful save attempts a draft confirmation; notification failure does not fail the save.
 
 Drafts appear immediately in `list`; the menu marks incomplete drafts `[invalid]` when
 at least one usable action is available. They are saved without executable-layout validation; `check` and `load` reject remaining placeholders
@@ -740,7 +741,13 @@ before loader IPC or application launches. Edit them in place and check them. Th
 ## Diagnostics and troubleshooting
 
 `load`, `profile load`, `profile capture`, `menu`, and `capture` report errors to stderr and attempt bounded desktop
-notifications through `notify-send`. Sizing warnings also notify. Missing notification
+notifications through `notify-send`. Sizing warnings also notify with counts of groups
+outside size tolerance and groups whose geometry could not be verified; full diagnostics remain on stderr and in the launch log.
+Profiles combine sizing warnings into one notification only after successful completion.
+Warnings never turn a completed load into a failure. Save confirmations use low urgency;
+sizing warnings, capture/menu errors, configuration validation errors, and profile preflight
+refusals use normal urgency. Runtime loading failures use critical urgency, including
+workspace selection or IPC failures where desktop state may be uncertain. Missing notification
 tools or delivery failures never hide the primary result. Error notifications give concise
 summaries; detailed causes remain on stderr and in the launch log when applicable. A failure
 notification refers to `last-run.log` only when logging remains available for that attempt.

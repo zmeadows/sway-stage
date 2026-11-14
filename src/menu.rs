@@ -27,10 +27,10 @@ pub enum FailureKind {
     LayoutDiscovery,
     ProfileDiscovery,
     NoActions,
-    InvalidProfile(String),
+    InvalidProfile,
     NoLayouts,
     NoValidLayouts,
-    InvalidLayout(String),
+    InvalidLayout,
     Capture(Option<&'static str>),
     ProfileCapture(Option<&'static str>),
     FuzzelStart,
@@ -205,7 +205,7 @@ pub fn invalid_layout(name: &str, cause: Option<String>) -> Error {
     if let Some(cause) = cause {
         detail.push_str(&format!(" {cause}"));
     }
-    Error::new(FailureKind::InvalidLayout(name.to_owned()), detail)
+    Error::new(FailureKind::InvalidLayout, detail)
 }
 
 pub fn invalid_profile(name: &str, cause: Option<String>) -> Error {
@@ -214,7 +214,7 @@ pub fn invalid_profile(name: &str, cause: Option<String>) -> Error {
     if let Some(cause) = cause {
         detail.push_str(&format!(" {cause}"));
     }
-    Error::new(FailureKind::InvalidProfile(name.to_owned()), detail)
+    Error::new(FailureKind::InvalidProfile, detail)
 }
 
 #[derive(Debug)]
@@ -348,7 +348,7 @@ pub fn capture_draft(
             .map_err(|error| Error::new(FailureKind::DraftSave, error))?;
         match save_draft(&layouts_directory.path, &name, &draft.yaml) {
             Ok(_) => {
-                diagnostics::notify_draft_saved(&name);
+                diagnostics::notify_draft_saved(draft.commands.unresolved());
                 return Ok(());
             }
             Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {
@@ -391,7 +391,10 @@ pub fn capture_profile(
 
         match prepared.save(&name, &layouts_directory.path, &profiles_directory) {
             Ok(()) => {
-                diagnostics::notify_profile_saved(&name, prepared.workspace_count());
+                diagnostics::notify_profile_saved(
+                    prepared.workspace_count(),
+                    prepared.unresolved_commands(),
+                );
                 return Ok(());
             }
             Err(error @ (DraftSaveError::InvalidName(_) | DraftSaveError::NameConflict(_))) => {

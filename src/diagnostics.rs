@@ -26,6 +26,48 @@ pub struct Diagnostics {
     application_spawned: bool,
     /// Set only when returning a window timeout, for its concise notification.
     timeout_process_status: Option<ExitStatus>,
+    sizing_summary: SizingSummary,
+}
+
+/// One residual warning per split group, classified where geometry is observed.
+#[derive(Debug)]
+pub struct SizingWarning {
+    pub detail: String,
+    pub geometry_unverified: bool,
+}
+
+#[derive(Default)]
+struct SizingSummary {
+    deviated_groups: usize,
+    unverified_groups: usize,
+}
+
+impl SizingSummary {
+    fn notification(&self, profile: bool, log_available: bool) -> Option<String> {
+        if self.deviated_groups + self.unverified_groups == 0 {
+            return None;
+        }
+
+        let loaded = if profile {
+            "Profile loaded."
+        } else {
+            "Layout loaded."
+        };
+        let mut body = loaded.to_owned();
+        if self.deviated_groups > 0 {
+            body.push_str(&format!(
+                " Groups outside size tolerance: {}.",
+                self.deviated_groups
+            ));
+        }
+        if self.unverified_groups > 0 {
+            body.push_str(&format!(
+                " Groups with unverifiable sizes: {}.",
+                self.unverified_groups
+            ));
+        }
+        Some(with_log_reference(body, log_available))
+    }
 }
 
 // Owned by diagnostics for the entire profile attempt. Only the coordinator updates
@@ -98,6 +140,7 @@ impl Diagnostics {
             profile_context: None,
             application_spawned: false,
             timeout_process_status: None,
+            sizing_summary: SizingSummary::default(),
         }
     }
 
@@ -113,6 +156,7 @@ impl Diagnostics {
             profile_context: None,
             application_spawned: false,
             timeout_process_status: None,
+            sizing_summary: SizingSummary::default(),
         };
 
         match last_run_log_path().and_then(open_log) {
@@ -243,7 +287,9 @@ impl Diagnostics {
             message.push_str(&format!("; log: {}", log_path.display()));
         }
         let notification = self.failure_notification(&error);
-        if let Err(error) = send_failure_notification(self.operation, &notification) {
+        if let Err(error) =
+            send_failure_notification(self.operation, &notification, self.failure_urgency())
+        {
             self.record(&format!("secondary notification failure: {error}"));
         }
 
@@ -273,24 +319,56 @@ impl Diagnostics {
         with_log_reference(notification, self.log_file.is_some())
     }
 
-    pub fn report_sizing_warnings(&mut self, warnings: &[String]) {
-        if warnings.is_empty() {
-            return;
+    fn failure_urgency(&self) -> &'static str {
+        if self.application_spawned
+            || (!self.current_stage.ends_with(": validation")
+                && self.current_stage != "validation"
+                && self.current_stage != "workspace preflight")
+        {
+            "critical"
+        } else {
+            "normal"
+        }
+    }
+
+    pub fn report_sizing_warnings(&mut self, warnings: &[SizingWarning]) {
+        for warning in warnings {
+            stderr(&format!("sway-stage: warning: {}", warning.detail));
+            if warning.geometry_unverified {
+                self.sizing_summary.unverified_groups += 1;
+            } else {
+                self.sizing_summary.deviated_groups += 1;
+            }
         }
 
-        let message = warnings.join("\n");
-        stderr(&format!("sway-stage: warning: {message}"));
-        if let Err(error) = notify("normal", "sway-stage sizing warning", &message) {
+        // Profiles report once, only after the coordinator verifies every workspace.
+        if self.profile_context.is_none() {
+            self.notify_sizing_warnings();
+        }
+    }
+
+    pub fn notify_sizing_warnings(&mut self) {
+        let summary = std::mem::take(&mut self.sizing_summary);
+        let Some(message) =
+            summary.notification(self.profile_context.is_some(), self.log_file.is_some())
+        else {
+            return;
+        };
+        if let Err(error) = notify("normal", "Sizing warning", &message) {
             self.record(&format!("secondary warning notification failure: {error}"));
         }
     }
 }
 
-/// Attempts a critical notification for any operation's fatal error without touching the
+/// Attempts a normal-urgency notification for any operation's fatal error without touching the
 /// last-run log. A notification failure is secondary: it is reported to stderr and
 /// returned, and the caller still reports `message` as the primary error.
 pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
-    send_failure_notification(operation, &failure_body(operation, message, "", false))
+    send_failure_notification(
+        operation,
+        &failure_body(operation, message, "", false),
+        "normal",
+    )
 }
 
 /// Capture summaries are selected where the arrangement or save failure is known.
@@ -300,7 +378,7 @@ pub fn notify_capture_failure(
     error: &crate::capture::Error,
 ) -> Result<(), String> {
     match error.summary {
-        Some(summary) => send_failure_notification(operation, summary),
+        Some(summary) => send_failure_notification(operation, summary, "normal"),
         None => notify_failure(operation, &error.detail),
     }
 }
@@ -319,7 +397,7 @@ pub fn notify_menu_failure(error: &crate::menu::Error) -> Result<(), String> {
         crate::menu::FailureKind::ProfileCapture(_) => "profile capture",
         _ => "menu",
     };
-    send_failure_notification(operation, &menu_failure_body(error))
+    send_failure_notification(operation, &menu_failure_body(error), "normal")
 }
 
 fn menu_failure_body(error: &crate::menu::Error) -> String {
@@ -336,10 +414,8 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::NoActions => {
             "No usable actions found. Run sway-stage check NAME or sway-stage profile check NAME to inspect configurations."
         }
-        FailureKind::InvalidProfile(name) => {
-            return format!(
-                "Profile '{name}' is invalid. Run sway-stage profile check {name} for details."
-            );
+        FailureKind::InvalidProfile => {
+            "The selected profile is invalid. Run sway-stage profile check NAME for details."
         }
         FailureKind::NoLayouts => {
             "No saved layouts found. Add a YAML file to your layouts directory."
@@ -347,8 +423,8 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::NoValidLayouts => {
             "No valid layouts found. Run sway-stage check NAME to inspect a layout."
         }
-        FailureKind::InvalidLayout(name) => {
-            return format!("Layout '{name}' is invalid. Run sway-stage check {name} for details.");
+        FailureKind::InvalidLayout => {
+            "The selected layout is invalid. Run sway-stage check NAME for details."
         }
         FailureKind::Capture(summary) => {
             return capture_failure_body("capture", *summary, &error.detail);
@@ -375,9 +451,9 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
     summary.to_owned()
 }
 
-fn send_failure_notification(operation: &str, message: &str) -> Result<(), String> {
+fn send_failure_notification(operation: &str, message: &str, urgency: &str) -> Result<(), String> {
     notify(
-        "critical",
+        urgency,
         match operation {
             "load" => "Layout load failed",
             "profile load" => "Profile load failed",
@@ -581,23 +657,37 @@ fn launch_exit_context(status: ExitStatus) -> Option<String> {
 }
 
 /// Best-effort save confirmation, independent of launch diagnostics.
-pub fn notify_draft_saved(name: &str) {
+pub fn notify_draft_saved(unresolved_commands: usize) {
     let _ = notify(
-        "normal",
-        "sway-stage draft saved",
-        &format!("Saved draft '{name}'."),
+        "low",
+        "Layout draft saved",
+        &capture_review_guidance(unresolved_commands),
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
 }
 
 /// Confirm only a fully published profile, using the bounded notification helper.
-pub fn notify_profile_saved(name: &str, workspace_count: usize) {
+pub fn notify_profile_saved(workspace_count: usize, unresolved_commands: usize) {
     let _ = notify(
-        "normal",
-        "sway-stage profile saved",
-        &format!("Saved profile '{name}' ({workspace_count} workspaces)."),
+        "low",
+        "Profile saved",
+        &format!(
+            "Workspace layout drafts saved: {workspace_count}. {}",
+            capture_review_guidance(unresolved_commands)
+        ),
     )
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")));
+}
+
+fn capture_review_guidance(unresolved_commands: usize) -> String {
+    let mut body = String::new();
+    if unresolved_commands > 0 {
+        body.push_str(&format!(
+            "Launch commands needing editing: {unresolved_commands}. "
+        ));
+    }
+    body.push_str("Review launch commands and validate before loading.");
+    body
 }
 
 fn stderr(message: &str) {
@@ -710,6 +800,105 @@ mod tests {
             profile_context: None,
             application_spawned: false,
             timeout_process_status: None,
+            sizing_summary: SizingSummary::default(),
+        }
+    }
+
+    #[test]
+    fn sizing_summaries_distinguish_deviations_and_unverified_geometry() {
+        for (deviated_groups, unverified_groups) in [(0, 0), (1, 0), (2, 0), (0, 1), (1, 2)] {
+            let summary = SizingSummary {
+                deviated_groups,
+                unverified_groups,
+            };
+            for log_available in [false, true] {
+                let body = summary.notification(false, log_available);
+                if deviated_groups + unverified_groups == 0 {
+                    assert!(body.is_none());
+                    continue;
+                }
+                let body = body.unwrap();
+                assert!(body.starts_with("Layout loaded."));
+                assert_eq!(body.contains("outside size tolerance"), deviated_groups > 0);
+                assert_eq!(body.contains("unverifiable"), unverified_groups > 0);
+                if deviated_groups > 0 {
+                    assert!(body.contains(&format!("outside size tolerance: {deviated_groups}.")));
+                }
+                if unverified_groups > 0 {
+                    assert!(body.contains(&format!("unverifiable sizes: {unverified_groups}.")));
+                }
+                assert_eq!(body.contains("last-run.log"), log_available);
+                assert!(body.len() < 200);
+            }
+        }
+    }
+
+    #[test]
+    fn profile_sizing_warnings_accumulate_until_one_final_summary() {
+        let mut diagnostics = without_log("profile load");
+        diagnostics.profile_started(2);
+        for workspace in [3, 4] {
+            diagnostics.profile_workspace(
+                &crate::profile::WorkspaceTarget::Number(workspace),
+                "private",
+                1,
+            );
+            diagnostics.report_sizing_warnings(&[
+                SizingWarning {
+                    detail: "group=123 /private".into(),
+                    geometry_unverified: false,
+                },
+                SizingWarning {
+                    detail: "group=456 /private".into(),
+                    geometry_unverified: true,
+                },
+            ]);
+        }
+        let body = diagnostics
+            .sizing_summary
+            .notification(true, false)
+            .unwrap();
+        assert_eq!(
+            body,
+            "Profile loaded. Groups outside size tolerance: 2. Groups with unverifiable sizes: 2."
+        );
+        diagnostics.notify_sizing_warnings();
+        assert!(
+            diagnostics
+                .sizing_summary
+                .notification(true, false)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failure_urgency_distinguishes_preparation_from_runtime_interruptions() {
+        let mut diagnostics = without_log("load");
+        diagnostics.stage("load private: validation");
+        assert_eq!(diagnostics.failure_urgency(), "normal");
+        diagnostics.stage("subscribe");
+        assert_eq!(diagnostics.failure_urgency(), "critical");
+        diagnostics.profile_started(2);
+        diagnostics.stage("workspace preflight");
+        assert_eq!(diagnostics.failure_urgency(), "normal");
+        diagnostics.stage("workspace selection");
+        assert_eq!(diagnostics.failure_urgency(), "critical");
+        diagnostics.spawned(42);
+        diagnostics.stage("workspace preflight");
+        assert_eq!(diagnostics.failure_urgency(), "critical");
+    }
+
+    #[test]
+    fn capture_guidance_reports_only_unresolved_counts() {
+        assert_eq!(
+            capture_review_guidance(0),
+            "Review launch commands and validate before loading."
+        );
+        for count in [1, 2, usize::MAX] {
+            let body = capture_review_guidance(count);
+            assert!(body.contains(&format!("Launch commands needing editing: {count}.")));
+            assert!(body.ends_with("validate before loading."));
+            assert!(body.len() < 120);
         }
     }
 
@@ -814,6 +1003,7 @@ mod tests {
                     profile_context: None,
                     application_spawned: true,
                     timeout_process_status: None,
+                    sizing_summary: SizingSummary::default(),
                 };
                 let detail = format!("no new windows observed; leaf={}", "x".repeat(10000));
                 let error = diagnostics.window_timeout(&detail, status);
@@ -1008,6 +1198,8 @@ mod tests {
 
         let untrusted_detail = format!("/private/{}<b>secret</b>", "x".repeat(10000));
         for kind in [
+            FailureKind::InvalidLayout,
+            FailureKind::InvalidProfile,
             FailureKind::Snapshot,
             FailureKind::LayoutDiscovery,
             FailureKind::ProfileDiscovery,
@@ -1042,6 +1234,7 @@ mod tests {
             profile_context: None,
             application_spawned: true,
             timeout_process_status: None,
+            sizing_summary: SizingSummary::default(),
         };
         let error = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
         let terminal = diagnostics.report_failure(error.into());

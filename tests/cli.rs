@@ -984,6 +984,7 @@ fn capture_failures_notify_without_touching_the_launch_log() {
             "{notification}"
         );
         assert!(!notification.contains("last-run.log"), "{notification}");
+        assert!(notification.contains("--urgency=normal\n"));
         assert_eq!(fs::read_to_string(&log).unwrap(), "previous launch\n");
         assert_eq!(
             fs::read_dir(fixture.path.join("state/sway-stage"))

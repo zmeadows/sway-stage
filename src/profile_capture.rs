@@ -159,6 +159,10 @@ pub fn prepare(
 }
 
 impl PreparedCapture {
+    pub fn unresolved_commands(&self) -> usize {
+        self.commands.unresolved()
+    }
+
     pub fn workspace_count(&self) -> usize {
         self.drafts.len()
     }

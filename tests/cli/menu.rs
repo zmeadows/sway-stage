@@ -142,6 +142,10 @@ fn assert_preload_notification(fixture: &CliFixture, expected_body: &str) {
     );
     assert!(!notification.contains("last-run.log"), "{notification}");
     assert!(
+        notification.contains("--urgency=normal\n"),
+        "{notification}"
+    );
+    assert!(
         !notification.contains(fixture.path.to_str().unwrap()),
         "{notification}"
     );
@@ -324,7 +328,10 @@ fn invalid_contents_are_marked_and_refused_before_loading() {
         let explanation =
             "Layout 'a-invalid' is invalid. Run sway-stage check a-invalid for details.";
         assert!(String::from_utf8_lossy(&output.stderr).contains(explanation));
-        assert_preload_notification(&fixture, explanation);
+        assert_preload_notification(
+            &fixture,
+            "The selected layout is invalid. Run sway-stage check NAME for details.",
+        );
         assert_eq!(
             fs::read_to_string(fixture.path.join("a-invalid.yaml")).unwrap(),
             contents
@@ -562,11 +569,17 @@ fn captures_save_complete_private_layouts_to_xdg_or_home_with_default_or_disable
         assert!(!fixture.path.join("development.yaml").exists());
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("sway-stage draft saved"));
-        assert!(notification.ends_with("\nSaved draft 'development'.\n"));
+        assert!(notification.contains("--urgency=low\n"));
+        assert!(notification.contains("\nLayout draft saved\n"));
+        assert!(notification.ends_with("Review launch commands and validate before loading.\n"));
+        assert_eq!(
+            notification.contains("Launch commands needing editing: 1."),
+            !infer_commands
+        );
+        assert!(!notification.contains("development"));
         assert!(!notification.contains("command:"));
         assert!(!notification.contains("Commands inferred"));
-        assert!(!notification.contains("Review"));
+        assert!(notification.contains("Review"));
         let executable = std::env::current_exe().unwrap();
         assert!(!notification.contains(executable.to_str().unwrap()));
 
@@ -1163,7 +1176,8 @@ fn partial_inference_keeps_unresolved_commands_and_the_short_save_notification()
         1
     );
     let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-    assert!(notification.ends_with("\nSaved draft 'partial'.\n"));
+    assert!(notification.contains("Launch commands needing editing: 1."));
+    assert!(notification.ends_with("Review launch commands and validate before loading.\n"));
     assert!(!notification.contains(std::env::current_exe().unwrap().to_str().unwrap()));
 }
 
@@ -1792,7 +1806,10 @@ fn invalid_profile_selections_preserve_logs_and_offer_profile_check_guidance() {
             String::from_utf8_lossy(&output.stderr).contains(explanation),
             "{output:?}"
         );
-        assert_preload_notification(&fixture, explanation);
+        assert_preload_notification(
+            &fixture,
+            "The selected profile is invalid. Run sway-stage profile check NAME for details.",
+        );
     }
 }
 
@@ -1817,7 +1834,7 @@ fn changed_profile_or_referenced_layout_is_revalidated_before_loading() {
         );
         assert_preload_notification(
             &fixture,
-            "Profile 'work' is invalid. Run sway-stage profile check work for details.",
+            "The selected profile is invalid. Run sway-stage profile check NAME for details.",
         );
     }
 }
@@ -2096,7 +2113,14 @@ fn profile_capture_reuses_snapshot_orders_targets_and_respects_inference_and_dir
             assert_eq!(draft["layout"]["match"]["app_id"], "editor");
         }
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
-        assert!(notification.contains("Saved profile 'work' (2 workspaces)."));
+        assert!(notification.contains("\nProfile saved\n"));
+        assert!(notification.contains("Workspace layout drafts saved: 2."));
+        assert!(notification.contains("--urgency=low\n"));
+        assert_eq!(
+            notification.contains("Launch commands needing editing: 2."),
+            !infer_commands
+        );
+        assert!(!notification.contains("work-001"));
         assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
         assert!(!fixture.path.join(".config").exists());
     }
@@ -2237,7 +2261,10 @@ fn profile_capture_operational_errors_stop_and_notification_errors_remain_second
         assert!(stderr.contains("notification unavailable"), "{stderr}");
         let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
         assert_eq!(notification.matches("--app-name=sway-stage").count(), 1);
-        assert_eq!(notification.contains("Saved profile"), !fail_publication);
+        assert_eq!(
+            notification.contains("\nProfile saved\n"),
+            !fail_publication
+        );
         if fail_publication {
             assert!(notification.contains("\nProfile capture failed\n"));
             assert!(notification.contains("Could not save the profile capture."));
