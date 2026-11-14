@@ -332,7 +332,12 @@ impl<'a> Construction<'a> {
         self.diagnostics
             .stage(format!("command {}", commands.join("; ")));
         self.settled_snapshot()?;
-        run_checked_command(self.connect, self.diagnostics, commands)?;
+        run_checked_command(
+            self.connect,
+            self.diagnostics,
+            commands,
+            Instant::now() + IPC_TIMEOUT,
+        )?;
 
         self.expected_hierarchy = expected_after;
         let after_command = self.settled_snapshot()?;
@@ -364,6 +369,7 @@ impl<'a> Construction<'a> {
                 self.diagnostics,
                 container_id,
                 focus_restorations,
+                Instant::now() + IPC_TIMEOUT,
             )?;
             after_command = self.settled_snapshot()?;
         }
@@ -802,6 +808,7 @@ impl<'a> Construction<'a> {
                     self.diagnostics,
                     insertion_id,
                     &mut insertion_focus_restorations,
+                    Instant::now() + IPC_TIMEOUT,
                 )?;
             } else {
                 break;
@@ -940,12 +947,17 @@ impl<'a> Construction<'a> {
                     .find_as_ref(|node| node.id == self.target_workspace_id)
                     .ok_or("target missing")?;
                 if self.expected_hierarchy.clone().verify(workspace).is_ok() {
-                    restore_focus(
-                        self.connect,
-                        self.diagnostics,
-                        insertion_id,
-                        &mut insertion_focus_restorations,
-                    )?;
+                    // Restoration never extends the window deadline. Once it has passed,
+                    // send nothing more; the next iteration reports the timeout.
+                    if Instant::now() < window_deadline {
+                        restore_focus(
+                            self.connect,
+                            self.diagnostics,
+                            insertion_id,
+                            &mut insertion_focus_restorations,
+                            window_deadline.min(Instant::now() + IPC_TIMEOUT),
+                        )?;
+                    }
                     continue;
                 }
             }
@@ -1149,16 +1161,17 @@ pub(crate) fn run_command(
     }
 }
 
-/// Sends `commands` as one request and requires exactly one success reply per command.
-/// Sway replies once for every command it runs and stops early only after an invalid one,
-/// so any other reply count means the request was not handled as sent.
+/// Sends `commands` as one request and requires exactly one success reply per command
+/// before `deadline`. Sway replies once for every command it runs and stops early only
+/// after an invalid one, so any other reply count means the request was not handled as sent.
 fn run_checked_command(
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
     commands: &[String],
+    deadline: Instant,
 ) -> Result<(), String> {
     let request = commands.join("; ");
-    let replies = run_command(connect()?, request, Instant::now() + IPC_TIMEOUT)?;
+    let replies = run_command(connect()?, request, deadline)?;
     diagnostics.record(&format!("command replies: {replies:?}"));
 
     if replies.iter().any(Result::is_err) {
@@ -1179,12 +1192,14 @@ fn run_checked_command(
 /// as focus_follows_mouse does. Call only right after a snapshot verified the complete,
 /// owned target hierarchy, so the newly focused node also belongs to this run; the
 /// observer has already failed on any workspace switch. The caller verifies the result
-/// with a fresh snapshot. Exhausting the restoration budget is fatal.
+/// with a fresh snapshot. Exhausting the restoration budget is fatal. `deadline` bounds
+/// the reply, so a launch passes its window deadline when that is sooner.
 fn restore_focus(
     connect: &mut dyn FnMut() -> Result<UnixStream, String>,
     diagnostics: &mut Diagnostics,
     container_id: i64,
     focus_restorations: &mut usize,
+    deadline: Instant,
 ) -> Result<(), String> {
     if *focus_restorations == MAX_FOCUS_RESTORATIONS {
         return Err(format!(
@@ -1199,7 +1214,7 @@ fn restore_focus(
         "focus moved within the target workspace; restoring id={container_id} (restoration {} of {MAX_FOCUS_RESTORATIONS})",
         *focus_restorations
     ));
-    run_checked_command(connect, diagnostics, &[command])
+    run_checked_command(connect, diagnostics, &[command], deadline)
 }
 
 fn is_focused(tree: &Node, container_id: i64) -> bool {

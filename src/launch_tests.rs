@@ -115,6 +115,11 @@ impl LaunchFixture {
                     for (kind, event) in &step.events {
                         send_message(&mut events, *kind, event.clone());
                     }
+                    if step.withhold_reply {
+                        // Returns once the loader shuts the command socket down.
+                        let _ = socket.read(&mut [0]);
+                        continue;
+                    }
                     send_message(&mut socket, 0, replies.clone());
                     continue;
                 }
@@ -193,6 +198,8 @@ struct IpcStep {
     events: Vec<(u32, Value)>,
     disconnect: bool,
     command: Option<(String, Value)>,
+    /// Sway never answers this step's command; the loader must abandon it at its deadline.
+    withhold_reply: bool,
 }
 
 fn snapshot_step(tree: Value) -> IpcStep {
@@ -202,6 +209,7 @@ fn snapshot_step(tree: Value) -> IpcStep {
         events: Vec::new(),
         disconnect: false,
         command: None,
+        withhold_reply: false,
     }
 }
 
@@ -2396,6 +2404,32 @@ fn insertion_focus_moved_during_the_window_wait_is_restored_only_while_safe() {
             "scenario={scenario}: {log}"
         );
     }
+}
+
+#[test]
+fn focus_restoration_during_the_window_wait_never_outlasts_the_window_deadline() {
+    let fixture = LaunchFixture::new();
+    let mut config = three_window_split_config(&fixture);
+    config.window_timeout_ms = 300;
+    let (mut steps, insertion_tree) = steps_through_second_insertion_focus();
+    steps.push(snapshot_step(insertion_tree.clone())); // Quiet prelaunch fence.
+
+    // The first wait observation shows the pointer's focus change, but Sway never
+    // answers the restoration. A fresh IPC timeout would outlast the window deadline.
+    let moved = append_pointer_focus(&mut steps, &insertion_tree, 20);
+    append_focus_restoration(&mut steps, &moved, 21);
+    steps.last_mut().unwrap().withhold_reply = true;
+
+    let started = Instant::now();
+    let error = fixture.run(&config, steps).unwrap_err();
+
+    assert!(error.contains("command deadline"), "{error}");
+    assert!(
+        started.elapsed() < IPC_TIMEOUT,
+        "restoration outlasted the 300ms window deadline: {:?}",
+        started.elapsed()
+    );
+    wait_for_launch_total(&fixture, 3);
 }
 
 #[test]
