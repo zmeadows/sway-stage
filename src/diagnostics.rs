@@ -18,6 +18,8 @@ pub struct Diagnostics {
     /// The operation being performed, independent of whether it was selected in the menu.
     operation: &'static str,
     log_file: Option<File>,
+    /// Where `log_file` writes. Cleared with it when a write fails, so a failure message
+    /// never offers a log that stopped receiving its records.
     log_path: Option<PathBuf>,
     started_at: Instant,
     current_stage: String,
@@ -228,6 +230,7 @@ impl Diagnostics {
                     "sway-stage: logging failed: {error}; using stderr"
                 ));
                 self.log_file = None;
+                self.log_path = None;
             } else {
                 return;
             }
@@ -1352,7 +1355,10 @@ mod tests {
         let terminal = diagnostics.report_failure(error.into());
         assert!(terminal.contains(error));
         assert!(terminal.contains("inspect windows before retrying"));
+        assert!(!terminal.contains("; log:"), "{terminal}");
+        assert!(!terminal.contains("/dev/full"), "{terminal}");
         assert!(diagnostics.log_file.is_none());
+        assert!(diagnostics.log_path.is_none());
         let notification = diagnostics.failure_notification(error);
         assert!(!notification.contains("last-run.log"));
         assert!(notification.contains("Windows may remain"));
@@ -1381,7 +1387,11 @@ mod tests {
         assert!(terminal.contains(detail));
         assert!(terminal.contains("launch:"));
         assert!(terminal.contains("inspect windows before retrying"));
-        assert!(terminal.contains(path.to_str().unwrap()));
+        // Logging still works, so the terminal message offers the log for details.
+        assert!(
+            terminal.ends_with(&format!("; log: {}", path.display())),
+            "{terminal}"
+        );
         let failed_log = fs::read_to_string(&path).unwrap();
         assert!(failed_log.contains(detail));
         assert!(failed_log.contains("inspect windows before retrying"));
