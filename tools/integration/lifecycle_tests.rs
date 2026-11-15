@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 30] = [
+const SUITE_ORDER: [&str; 33] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -72,9 +72,12 @@ const SUITE_ORDER: [&str; 30] = [
     "profile-partial-failure",
     "profile-named-success",
     "profile-event-burst",
+    "layout-exec-direct",
+    "layout-exec-menu",
     "profile-exec-context",
     "profile-exec-ancestry-only",
     "profile-exec-token-only",
+    "profile-exec-menu",
     "profile-cross-output",
 ];
 
@@ -116,6 +119,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
+            "profile-exec-menu",
             "profile-cross-output"
         ]
     );
@@ -124,8 +128,25 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
         [
             "profile-exec-context",
             "profile-exec-ancestry-only",
-            "profile-exec-token-only"
+            "profile-exec-token-only",
+            "profile-exec-menu"
         ]
+    );
+    // `process-execution` also contains "exec"; the hyphen leaves only the exec cases.
+    assert_eq!(
+        select_scenarios(Some("exec-")).unwrap(),
+        [
+            "layout-exec-direct",
+            "layout-exec-menu",
+            "profile-exec-context",
+            "profile-exec-ancestry-only",
+            "profile-exec-token-only",
+            "profile-exec-menu"
+        ]
+    );
+    assert_eq!(
+        select_scenarios(Some("exec-menu")).unwrap(),
+        ["layout-exec-menu", "profile-exec-menu"]
     );
     assert_eq!(
         select_scenarios(Some("refusal")).unwrap(),

@@ -6,18 +6,88 @@ use crate::ipc::WorkspaceEvent;
 use crate::profile::verify_workspace_events;
 
 #[test]
-fn cases_have_distinct_names_and_entry_modes() {
+fn cases_have_distinct_names_entry_points_and_entry_modes() {
     let names: Vec<&str> = CASES.iter().map(|case| case.name()).collect();
     assert_eq!(
         names,
         [
+            "layout-exec-direct",
+            "layout-exec-menu",
             "profile-exec-context",
             "profile-exec-ancestry-only",
-            "profile-exec-token-only"
+            "profile-exec-token-only",
+            "profile-exec-menu"
         ]
     );
     let modes: Vec<&str> = CASES.iter().map(|case| case.entry_mode()).collect();
-    assert_eq!(modes, ["inherited", "without-token", "detached"]);
+    assert_eq!(
+        modes,
+        [
+            "inherited",
+            "inherited",
+            "inherited",
+            "without-token",
+            "detached",
+            "inherited"
+        ]
+    );
+    let profile_loads: Vec<bool> = CASES.iter().map(|case| case.loads_profile()).collect();
+    assert_eq!(profile_loads, [false, false, true, true, true, true]);
+    let base_layouts: Vec<&str> = CASES.iter().map(|case| case.base_layout()).collect();
+    assert_eq!(
+        base_layouts,
+        [
+            "horizontal-pair",
+            "horizontal-pair",
+            "single-window",
+            "single-window",
+            "single-window",
+            "single-window"
+        ]
+    );
+
+    // Only the menu cases select a row, and equal layout and profile names stay distinct.
+    let selections: Vec<Option<String>> = CASES.iter().map(|case| case.menu_selection()).collect();
+    assert_eq!(
+        selections,
+        [
+            None,
+            Some("Layout: layout-exec-menu".to_owned()),
+            None,
+            None,
+            None,
+            Some("Profile: profile-exec-menu".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn each_entry_point_has_its_own_command_line() {
+    let command = |case: Case| sway_stage_arguments(case, "/build/sway-stage", "/run/l", "/run/p");
+    let directories = [
+        "/build/sway-stage",
+        "--layouts-dir",
+        "/run/l",
+        "--profiles-dir",
+        "/run/p",
+    ];
+    for (case, entry_point) in [
+        (Case::LayoutLoad, vec!["load", "layout-exec-direct"]),
+        (Case::MenuLayout, vec!["menu"]),
+        (
+            Case::ContextInherited,
+            vec!["profile", "load", "profile-exec-context"],
+        ),
+        (
+            Case::TokenOnly,
+            vec!["profile", "load", "profile-exec-token-only"],
+        ),
+        (Case::MenuProfile, vec!["menu"]),
+    ] {
+        let mut expected = directories.to_vec();
+        expected.extend(entry_point);
+        assert_eq!(command(case), expected, "{case:?}");
+    }
 }
 
 #[test]
@@ -41,10 +111,10 @@ fn entry_scripts_quote_every_value_and_select_one_mode() {
         "load".to_owned(),
         "profile-exec-context".to_owned(),
     ];
-    let script = entry_script(Case::TokenOnly, "/tmp/run/evidence", &command);
+    let script = entry_script(Case::TokenOnly, "/tmp/run/evidence", None, &command);
 
     assert!(script.starts_with(
-        "#!/bin/sh\nmode='detached'\nevidence='/tmp/run/evidence'\n\
+        "#!/bin/sh\nmode='detached'\nevidence='/tmp/run/evidence'\nfuzzel_directory=''\n\
          set -- '/build/sway-stage' '--layouts-dir' '/tmp/run/it'\\''s layouts' 'profile' \
          'load' 'profile-exec-context'\n\n"
     ));
@@ -63,6 +133,100 @@ fn entry_scripts_quote_every_value_and_select_one_mode() {
 }
 
 #[test]
+fn only_a_menu_entry_script_puts_the_fuzzel_substitute_first_on_path() {
+    let command = vec!["/build/sway-stage".to_owned(), "menu".to_owned()];
+    let script = entry_script(
+        Case::MenuProfile,
+        "/tmp/run/evidence",
+        Some("/tmp/run/fuzzel substitute"),
+        &command,
+    );
+    assert!(script.starts_with(
+        "#!/bin/sh\nmode='inherited'\nevidence='/tmp/run/evidence'\n\
+         fuzzel_directory='/tmp/run/fuzzel substitute'\nset -- '/build/sway-stage' 'menu'\n\n"
+    ));
+    // The prefix is applied only when the directory is set, before sway-stage starts.
+    assert_contains(
+        &script,
+        "if [ -n \"$fuzzel_directory\" ]; then\n    PATH=$fuzzel_directory:$PATH\n    export PATH\nfi",
+    );
+    assert!(script.find("export PATH").unwrap() < script.find("case $mode in").unwrap());
+}
+
+#[test]
+fn the_fuzzel_substitute_quotes_its_selection_and_selects_by_index() {
+    let script = fuzzel_substitute_script("Layout: it's", "/tmp/run/evidence");
+    assert!(
+        script.starts_with(
+            "#!/bin/sh\nselection='Layout: it'\\''s'\nevidence='/tmp/run/evidence'\n\n"
+        )
+    );
+    assert!(script.ends_with(FUZZEL_SUBSTITUTE_BODY));
+    // Noclobber makes a second prompt fail, and an absent or repeated row exits 1.
+    assert!(script.contains("set -C\n"));
+    assert_contains(&script, "[ -z \"$selected_index\" ] || exit 1");
+    assert_contains(&script, "[ -n \"$selected_index\" ] || exit 1");
+    // It reads every row before answering, and prints only the index.
+    assert!(
+        script.find("done").unwrap()
+            < script
+                .rfind("printf '%s\\n' \"$selected_index\"\n")
+                .unwrap()
+    );
+}
+
+fn menu_evidence(arguments: &str, rows: &str, selected_index: &str) -> MenuEvidence {
+    MenuEvidence {
+        arguments: arguments.into(),
+        rows: rows.into(),
+        selected_index: selected_index.into(),
+    }
+}
+
+const MENU_ARGUMENTS: &str = "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output=HEADLESS-1\n--prompt=> \n";
+
+#[test]
+fn menu_evidence_requires_the_prompt_the_rows_and_the_case_selection() {
+    let rows = "Capture session profile…\nLayout: layout-exec-menu\nProfile: layout-exec-menu\n";
+    menu_evidence(MENU_ARGUMENTS, rows, "1\n")
+        .verify(Case::MenuLayout)
+        .unwrap();
+    let rows = "Capture session profile…\nLayout: profile-exec-menu\nProfile: profile-exec-menu\n";
+    menu_evidence(MENU_ARGUMENTS, rows, "2\n")
+        .verify(Case::MenuProfile)
+        .unwrap();
+
+    // Another row, a different prompt or output, or other offered rows all fail.
+    assert!(
+        menu_evidence(MENU_ARGUMENTS, rows, "1\n")
+            .verify(Case::MenuProfile)
+            .is_err()
+    );
+    let other_output = MENU_ARGUMENTS.replace("HEADLESS-1", "HEADLESS-2");
+    let without_index = MENU_ARGUMENTS.replace("--index\n", "");
+    for arguments in [other_output.as_str(), without_index.as_str(), ""] {
+        assert!(
+            menu_evidence(arguments, rows, "2\n")
+                .verify(Case::MenuProfile)
+                .is_err(),
+            "{arguments:?}"
+        );
+    }
+    for other_rows in [
+        "Layout: profile-exec-menu\nProfile: profile-exec-menu\n",
+        "Capture session profile…\nLayout: profile-exec-menu\n[invalid] Profile: profile-exec-menu\n",
+        "Capture session profile…\nLayout: profile-exec-menu\nProfile: profile-exec-menu\nProfile: other\n",
+    ] {
+        assert!(
+            menu_evidence(MENU_ARGUMENTS, other_rows, "2\n")
+                .verify(Case::MenuProfile)
+                .is_err(),
+            "{other_rows:?}"
+        );
+    }
+}
+
+#[test]
 fn the_profile_has_one_entry_for_the_target() {
     assert_eq!(
         profile_configuration(Case::AncestryOnly, "3"),
@@ -71,8 +235,8 @@ fn the_profile_has_one_entry_for_the_target() {
 }
 
 #[test]
-fn the_layout_is_one_recorded_foot_window() {
-    let layout = layout(
+fn profile_cases_load_one_recorded_window_and_layout_cases_two() {
+    let profile_layout = layout(
         Case::ContextInherited,
         "run",
         "/usr/bin/foot",
@@ -80,8 +244,8 @@ fn the_layout_is_one_recorded_foot_window() {
         "/tmp/record.sh",
         "/tmp/launches",
     );
-    assert_eq!(layout.name, "profile-exec-context");
-    let leaves = layout.layout.leaves();
+    assert_eq!(profile_layout.name, "profile-exec-context");
+    let leaves = profile_layout.layout.leaves();
     let [leaf] = leaves.as_slice() else {
         panic!("one window");
     };
@@ -99,6 +263,26 @@ fn the_layout_is_one_recorded_foot_window() {
             "/usr/bin/foot",
             "--app-id=sway-stage-it-run-profile-exec-context-single-window-window1",
         ]
+    );
+
+    let menu_layout = layout(
+        Case::MenuLayout,
+        "run",
+        "/usr/bin/foot",
+        "/usr/bin/sleep",
+        "/tmp/record.sh",
+        "/tmp/launches",
+    );
+    assert_eq!(menu_layout.name, "layout-exec-menu");
+    let records: Vec<&str> = menu_layout
+        .layout
+        .leaves()
+        .iter()
+        .map(|leaf| leaf.command[2].as_str())
+        .collect();
+    assert_eq!(
+        records,
+        ["layout-exec-menu-window1", "layout-exec-menu-window2"]
     );
 }
 
