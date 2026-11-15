@@ -227,6 +227,161 @@ fn sequential_binding_rejects_early_launches_reuse_and_unselected_focus() {
     assert!(bind(&late_activity, &switch_indexes, &HashSet::new()).is_err());
 }
 
+#[test]
+fn a_shared_layout_is_one_layout_referenced_by_both_entries() {
+    let entries = sequential_entries(SequentialCase::SharedLayout, "2", "3", RUN_ID, FOOT, SLEEP);
+    let [first, second] = entries.as_slice() else {
+        panic!("two entries");
+    };
+    assert_eq!(
+        (first.workspace.as_str(), second.workspace.as_str()),
+        ("2", "3")
+    );
+    assert_eq!(first.layout.name, "profile-shared");
+    // The same file, so the same selectors and literal commands for both workspaces.
+    assert_eq!(
+        configuration_yaml(&first.layout),
+        configuration_yaml(&second.layout)
+    );
+    assert_eq!(
+        sequential_configuration(&entries),
+        "version: 1\nworkspaces:\n  - workspace: 2\n    layout: profile-shared\n  - workspace: 3\n    layout: profile-shared\n"
+    );
+}
+
+#[test]
+fn the_recreated_origin_profile_targets_the_absent_workspace_before_the_focused_one() {
+    let entries = sequential_entries(
+        SequentialCase::RecreatedOrigin,
+        "2",
+        "3",
+        RUN_ID,
+        FOOT,
+        SLEEP,
+    );
+    assert_eq!(
+        sequential_configuration(&entries),
+        "version: 1\nworkspaces:\n  - workspace: 3\n    layout: profile-first\n  - workspace: 2\n    layout: profile-second\n"
+    );
+    let selectors: HashSet<String> = entries
+        .iter()
+        .flat_map(|entry| entry.layout.layout.leaves())
+        .map(|leaf| leaf.app_id.clone())
+        .collect();
+    assert_eq!(selectors.len(), 4);
+    for case in SEQUENTIAL_CASES {
+        assert!(!CASES.iter().any(|other| other.name() == case.name()));
+    }
+}
+
+#[test]
+fn sequential_selection_events_follow_focus_and_remove_only_an_empty_origin() {
+    let origin = WorkspaceIdentity {
+        id: 20,
+        name: "2".into(),
+    };
+    let created = WorkspaceIdentity {
+        id: 30,
+        name: "3".into(),
+    };
+    let recreated = WorkspaceIdentity {
+        id: 40,
+        name: "2".into(),
+    };
+    let init = |id, name| workspace_event("init", id, name, name.parse().unwrap(), None);
+    let focus =
+        |id, name: &str, old| workspace_event("focus", id, name, name.parse().unwrap(), Some(old));
+    let empty = |id, name: &str| workspace_event("empty", id, name, name.parse().unwrap(), None);
+
+    // The focused origin is the first target: only the second is created and selected, and
+    // the origin keeps its windows.
+    let kept = [origin.clone(), created.clone()];
+    let expected = sequential_selection_events(&origin, &kept);
+    verify_workspace_events(&[init(30, "3"), focus(30, "3", 20)], &expected).unwrap();
+    assert!(
+        verify_workspace_events(
+            &[init(30, "3"), focus(30, "3", 20), empty(20, "2")],
+            &expected
+        )
+        .is_err()
+    );
+
+    // Leaving the empty origin first removes it; its name is then created anew.
+    let reordered = [created.clone(), recreated.clone()];
+    let expected = sequential_selection_events(&origin, &reordered);
+    let observed = [
+        init(30, "3"),
+        focus(30, "3", 20),
+        empty(20, "2"),
+        init(40, "2"),
+        focus(40, "2", 30),
+    ];
+    verify_workspace_events(&observed, &expected).unwrap();
+    for (case, observed) in [
+        (
+            "origin kept",
+            vec![init(30, "3"), focus(30, "3", 20), focus(20, "2", 30)],
+        ),
+        (
+            "origin reused",
+            vec![
+                init(30, "3"),
+                focus(30, "3", 20),
+                empty(20, "2"),
+                init(20, "2"),
+                focus(20, "2", 30),
+            ],
+        ),
+        (
+            "first target removed",
+            vec![
+                init(30, "3"),
+                focus(30, "3", 20),
+                empty(20, "2"),
+                init(40, "2"),
+                focus(40, "2", 30),
+                empty(30, "3"),
+            ],
+        ),
+    ] {
+        assert!(
+            verify_workspace_events(&observed, &expected).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn constructed_layouts_have_only_new_containers_of_their_own() {
+    let workspace = |id, name: &str, children| {
+        let mut workspace = crate::fixtures::container(
+            id,
+            "workspace",
+            "splith",
+            crate::fixtures::rect(0, 0, 2560, 1440),
+            children,
+        );
+        workspace["name"] = json!(name);
+        parse_tree(workspace)
+    };
+    let window = |id| wayland_window(id, "app", crate::fixtures::rect(0, 0, 10, 10));
+    let group = |id, children| {
+        crate::fixtures::group(id, "splitv", crate::fixtures::rect(0, 0, 10, 10), children)
+    };
+
+    let first = workspace(20, "2", vec![window(41), group(42, vec![window(43)])]);
+    let second = workspace(30, "3", vec![window(51), window(52)]);
+    // The kept origin's own ID may predate the load.
+    let preexisting = HashSet::from([6, 20]);
+    require_distinct_new_containers(&[&first, &second], &preexisting).unwrap();
+
+    let preexisting_window = workspace(30, "3", vec![window(6), window(52)]);
+    let shared_group = workspace(30, "3", vec![group(42, vec![window(52)])]);
+    for second in [preexisting_window, shared_group] {
+        assert!(require_distinct_new_containers(&[&first, &second], &preexisting).is_err());
+    }
+}
+
 fn empty_target() -> Snapshot {
     Snapshot {
         tree: parse_tree(desktop("splith", Vec::new(), PREEXISTING_WINDOW_ID)),

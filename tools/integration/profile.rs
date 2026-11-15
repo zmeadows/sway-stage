@@ -52,6 +52,146 @@ impl Case {
     }
 }
 
+/// Profiles that the runner verifies workspace by workspace, as it does the session
+/// round-trip's reload: each entry's windows between its own selection and the next.
+pub const SEQUENTIAL_CASES: [SequentialCase; 2] = [
+    SequentialCase::SharedLayout,
+    SequentialCase::RecreatedOrigin,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequentialCase {
+    /// Both entries reference one layout file: the focused primary, then the absent second
+    /// target. The first entry's windows match every selector of the second entry, which
+    /// must launch its own windows rather than adopt them.
+    SharedLayout,
+    /// The absent second target first, then the focused, empty primary. Sway removes the
+    /// primary as focus leaves it, so the second selection creates a workspace with its name.
+    RecreatedOrigin,
+}
+
+impl SequentialCase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SharedLayout => "profile-shared-layout",
+            Self::RecreatedOrigin => "profile-recreated-origin",
+        }
+    }
+}
+
+/// One profile entry: the workspace it targets and the layout it references by name.
+pub struct ProfileEntry {
+    pub workspace: String,
+    pub layout: Scenario,
+}
+
+/// The case's entries in profile order. `primary` is the focused workspace the load starts
+/// on, and `second` an absent one. The runner records each entry's launches with
+/// `wrap_launches`, which keeps a shared layout's entries identical.
+pub fn sequential_entries(
+    case: SequentialCase,
+    primary: &str,
+    second: &str,
+    run_id: &str,
+    foot: &str,
+    sleep: &str,
+) -> Vec<ProfileEntry> {
+    let unique_id = format!("{run_id}-{}", case.name());
+    let mut scenarios = standard_scenarios(&unique_id, foot, sleep);
+    let mut take_layout = |standard_name: &str, layout_name: &'static str| {
+        let index = scenarios
+            .iter()
+            .position(|scenario| scenario.name == standard_name)
+            .expect("standard sequential profile scenario");
+        let mut layout = scenarios.swap_remove(index);
+        layout.name = layout_name;
+        layout
+    };
+
+    let entry = |workspace: &str, layout: Scenario| ProfileEntry {
+        workspace: workspace.to_owned(),
+        layout,
+    };
+    match case {
+        SequentialCase::SharedLayout => {
+            // One layout, so identical selectors, commands, and launch records.
+            let shared = take_layout("horizontal-pair", "profile-shared");
+            vec![entry(primary, shared.clone()), entry(second, shared)]
+        }
+        SequentialCase::RecreatedOrigin => vec![
+            entry(second, take_layout("horizontal-pair", "profile-first")),
+            entry(primary, take_layout("vertical-pair", "profile-second")),
+        ],
+    }
+}
+
+/// The profile file for `entries`, each referencing its layout by name.
+pub fn sequential_configuration(entries: &[ProfileEntry]) -> String {
+    let mut yaml = "version: 1\nworkspaces:\n".to_owned();
+    for entry in entries {
+        yaml.push_str(&format!(
+            "  - workspace: {}\n    layout: {}\n",
+            workspace_scalar(&entry.workspace),
+            entry.layout.name
+        ));
+    }
+    yaml
+}
+
+/// The workspace events of a profile load that starts on the empty, focused `origin` and
+/// constructs a layout on each of `targets` in order. Selecting the focused workspace
+/// changes nothing; every other target is created and selected from the previous one, and
+/// Sway removes that previous workspace only if it is still empty: the origin, when it is
+/// not the first target.
+pub fn sequential_selection_events<'a>(
+    origin: &'a WorkspaceIdentity,
+    targets: &'a [WorkspaceIdentity],
+) -> Vec<ExpectedWorkspaceEvent<'a>> {
+    let mut expected = Vec::new();
+    let mut previous = origin;
+    let mut previous_is_empty = true;
+    for target in targets {
+        if target != previous {
+            expected.push(ExpectedWorkspaceEvent::Init(target));
+            expected.push(ExpectedWorkspaceEvent::Focus {
+                from_id: previous.id,
+                to: target,
+            });
+            if previous_is_empty {
+                expected.push(ExpectedWorkspaceEvent::Empty(previous));
+            }
+        }
+        previous = target;
+        // The target now holds its layout's windows.
+        previous_is_empty = false;
+    }
+    expected
+}
+
+/// Requires every container below the observed `target_workspaces` to be new, and no
+/// container to appear on two of them: each constructed layout has its own identities.
+pub fn require_distinct_new_containers(
+    target_workspaces: &[&TreeNode],
+    preexisting: &HashSet<i64>,
+) -> Result<(), String> {
+    let mut seen_ids = HashSet::new();
+    for workspace in target_workspaces {
+        for placed in walk(workspace) {
+            let container_id = placed.node.id;
+            if container_id == workspace.id {
+                continue;
+            }
+            if preexisting.contains(&container_id) || !seen_ids.insert(container_id) {
+                return Err(format!(
+                    "container id={container_id} on workspace {:?} is preexisting or shared",
+                    workspace.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The two-output session's only scenario.
 pub const CROSS_OUTPUT_SCENARIO: &str = "profile-cross-output";
 
@@ -208,14 +348,19 @@ pub fn cross_output_configuration() -> String {
 }
 
 pub fn configuration(primary: &str, second: &str) -> String {
-    let primary = if primary.bytes().all(|byte| byte.is_ascii_digit()) {
-        primary.to_owned()
-    } else {
-        serde_json::to_string(primary).expect("string serialization")
-    };
+    let primary = workspace_scalar(primary);
     format!(
         "version: 1\nworkspaces:\n  - workspace: {primary}\n    layout: profile-first\n  - workspace: {second}\n    layout: profile-second\n"
     )
+}
+
+/// A workspace name as a profile's YAML scalar: a number unquoted, any other name quoted.
+fn workspace_scalar(name: &str) -> String {
+    if name.bytes().all(|byte| byte.is_ascii_digit()) {
+        name.to_owned()
+    } else {
+        serde_json::to_string(name).expect("string serialization")
+    }
 }
 
 /// Independent decoding of a captured profile: `targets` in capture order, each referencing

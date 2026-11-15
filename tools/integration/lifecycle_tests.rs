@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 41] = [
+const SUITE_ORDER: [&str; 43] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -77,6 +77,8 @@ const SUITE_ORDER: [&str; 41] = [
     "profile-named-success",
     "profile-event-burst",
     "profile-workspace-zero",
+    "profile-shared-layout",
+    "profile-recreated-origin",
     "layout-exec-direct",
     "layout-exec-menu",
     "profile-exec-context",
@@ -125,6 +127,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-named-success",
             "profile-event-burst",
             "profile-workspace-zero",
+            "profile-shared-layout",
+            "profile-recreated-origin",
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",

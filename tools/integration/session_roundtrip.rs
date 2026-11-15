@@ -29,8 +29,8 @@ pub const PROFILE_NAME: &str = "session";
 /// `session_roundtrip_layouts` entry. The runner uses none of them otherwise.
 pub const WORKSPACES: [&str; 4] = ["5", "6", "7", "8"];
 
-/// One of the round-trip's workspaces in one construction cycle, with the windows accepted
-/// there.
+/// One of the round-trip's workspaces, or one target of a profile verified workspace by
+/// workspace, in one construction cycle, with the windows accepted there.
 pub struct SessionWorkspace {
     pub target: Target,
     pub layout: Scenario,
@@ -39,8 +39,9 @@ pub struct SessionWorkspace {
 
 /// The IDs `verify_ownership` may pass over while checking `workspaces[workspace_index]`:
 /// everything that existed before the cycle, and the windows owned on the cycle's other
-/// workspaces. Every window shares one app ID, so without the latter each would be an
-/// unowned candidate on the wrong workspace.
+/// workspaces. Every round-trip window shares one app ID, as do both entries of a shared
+/// profile layout, so without the latter each would be an unowned candidate on the wrong
+/// workspace.
 pub fn known_ids_besides(
     workspaces: &[SessionWorkspace],
     workspace_index: usize,

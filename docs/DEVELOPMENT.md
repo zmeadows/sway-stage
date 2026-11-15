@@ -46,13 +46,13 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 41 scenarios
+tools/integration/run.sh                  # all 43 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the thirteen
+suite order: `--filter single-window` runs one scenario and `--filter profile` the fifteen
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
@@ -128,8 +128,8 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `0` | The second target of `profile-workspace-zero`, created and removed like `3`. |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. |
-| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
-| `3` | The second target of the successful and partial profile scenarios, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. |
+| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` temporarily renames it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. |
+| `3` | The second target of the successful, partial, and shared-layout profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
 | `5`–`8` | The [session round-trip](#four-workspace-session-round-trip)'s workspaces, created twice in that order and removed by Sway after each cleanup. |
 
@@ -196,6 +196,8 @@ Expected profile failures count as passes only after independent verification:
 | `profile-workspace-zero` | Load `horizontal-pair` on `2`, then `vertical-pair` on the absent numeric workspace `0`, with the profile-success checks, including capture. `profile check` must accept the unquoted target `0`; the load must create `0` with number `0` and switch to it; the explicit `2 0` capture must reference it as the unquoted integer `0`. |
 | `profile-cross-output` | In the two-output compositor, with the foreign fixture on `1` (`HEADLESS-1`, focused) and empty `2` shown on `HEADLESS-2`, load a one-entry profile for `3` with `output: HEADLESS-2`; Sway's `workspace … output` rules create `3` there. Require exactly the creation of `3`, the switch from `1`, and Sway's removal of `2`, matched by its exact identity: without that removal the regression is not demonstrated. Verify `2` is gone, `3` is new, focused, and on `HEADLESS-2`, `1` and the fixture are unchanged on `HEADLESS-1`, and the layout's launch order, ownership, hierarchy, and sizing. |
 | `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. Capture both the inactive named target and focused numeric target with the same independent draft/reference and preservation checks. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
+| `profile-shared-layout` | Both entries, `2` then the absent `3`, reference the one layout file `profile-shared` (`horizontal-pair`). The second construction must launch its own two windows although the first workspace's windows match every selector: the launch record must hold that layout's two launches twice, and window events on either side of the switch bind each workspace's windows. Require the creation of `3` and the switch to it as the only workspace events, distinct new window and container IDs on each target, ownership, hierarchy, order, sizing, the first target's inactive selection, final focus on `3`, and an untouched first workspace. |
+| `profile-recreated-origin` | Starting on the empty, focused `2`, load `horizontal-pair` on the absent `3` first, then `vertical-pair` on `2`. Both targets pass preflight; selecting `3` must create it and make Sway remove the empty `2` (the exact `init`, `focus`, and `empty` events); selecting `2` must then create a workspace with a new ID. Require that event sequence exactly, launches in profile order, each layout's windows only after its own selection, the first layout unchanged while the second is built, ownership, hierarchy, sizing, selections, and final focus on the new `2`. Cleanup then returns to a new primary `2`. |
 
 The named scenario reuses workspace `2`; no fourth workspace is required. It accepts exactly
 one expected rename event per rename and retains the existing event subscription. Any
@@ -211,6 +213,14 @@ inactive first workspace is checked through its saved child-focus path. The fore
 and unrelated windows retain their usual preservation checks. Intentional profile errors
 still attempt sway-stage's error notification, which cannot reach any notification daemon
 through the session's nonexistent D-Bus bus; stderr and exit status remain checked.
+
+`profile-shared-layout` and `profile-recreated-origin` do not capture. They require `3` to be
+absent beforehand, and are verified as the session round-trip's reload is: one fence accepts
+exactly the expected sequence of selections, each target's window events are bound between
+its own selection and the next, and ownership treats the other target's owned windows as
+known, so identical selectors cannot hide an adopted or extra window. Verified cleanup closes
+the last target's windows, returns to the first target (whose emptied predecessor Sway
+removes), and closes its windows.
 
 If the second target is absent at scenario start, the profile must create it. If it already
 exists empty, its identity/output must survive. The harness never destroys a workspace to
