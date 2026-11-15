@@ -16,12 +16,13 @@ use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
 use crate::preservation::output_ancestry;
 use crate::scenarios::{Scenario, foreign_fixture_scenario, standard_scenarios};
 
-pub const CASES: [Case; 5] = [
+pub const CASES: [Case; 6] = [
     Case::Success,
     Case::Occupied,
     Case::Partial,
     Case::NamedSuccess,
     Case::EventBurst,
+    Case::WorkspaceZero,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,9 @@ pub enum Case {
     /// A successful profile whose first construction carries more events than the production
     /// coordinator's queue can hold while it waits for the layout loader.
     EventBurst,
+    /// A successful profile whose second target is numeric workspace 0. Sway creates and
+    /// selects it by number like any other, but never chooses 0 when naming a workspace.
+    WorkspaceZero,
 }
 
 impl Case {
@@ -43,6 +47,7 @@ impl Case {
             Self::Occupied => "profile-occupied-refusal",
             Self::Partial => "profile-partial-failure",
             Self::EventBurst => "profile-event-burst",
+            Self::WorkspaceZero => "profile-workspace-zero",
         }
     }
 }

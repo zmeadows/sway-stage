@@ -186,6 +186,65 @@ fn all_orders_numbered_then_named_and_omits_only_empty_and_internal() {
 }
 
 #[test]
+fn workspace_zero_is_an_ordinary_number_for_explicit_and_all_capture() {
+    for (mut arguments, expected) in [
+        (
+            vec!["work", "music", "0", "3"],
+            vec![json!("music"), json!(0), json!(3)],
+        ),
+        (
+            vec!["work", "--all"],
+            vec![
+                json!(0),
+                json!(1),
+                json!(3),
+                json!("music"),
+                json!("music player"),
+            ],
+        ),
+    ] {
+        let fixture = CliFixture::new();
+        let mut tree = tree();
+        tree["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(populated_workspace(80, 0, "0:code", false));
+        arguments.push("--no-infer-commands");
+        run_capture(&fixture, tree, &arguments, 0);
+
+        // An unquoted integer: a quoted "0" would be rejected as an ambiguous name.
+        let profile_yaml = fs::read_to_string(fixture.path.join("profiles/work.yaml")).unwrap();
+        assert!(profile_yaml.contains("workspace: 0\n"), "{profile_yaml}");
+        let profile: Value = serde_saphyr::from_str(&profile_yaml).unwrap();
+        let targets: Vec<_> = profile["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["workspace"].clone())
+            .collect();
+        assert_eq!(targets, expected);
+
+        let zero_index = expected.iter().position(|target| *target == 0).unwrap();
+        let zero_layout = fixture
+            .path
+            .join(format!("layouts/work-{:03}.yaml", zero_index + 1));
+        let draft: Value =
+            serde_saphyr::from_str(&fs::read_to_string(zero_layout).unwrap()).unwrap();
+        assert_eq!(draft["focus"], "window2");
+
+        let shown = fixture.run(
+            &["--profiles-dir", "profiles", "profile", "show", "work"],
+            0,
+        );
+        let zero_line = format!("\n  0 -> work-{:03}\n", zero_index + 1);
+        assert!(
+            String::from_utf8_lossy(&shown.stdout).contains(&zero_line),
+            "{shown:?}"
+        );
+    }
+}
+
+#[test]
 fn cli_selection_and_name_errors_precede_ipc_and_filesystem_writes() {
     for arguments in [
         vec!["work"],
@@ -199,13 +258,15 @@ fn cli_selection_and_name_errors_precede_ipc_and_filesystem_writes() {
     }
     for arguments in [
         vec!["bad.name", "1"],
-        vec!["work", "0"],
         vec!["work", "1000000000"],
         vec!["work", "99999999999999999999999999"],
         vec!["work", "3:development"],
+        vec!["work", "0:code"],
         vec!["work", "music;exec"],
         vec!["work", "next"],
         vec!["work", "1", "01"],
+        vec!["work", "0", "00"],
+        vec!["work", "0", "0"],
         vec!["work", "music", "music"],
         vec!["work", "music "],
     ] {
@@ -226,6 +287,7 @@ fn invalid_or_unsupported_observations_publish_nothing() {
     for case in [
         "missing",
         "duplicate-number",
+        "duplicate-zero",
         "duplicate-name",
         "missing-num",
         "inconsistent",
@@ -246,6 +308,12 @@ fn invalid_or_unsupported_observations_publish_nothing() {
             "duplicate-number" => {
                 workspaces[0]["num"] = json!(3);
                 workspaces[0]["name"] = json!("3:other");
+            }
+            "duplicate-zero" => {
+                workspaces[0]["num"] = json!(0);
+                workspaces[0]["name"] = json!("0");
+                workspaces[1]["num"] = json!(0);
+                workspaces[1]["name"] = json!("0:code");
             }
             "duplicate-name" => workspaces[0]["name"] = json!("music"),
             "missing-num" => {

@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 36] = [
+const SUITE_ORDER: [&str; 37] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -72,6 +72,7 @@ const SUITE_ORDER: [&str; 36] = [
     "profile-partial-failure",
     "profile-named-success",
     "profile-event-burst",
+    "profile-workspace-zero",
     "layout-exec-direct",
     "layout-exec-menu",
     "profile-exec-context",
@@ -119,6 +120,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-partial-failure",
             "profile-named-success",
             "profile-event-burst",
+            "profile-workspace-zero",
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
@@ -202,6 +204,7 @@ fn workspace_plan_starts_on_the_fresh_workspace_and_uses_distinct_safe_names() {
         FIXTURE_WORKSPACE,
         PRIMARY_WORKSPACE,
         PROFILE_WORKSPACE,
+        ZERO_WORKSPACE,
         ASSIGNED_WORKSPACE,
     ];
     let unique_names: HashSet<&str> = names.into_iter().collect();

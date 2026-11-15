@@ -480,7 +480,24 @@ fn profile_check_accepts_exact_names_and_reports_invalid_target_locations_offlin
     let output = fixture.run(&arguments, 0);
     assert_eq!(output.stdout, b"work: valid\n");
     assert!(output.stderr.is_empty());
-    for target in ["'1'", "'1:code'", "'next'", "'music;exit'", "[]", "false"] {
+    fixture.file(
+        "work.yaml",
+        &PROFILE.replace("workspace: 1", "workspace: 0"),
+    );
+    let output = fixture.run(&arguments, 0);
+    assert_eq!(output.stdout, b"work: valid\n");
+    assert!(output.stderr.is_empty());
+    for target in [
+        "'1'",
+        "'1:code'",
+        "'0'",
+        "'0:code'",
+        "-1",
+        "'next'",
+        "'music;exit'",
+        "[]",
+        "false",
+    ] {
         fixture.file(
             "work.yaml",
             &PROFILE.replace("workspace: 1", &format!("workspace: {target}")),
@@ -605,7 +622,7 @@ fn profile_list_respects_default_and_explicit_directories_and_empty_results() {
 #[test]
 fn profile_show_preserves_mapping_order_and_does_not_validate_layout_files() {
     let fixture = CliFixture::new();
-    fixture.file("work.yml", "version: 1\nworkspaces:\n  - {workspace: 3, layout: missing}\n  - {workspace: music, layout: invalid}\n  - {workspace: 1, layout: missing}\n  - {workspace: 'music player', layout: invalid}\n");
+    fixture.file("work.yml", "version: 1\nworkspaces:\n  - {workspace: 3, layout: missing}\n  - {workspace: music, layout: invalid}\n  - {workspace: 1, layout: missing}\n  - {workspace: 0, layout: missing}\n  - {workspace: 'music player', layout: invalid}\n");
     fixture.file("invalid.yaml", "malformed: [");
     for directory in ["missing", ".", "invalid.yaml"] {
         let output = fixture.run(
@@ -620,7 +637,7 @@ fn profile_show_preserves_mapping_order_and_does_not_validate_layout_files() {
             ],
             0,
         );
-        assert_eq!(output.stdout, b"work:\n  3 -> missing\n  \"music\" -> invalid\n  1 -> missing\n  \"music player\" -> invalid\n");
+        assert_eq!(output.stdout, b"work:\n  3 -> missing\n  \"music\" -> invalid\n  1 -> missing\n  0 -> missing\n  \"music player\" -> invalid\n");
         assert!(output.stderr.is_empty());
     }
 }

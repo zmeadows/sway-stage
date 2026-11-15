@@ -451,6 +451,58 @@ fn two_workspace_profile_uses_prepared_configs_yaml_order_and_existing_named_wor
 }
 
 #[test]
+fn workspace_zero_is_selected_by_number_whether_existing_or_created() {
+    for zero_exists in [true, false] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: 0, layout: first}, {workspace: 3, layout: second}]\n",
+        );
+        // workspace(0, ..) is the descriptive "0: descriptive", which Sway numbers 0.
+        let mut with_empty_zero = tree();
+        with_empty_zero["nodes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(workspace(0, false));
+        let initial = if zero_exists {
+            with_empty_zero.clone()
+        } else {
+            tree()
+        };
+        let first_selected = focus_workspace(&with_empty_zero, 0);
+
+        let mut steps = vec![snapshot(&initial)];
+        steps.extend(selection_steps(
+            &initial,
+            &first_selected,
+            0,
+            90,
+            !zero_exists,
+        ));
+        let (construction, first_done) = construction_steps(&first_selected, 0, 20);
+        steps.extend(construction);
+        let second_selected = focus_workspace(&first_done, 3);
+        steps.extend(selection_steps(&first_done, &second_selected, 3, 0, false));
+        let (construction, _) = construction_steps(&second_selected, 3, 21);
+        steps.extend(construction);
+
+        let output = run(&fixture, steps, false);
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\nsecond\n"
+        );
+        let log =
+            fs::read_to_string(fixture.path.join(".local/state/sway-stage/last-run.log")).unwrap();
+        assert!(
+            log.contains("completed 2 workspaces [(0, 100), (3, 103)]"),
+            "{log}"
+        );
+    }
+}
+
+#[test]
 fn every_layout_is_validated_before_connecting_or_selecting_a_workspace() {
     let fixture = fixture();
     fixture.file(

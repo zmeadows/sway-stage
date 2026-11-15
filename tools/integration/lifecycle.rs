@@ -57,6 +57,8 @@ const PRIMARY_WORKSPACE: &str = "2";
 /// Each profile's second target. Every profile leaves it empty and returns to the primary,
 /// so Sway removes it and the next profile load creates it again.
 const PROFILE_WORKSPACE: &str = "3";
+/// The second target of the workspace-zero profile instead, created and removed the same way.
+const ZERO_WORKSPACE: &str = "0";
 /// The scenario whose window a Sway `assign` rule sends to `ASSIGNED_WORKSPACE`.
 const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
 /// Created by Sway for that window alone, and removed after its cleanup.
@@ -1719,7 +1721,11 @@ impl Harness {
         directory: &TemporaryConfigurations,
     ) -> Result<(), String> {
         let name = case.name();
-        let second_number = PROFILE_WORKSPACE;
+        let second_number = if case == profile::Case::WorkspaceZero {
+            ZERO_WORKSPACE
+        } else {
+            PROFILE_WORKSPACE
+        };
         // The refusal names the still-occupied fixture workspace as its second target.
         let destination = if case == profile::Case::Occupied {
             FIXTURE_WORKSPACE
@@ -1839,7 +1845,10 @@ impl Harness {
         // workspace switch that it may never have made.
         let expects_success = matches!(
             case,
-            profile::Case::Success | profile::Case::NamedSuccess | profile::Case::EventBurst
+            profile::Case::Success
+                | profile::Case::NamedSuccess
+                | profile::Case::EventBurst
+                | profile::Case::WorkspaceZero
         );
         if expects_success && !completed.status.success() {
             return Err(format!(

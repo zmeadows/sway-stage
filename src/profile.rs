@@ -21,7 +21,7 @@ const MAX_OUTPUT_NAME_BYTES: usize = 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(
     untagged,
-    expecting = "a positive YAML integer or an exact workspace name"
+    expecting = "a nonnegative YAML integer or an exact workspace name"
 )]
 pub enum WorkspaceTarget {
     Number(u64),
@@ -40,10 +40,13 @@ impl fmt::Display for WorkspaceTarget {
 impl WorkspaceTarget {
     pub(crate) fn validate(&self) -> Result<(), String> {
         match self {
+            // Sway reports a workspace named "0" or "0:code" as IPC number 0 and selects or
+            // creates it with `workspace number 0`, like any other number; only its automatic
+            // naming of new workspaces starts at 1.
             Self::Number(number) => {
-                if !(1..=MAX_WORKSPACE_NUMBER).contains(number) {
+                if *number > MAX_WORKSPACE_NUMBER {
                     return Err(format!(
-                        "expected a workspace number from 1 to {MAX_WORKSPACE_NUMBER}"
+                        "expected a workspace number from 0 to {MAX_WORKSPACE_NUMBER}"
                     ));
                 }
             }
@@ -1098,9 +1101,9 @@ mod tests {
             );
         }
         for workspace in [
-            "0",
             "1000000000",
             "-1",
+            "'0'",
             "'3'",
             "3.0",
             "true",
@@ -1112,6 +1115,39 @@ mod tests {
                 "workspaces[0].workspace",
             );
         }
+    }
+
+    #[test]
+    fn workspace_zero_is_an_ordinary_number_distinct_from_numeric_names() {
+        let profile = parse(&PROFILE.replace("workspace: 3", "workspace: 0")).unwrap();
+        let target = &profile.workspaces[0].value.workspace;
+        assert_eq!(*target, WorkspaceTarget::Number(0));
+        assert_eq!(target.to_string(), "0");
+        assert_eq!(
+            target.selection_command().unwrap(),
+            "workspace --no-auto-back-and-forth number 0"
+        );
+        // Sway reports both "0" and a descriptive "0:code" as number 0.
+        assert!(target.matches(0, "0"));
+        assert!(target.matches(0, "0:code"));
+        assert!(!target.matches(-1, "0"));
+        assert!(!target.matches(10, "10"));
+
+        for ambiguous_name in ["'0'", "'0:code'"] {
+            let error =
+                parse(&PROFILE.replace("workspace: 3", &format!("workspace: {ambiguous_name}")))
+                    .unwrap_err();
+            assert!(error.contains("ambiguous"), "{ambiguous_name}: {error}");
+        }
+
+        let error = parse(
+            &PROFILE
+                .replace("workspace: 3", "workspace: 0")
+                .replace("workspace: 1", "workspace: 0"),
+        )
+        .unwrap_err();
+        assert!(error.contains("duplicate workspace number 0"), "{error}");
+        assert!(error.contains("workspaces[1].workspace"), "{error}");
     }
 
     #[test]

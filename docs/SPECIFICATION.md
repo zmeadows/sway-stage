@@ -221,11 +221,11 @@ workspaces:
 
 `version` must be the unquoted integer `1`. `workspaces` is a required sequence of 1 to
 256 mappings, each with required `workspace` and `layout` fields and optional `output`. Workspace
-targets must be unique. Unquoted positive integers from `1` to `999999999` select by
-numeric identity, including existing descriptive names such as `1:code`. YAML strings
+targets must be unique. Unquoted integers from `0` to `999999999` select by numeric
+identity, including existing descriptive names such as `1:code` or `0:code`. YAML strings
 select by exact, case-sensitive name and require Sway's observed workspace number to be
-`-1`. Quoted numeric strings (`"1"`) and numeric-prefixed names (`"1:code"`) are rejected
-as ambiguous; use the integer `1` for a numbered workspace. Booleans, null, floats,
+`-1`. Quoted numeric strings (`"1"`, `"0"`) and numeric-prefixed names (`"1:code"`) are
+rejected as ambiguous; use the integer `1` for a numbered workspace. Booleans, null, floats,
 negative numbers, sequences, and mappings are invalid targets. Entry order is preserved,
 even when numbers are out of numerical order; layouts may be referenced repeatedly.
 
