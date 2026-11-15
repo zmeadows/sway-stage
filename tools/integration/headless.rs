@@ -52,9 +52,16 @@ pub const FIRST_OUTPUT_INITIAL_WORKSPACE: &str = "1";
 pub const SECOND_OUTPUT_INITIAL_WORKSPACE: &str = "2";
 /// ...and create this one there when it is first selected.
 pub const SECOND_OUTPUT_ASSIGNED_WORKSPACE: &str = "3";
+/// The two-output session's `workspace NAME output OUTPUT` rules. Sway creates any other
+/// workspace on the focused output.
+pub const TWO_OUTPUT_WORKSPACE_RULES: [(&str, &str); 3] = [
+    (FIRST_OUTPUT_INITIAL_WORKSPACE, OUTPUT_NAME),
+    (SECOND_OUTPUT_INITIAL_WORKSPACE, SECOND_OUTPUT_NAME),
+    (SECOND_OUTPUT_ASSIGNED_WORKSPACE, SECOND_OUTPUT_NAME),
+];
 
 /// The virtual outputs of one session's compositor. Every scenario runs with one output,
-/// except the dedicated cross-output scenario, which needs a second.
+/// except the dedicated two-output profile scenarios, which need a second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputSetup {
     OneOutput,
@@ -393,11 +400,7 @@ focus_follows_mouse no
     // Sway's own workspace rules, as a user would configure placement: each output starts
     // with its own workspace, and Sway creates the assigned one on the second output.
     if setup == OutputSetup::TwoOutputs {
-        for (workspace, output) in [
-            (FIRST_OUTPUT_INITIAL_WORKSPACE, OUTPUT_NAME),
-            (SECOND_OUTPUT_INITIAL_WORKSPACE, SECOND_OUTPUT_NAME),
-            (SECOND_OUTPUT_ASSIGNED_WORKSPACE, SECOND_OUTPUT_NAME),
-        ] {
+        for (workspace, output) in TWO_OUTPUT_WORKSPACE_RULES {
             configuration.push_str(&format!("workspace {workspace} output {output}\n"));
         }
         // The backend decides which output Sway enables, and so focuses, first. Sway defers

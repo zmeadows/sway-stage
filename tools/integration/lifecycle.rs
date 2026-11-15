@@ -231,7 +231,7 @@ pub fn run(setup: OutputSetup, filter: Option<&str>) -> bool {
 
     let execution = match setup {
         OutputSetup::OneOutput => harness.execute(&selected),
-        OutputSetup::TwoOutputs => harness.execute_two_outputs(),
+        OutputSetup::TwoOutputs => harness.execute_two_outputs(&selected),
     };
     let result = execution.and_then(|()| process::check_interruption());
     let mut failed = result.is_err();
@@ -454,8 +454,9 @@ impl Harness {
     }
 
     /// The two-output session: the same foreign fixture on workspace "1" of the first
-    /// output, then the cross-output profile, which is its only scenario.
-    fn execute_two_outputs(&mut self) -> Result<(), String> {
+    /// output, then the selected scenarios in suite order. The cross-output profile removes
+    /// the second output's initial workspace, so it runs last.
+    fn execute_two_outputs(&mut self, selected: &[&'static str]) -> Result<(), String> {
         self.stage = "fresh two-output compositor".into();
         let initial = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&initial.window_events, None)?;
@@ -463,11 +464,20 @@ impl Harness {
             verify_fresh_two_output_compositor(&initial, &self.sway.get_outputs()?)?;
         // From here on, every fence rejects a workspace focus change we did not request.
         self.events.set_current_workspace(initial_workspace);
+        // Every scenario requires this exact workspace, never a replacement with its name.
+        let second_output_workspace =
+            profile::Target::record(&initial, SECOND_OUTPUT_INITIAL_WORKSPACE)?
+                .ok_or("the second output's initial workspace is missing")?
+                .workspace;
 
         self.stage = "configuration preparation".into();
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
         self.prepare_fixture(&directory)?;
-        self.run_cross_output_profile(&directory)?;
+
+        if selected.contains(&profile::CROSS_OUTPUT_SCENARIO) {
+            process::check_interruption()?;
+            self.run_cross_output_profile(&directory, &second_output_workspace)?;
+        }
         self.verify_fixture_survived()
     }
 
@@ -477,6 +487,7 @@ impl Harness {
     fn run_cross_output_profile(
         &mut self,
         directory: &TemporaryConfigurations,
+        second_output_workspace: &WorkspaceIdentity,
     ) -> Result<(), String> {
         let name = profile::CROSS_OUTPUT_SCENARIO;
         let target_name = SECOND_OUTPUT_ASSIGNED_WORKSPACE;
@@ -523,10 +534,11 @@ impl Harness {
         let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
         let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
         verify_fixture_state(&before, fixture, fixture_signature)?;
-        let baseline = profile::CrossOutputBaseline::record(
+        let baseline = profile::TwoOutputBaseline::record(
             &before,
             &self.sway.get_outputs()?,
             &fixture.workspace,
+            second_output_workspace,
         )?;
         let preexisting: HashSet<i64> = walk(&before.tree)
             .iter()
@@ -563,7 +575,7 @@ impl Harness {
                 from_id: fixture.workspace.id,
                 to: &target.workspace,
             },
-            profile::ExpectedWorkspaceEvent::Empty(&baseline.hidden_workspace),
+            profile::ExpectedWorkspaceEvent::Empty(&baseline.second_output_workspace),
         ];
         profile::verify_workspace_events(&loaded.workspace_events, &expected_events).map_err(
             |error| {
@@ -572,7 +584,7 @@ impl Harness {
                 )
             },
         )?;
-        baseline.verify_result(&loaded, &target.workspace, fixture.workspace.id)?;
+        baseline.verify_cross_output_result(&loaded, &target.workspace, fixture.workspace.id)?;
         verify_fixture_state(&loaded, fixture, fixture_signature)?;
 
         // Nothing may launch before the switch; afterwards, only this layout's windows.
@@ -605,7 +617,9 @@ impl Harness {
         }
         println!(
             "      workspace {target_name} id={} created on {SECOND_OUTPUT_NAME}; Sway removed the hidden empty workspace {} id={}; fixture workspace stayed on {OUTPUT_NAME}",
-            target.workspace.id, baseline.hidden_workspace.name, baseline.hidden_workspace.id
+            target.workspace.id,
+            baseline.second_output_workspace.name,
+            baseline.second_output_workspace.id
         );
 
         // Only an independently verified expected outcome enters cleanup.

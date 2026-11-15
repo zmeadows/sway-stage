@@ -763,6 +763,13 @@ const CREATED_WORKSPACE_ID: i64 = 13;
 /// HEADLESS-2's container in `two_output_desktop`.
 const SECOND_OUTPUT_ID: i64 = 12;
 
+fn second_output_workspace() -> WorkspaceIdentity {
+    WorkspaceIdentity {
+        id: SECOND_OUTPUT_WORKSPACE_ID,
+        name: "2".into(),
+    }
+}
+
 fn fixture_workspace() -> WorkspaceIdentity {
     WorkspaceIdentity {
         id: OTHER_WORKSPACE_ID,
@@ -834,12 +841,17 @@ fn cross_output_loaded(keep_hidden_workspace: bool) -> Snapshot {
 }
 
 #[test]
-fn cross_output_baseline_requires_the_empty_initial_workspace_shown_on_the_second_output() {
+fn two_output_baseline_requires_the_original_empty_initial_workspace_shown_on_the_second_output() {
     let before = cross_output_before();
-    let baseline =
-        CrossOutputBaseline::record(&before, &two_output_outputs(), &fixture_workspace()).unwrap();
+    let baseline = TwoOutputBaseline::record(
+        &before,
+        &two_output_outputs(),
+        &fixture_workspace(),
+        &second_output_workspace(),
+    )
+    .unwrap();
     assert_eq!(
-        baseline.hidden_workspace,
+        baseline.second_output_workspace,
         WorkspaceIdentity {
             id: SECOND_OUTPUT_WORKSPACE_ID,
             name: "2".into(),
@@ -853,19 +865,29 @@ fn cross_output_baseline_requires_the_empty_initial_workspace_shown_on_the_secon
         crate::fixtures::rect(0, 0, 10, 10),
     ))];
     assert!(
-        CrossOutputBaseline::record(&occupied, &two_output_outputs(), &fixture_workspace())
-            .err()
-            .unwrap()
-            .contains("must be empty")
+        TwoOutputBaseline::record(
+            &occupied,
+            &two_output_outputs(),
+            &fixture_workspace(),
+            &second_output_workspace()
+        )
+        .err()
+        .unwrap()
+        .contains("must be empty")
     );
 
     let mut not_shown = two_output_outputs();
     not_shown[1].current_workspace = Some("4".into());
     assert!(
-        CrossOutputBaseline::record(&before, &not_shown, &fixture_workspace())
-            .err()
-            .unwrap()
-            .contains("shown on HEADLESS-2")
+        TwoOutputBaseline::record(
+            &before,
+            &not_shown,
+            &fixture_workspace(),
+            &second_output_workspace()
+        )
+        .err()
+        .unwrap()
+        .contains("shown on HEADLESS-2")
     );
 
     let other_fixture = WorkspaceIdentity {
@@ -873,13 +895,35 @@ fn cross_output_baseline_requires_the_empty_initial_workspace_shown_on_the_secon
         name: "2".into(),
     };
     assert!(
-        CrossOutputBaseline::record(&before, &two_output_outputs(), &other_fixture)
-            .err()
-            .unwrap()
-            .contains("start on the fixture workspace")
+        TwoOutputBaseline::record(
+            &before,
+            &two_output_outputs(),
+            &other_fixture,
+            &second_output_workspace()
+        )
+        .err()
+        .unwrap()
+        .contains("start on the fixture workspace")
     );
 
-    // The target must still be absent, so that the load creates it.
+    // A workspace "2" with another identity replaced the original one.
+    let replaced = WorkspaceIdentity {
+        id: CREATED_WORKSPACE_ID,
+        name: "2".into(),
+    };
+    assert!(
+        TwoOutputBaseline::record(
+            &before,
+            &two_output_outputs(),
+            &fixture_workspace(),
+            &replaced
+        )
+        .err()
+        .unwrap()
+        .contains("initial workspace was replaced")
+    );
+
+    // No other workspace: in particular, a target that a load must create is still absent.
     let mut created_early_tree = cross_output_before_tree();
     let mut created_early_workspace =
         node_mut(&mut created_early_tree, SECOND_OUTPUT_WORKSPACE_ID).clone();
@@ -905,19 +949,25 @@ fn cross_output_baseline_requires_the_empty_initial_workspace_shown_on_the_secon
         workspace_events: Vec::new(),
     };
     assert!(
-        CrossOutputBaseline::record(&created_early, &two_output_outputs(), &fixture_workspace())
-            .err()
-            .unwrap()
-            .contains("must not exist")
+        TwoOutputBaseline::record(
+            &created_early,
+            &two_output_outputs(),
+            &fixture_workspace(),
+            &second_output_workspace()
+        )
+        .err()
+        .unwrap()
+        .contains("exists beside the two initial workspaces")
     );
 }
 
 #[test]
 fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture() {
-    let baseline = CrossOutputBaseline::record(
+    let baseline = TwoOutputBaseline::record(
         &cross_output_before(),
         &two_output_outputs(),
         &fixture_workspace(),
+        &second_output_workspace(),
     )
     .unwrap();
     let created = WorkspaceIdentity {
@@ -925,12 +975,12 @@ fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture()
         name: "3".into(),
     };
     baseline
-        .verify_result(&cross_output_loaded(false), &created, OTHER_WORKSPACE_ID)
+        .verify_cross_output_result(&cross_output_loaded(false), &created, OTHER_WORKSPACE_ID)
         .unwrap();
 
     assert!(
         baseline
-            .verify_result(&cross_output_loaded(true), &created, OTHER_WORKSPACE_ID)
+            .verify_cross_output_result(&cross_output_loaded(true), &created, OTHER_WORKSPACE_ID)
             .unwrap_err()
             .contains("still exists")
     );
@@ -941,7 +991,7 @@ fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture()
     wrong_output.tree.nodes[1].nodes.push(target);
     assert!(
         baseline
-            .verify_result(&wrong_output, &created, OTHER_WORKSPACE_ID)
+            .verify_cross_output_result(&wrong_output, &created, OTHER_WORKSPACE_ID)
             .unwrap_err()
             .contains("not on the second output")
     );
@@ -952,7 +1002,7 @@ fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture()
     moved_fixture.tree.nodes[2].nodes.push(fixture);
     assert!(
         baseline
-            .verify_result(&moved_fixture, &created, OTHER_WORKSPACE_ID)
+            .verify_cross_output_result(&moved_fixture, &created, OTHER_WORKSPACE_ID)
             .unwrap_err()
             .contains("fixture workspace changed output")
     );
@@ -963,7 +1013,7 @@ fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture()
     };
     assert!(
         baseline
-            .verify_result(&cross_output_loaded(false), &unfocused, OTHER_WORKSPACE_ID)
+            .verify_cross_output_result(&cross_output_loaded(false), &unfocused, OTHER_WORKSPACE_ID)
             .is_err()
     );
 }
