@@ -497,6 +497,40 @@ fn inconsistent_snapshots_are_rejected() {
 }
 
 #[test]
+fn focus_leaving_the_frozen_target_between_queries_is_a_sticky_focus_loss() {
+    // The workspace reply still names target 10, but the tree, queried after focus moved,
+    // focuses workspace 11 instead.
+    let mut focus_elsewhere = empty_workspace_tree();
+    focus_elsewhere["nodes"][0]["nodes"] =
+        json!([node(10, "workspace", false), node(11, "workspace", true)]);
+
+    let (mut observer, mut events) = initialized_observer();
+    let error = snapshot(
+        &mut observer,
+        &mut events,
+        focused_workspace_reply(),
+        focus_elsewhere.clone(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.cause, Some(Cause::FocusLost));
+    assert!(error.detail.contains("focus left target id=10"), "{error}");
+    assert!(observer.next_until(ipc_deadline()).is_err());
+
+    // Without a frozen target, the same replies are only inconsistent.
+    let (mut observer, mut events) = subscribed_observer();
+    let error = snapshot(
+        &mut observer,
+        &mut events,
+        focused_workspace_reply(),
+        focus_elsewhere,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.cause, Some(Cause::InconsistentWorkspaces));
+}
+
+#[test]
 fn query_deadline_cancels_stalled_or_fragmented_replies_and_poison_observation() {
     for event_bytes in [Vec::new(), ipc_frame(1, b"[]")[..15].to_vec()] {
         let (mut observer, _events) = initialized_observer();

@@ -482,6 +482,7 @@ impl Observer {
             ));
         }
 
+        let target_was_frozen = self.target_workspace_id.is_some();
         if let Some(original_workspace_id) = self.target_workspace_id
             && original_workspace_id != target_workspace_id
         {
@@ -519,10 +520,27 @@ impl Observer {
                 "snapshot: target workspace missing from tree",
             ));
         };
+        let target_focused_node_count = workspace.iter().filter(|node| node.focused).count();
+        let tree_focused_node_count = tree.iter().filter(|node| node.focused).count();
         if workspace.node_type != NodeType::Workspace
-            || workspace.iter().filter(|node| node.focused).count() != 1
-            || tree.iter().filter(|node| node.focused).count() != 1
+            || target_focused_node_count != 1
+            || tree_focused_node_count != 1
         {
+            // The workspace reply still names the frozen target, but the later tree focuses
+            // one node outside it: focus left the target between the two queries. Report the
+            // focus loss, which the fence would otherwise only reveal after this check.
+            let focus_left_between_queries = target_was_frozen
+                && workspace.node_type == NodeType::Workspace
+                && target_focused_node_count == 0
+                && tree_focused_node_count == 1;
+            if focus_left_between_queries {
+                return self.fail(Failure::new(
+                    Cause::FocusLost,
+                    format!(
+                        "snapshot: focus left target id={target_workspace_id} between workspace and tree queries"
+                    ),
+                ));
+            }
             return self.fail(Failure::new(
                 Cause::InconsistentWorkspaces,
                 "snapshot: workspace/tree focus is inconsistent",
