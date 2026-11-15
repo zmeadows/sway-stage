@@ -1,5 +1,7 @@
 # sway-stage
 
+[![CI](https://github.com/zmeadows/sway-stage/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zmeadows/sway-stage/actions/workflows/ci.yml?query=branch%3Amain) [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Turn an empty Sway workspace into a repeatable working layout.
 
 `sway-stage` reads a YAML file, launches applications sequentially into nested tiles,
