@@ -1,9 +1,10 @@
 use crate::diagnostics::Diagnostics;
+use crate::discovery::{self, ConfigDirectory};
 use crate::observation::{self, Observer, WorkspaceSnapshot};
-use crate::{config, discovery, launch};
+use crate::{config, launch};
 use serde::{Deserialize, Serialize};
 use serde_saphyr::Spanned;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -163,7 +164,7 @@ pub fn read_named(
 ) -> Result<PreparedProfile, String> {
     let (path, profile) = read_definition(name, profiles_dir)?;
 
-    let layout_directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
+    let layout_directory = ConfigDirectory::layouts(layouts_dir)?;
     let layouts = layout_directory.discover()?;
     let mut workspaces = Vec::with_capacity(profile.workspaces.len());
     for (entry_index, entry) in profile.workspaces.iter().enumerate() {
@@ -176,10 +177,10 @@ pub fn read_named(
             location.line(),
             location.column()
         );
-        if let Some(error) = layouts.ambiguities.get(layout_name) {
-            return Err(format!("{context}: {error}"));
-        }
-        let Some(layout_path) = layouts.layouts.get(layout_name) else {
+        let layout_path = layouts
+            .lookup(layout_name)
+            .map_err(|ambiguity| format!("{context}: {ambiguity}"))?;
+        let Some(layout_path) = layout_path else {
             return Err(format!(
                 "{context}: layout {layout_name:?} not found in {}; use list to see available layouts",
                 layout_directory.path.display()
@@ -192,7 +193,7 @@ pub fn read_named(
             workspace: entry.value.workspace.clone(),
             output: entry.value.output.clone(),
             layout_name: layout_name.clone(),
-            layout_path: layout_path.clone(),
+            layout_path: layout_path.to_path_buf(),
             config,
         });
     }
@@ -710,99 +711,11 @@ fn event_matches_workspace(node: &swayipc::Node, workspace: &WorkspaceIdentity) 
         && node.name.as_deref() == Some(workspace.name.as_str())
 }
 
-/// Immediate, unambiguous profile names; the menu intentionally omits filename warnings.
-pub fn discover_names(profiles_dir: Option<PathBuf>) -> Result<Vec<String>, String> {
-    let (names, _) = discover_names_with_warnings(profiles_dir)?;
-    Ok(names)
-}
-
-/// Discover names without parsing contents, retaining recoverable filename problems for list.
-pub fn discover_names_with_warnings(
-    profiles_dir: Option<PathBuf>,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let (directory, is_explicit) = profile_directory(profiles_dir)?;
-    let mut paths_by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    let mut warnings = Vec::new();
-    for path in discovery::yaml_paths(&directory, !is_explicit)? {
-        let name = path.file_stem().and_then(|stem| stem.to_str());
-        let Some(name) = name.filter(|name| discovery::valid_name(name)) else {
-            warnings.push(format!(
-                "skipping invalid profile filename {:?}; use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml",
-                path.file_name().expect("directory entry has a filename")
-            ));
-            continue;
-        };
-
-        paths_by_name.entry(name.to_owned()).or_default().push(path);
-    }
-
-    let mut names = Vec::new();
-    for (name, paths) in paths_by_name {
-        if paths.len() == 1 {
-            names.push(name);
-        } else {
-            let filenames = paths
-                .iter()
-                .map(|path| format!("{:?}", path.file_name().expect("entry has a filename")))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            warnings.push(format!(
-                "ambiguous profile name {name:?}: {filenames}; rename one file"
-            ));
-        }
-    }
-
-    Ok((names, warnings))
-}
-
-pub(crate) fn profile_directory(profiles_dir: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
-    let is_explicit = profiles_dir.is_some();
-    let directory = match profiles_dir {
-        Some(path) => {
-            if path.as_os_str().is_empty() {
-                return Err("--profiles-dir must not be empty".into());
-            }
-            path
-        }
-        None => discovery::config_home()?.join("sway-stage/profiles"),
-    };
-
-    Ok((directory, is_explicit))
-}
-
 fn find_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<PathBuf, String> {
-    if !discovery::valid_name(name) {
-        return Err(format!(
-            "invalid profile name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
-        ));
-    }
-
-    let (directory, is_explicit) = profile_directory(profiles_dir)?;
-
-    let mut matching_paths = Vec::new();
-    for path in discovery::yaml_paths(&directory, !is_explicit)? {
-        if path.file_stem().and_then(|stem| stem.to_str()) == Some(name) {
-            matching_paths.push(path);
-        }
-    }
-
-    match matching_paths.as_slice() {
-        [] => Err(format!(
-            "profile {name:?} not found in {}",
-            directory.display()
-        )),
-        [path] => Ok(path.clone()),
-        _ => {
-            let filenames = matching_paths
-                .iter()
-                .map(|path| format!("{:?}", path.file_name().expect("entry has a filename")))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            Err(format!(
-                "ambiguous profile name {name:?}: {filenames}; rename one file"
-            ))
-        }
-    }
+    let directory = ConfigDirectory::profiles(profiles_dir)?;
+    directory
+        .find(name)?
+        .ok_or_else(|| format!("profile {name:?} not found in {}", directory.path.display()))
 }
 
 fn parse(input: &str) -> Result<Profile, String> {

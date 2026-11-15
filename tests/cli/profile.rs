@@ -704,3 +704,143 @@ fn profile_show_displays_only_configured_output_expectations() {
     );
     assert!(output.stderr.is_empty());
 }
+
+/// Layouts and profiles share one discovery contract; given the same directory, their
+/// listings, warnings, resolution errors, and directory failures differ only by noun.
+#[test]
+fn layout_and_profile_discovery_agree_on_equivalent_directories() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = CliFixture::new();
+    fs::create_dir(fixture.path.join("configs")).unwrap();
+    // Create in reverse lexical order so sorted output cannot come from creation order.
+    for filename in [
+        "z.yaml",
+        "é.yaml",
+        "same.yml",
+        "same.yaml",
+        "bad name.yaml",
+        "a.yml",
+        "_bad.yml",
+        "A-1.yaml",
+        "ignored.YAML",
+        "ignored.txt",
+    ] {
+        fixture.file(&format!("configs/{filename}"), "");
+    }
+    fs::write(
+        fixture
+            .path
+            .join("configs")
+            .join(OsString::from_vec(b"bad\xff.yaml".to_vec())),
+        "",
+    )
+    .unwrap();
+    fs::create_dir(fixture.path.join("configs/directory.yaml")).unwrap();
+    fs::create_dir(fixture.path.join("configs/nested")).unwrap();
+    fixture.file("configs/nested/hidden.yaml", "");
+    symlink("z.yaml", fixture.path.join("configs/link.yaml")).unwrap();
+    symlink("absent", fixture.path.join("configs/dangling.yml")).unwrap();
+
+    let layout_list = fixture.run(&["--layouts-dir", "configs", "list"], 0);
+    let profile_list = fixture.run(&["--profiles-dir", "configs", "profile", "list"], 0);
+    assert_eq!(layout_list.stdout, b"A-1\na\nz\n");
+    assert_eq!(profile_list.stdout, layout_list.stdout);
+
+    // Invalid filenames in path order, then ambiguous names in lexical order.
+    let filename_rule = "use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml";
+    let expected_layout_warnings = [
+        format!("sway-stage: warning: skipping invalid layout filename \"_bad.yml\"; {filename_rule}"),
+        format!(
+            "sway-stage: warning: skipping invalid layout filename \"bad name.yaml\"; {filename_rule}"
+        ),
+        format!(
+            "sway-stage: warning: skipping invalid layout filename \"bad\\xFF.yaml\"; {filename_rule}"
+        ),
+        format!("sway-stage: warning: skipping invalid layout filename \"é.yaml\"; {filename_rule}"),
+        "sway-stage: warning: ambiguous layout name \"same\": \"same.yaml\" and \"same.yml\"; rename one file".into(),
+    ]
+    .map(|line| line + "\n")
+    .concat();
+    let layout_warnings = String::from_utf8(layout_list.stderr).unwrap();
+    let profile_warnings = String::from_utf8(profile_list.stderr).unwrap();
+    assert_eq!(layout_warnings, expected_layout_warnings);
+    assert_eq!(
+        profile_warnings,
+        layout_warnings.replace(" layout ", " profile ")
+    );
+
+    // Explicit resolution: ambiguity, absence (including ineligible entries), and the name
+    // grammar. Only the command prefix and noun differ; not-found hints stay command-specific.
+    for name in [
+        "same",
+        "missing",
+        "link",
+        "dangling",
+        "directory",
+        "hidden",
+        "ignored",
+        "bad name",
+        "_bad",
+    ] {
+        let layout_error = fixture.run(&["--layouts-dir", "configs", "check", name], 1);
+        let profile_error = fixture.run(&["--profiles-dir", "configs", "profile", "show", name], 1);
+        let layout_error = String::from_utf8(layout_error.stderr).unwrap();
+        let profile_error = String::from_utf8(profile_error.stderr).unwrap();
+        let layout_detail = layout_error
+            .strip_prefix("sway-stage: check: ")
+            .unwrap_or_else(|| panic!("{layout_error}"));
+        let profile_detail = profile_error
+            .strip_prefix("sway-stage: profile show: ")
+            .unwrap_or_else(|| panic!("{profile_error}"));
+
+        if layout_detail.contains("not found in configs") {
+            assert_eq!(
+                profile_detail,
+                format!("profile {name:?} not found in configs\n")
+            );
+        } else {
+            assert_eq!(profile_detail, layout_detail.replace("layout", "profile"));
+        }
+        let expected = match name {
+            "same" => "ambiguous layout name \"same\": \"same.yaml\" and \"same.yml\"",
+            "bad name" | "_bad" => "invalid layout name",
+            _ => "not found in configs",
+        };
+        assert!(layout_detail.contains(expected), "{name}: {layout_detail}");
+    }
+
+    // A missing explicit directory is fatal for listing and resolution alike.
+    for (layout_arguments, profile_arguments) in [
+        (vec!["list"], vec!["profile", "list"]),
+        (vec!["check", "a"], vec!["profile", "show", "a"]),
+    ] {
+        let layout_error = fixture.run(
+            &[&["--layouts-dir", "missing"], layout_arguments.as_slice()].concat(),
+            1,
+        );
+        let profile_error = fixture.run(
+            &[&["--profiles-dir", "missing"], profile_arguments.as_slice()].concat(),
+            1,
+        );
+        let layout_error = String::from_utf8(layout_error.stderr).unwrap();
+        let profile_error = String::from_utf8(profile_error.stderr).unwrap();
+        let (_, layout_detail) = layout_error.split_once(": read directory").unwrap();
+        let (_, profile_detail) = profile_error.split_once(": read directory").unwrap();
+        assert_eq!(profile_detail, layout_detail);
+    }
+
+    // Missing default directories are empty for listing but report absence on resolution.
+    let layout_list = fixture.run(&["list"], 0);
+    let profile_list = fixture.run(&["profile", "list"], 0);
+    for output in [&layout_list, &profile_list] {
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    let layout_error = fixture.run(&["check", "a"], 1);
+    let profile_error = fixture.run(&["profile", "show", "a"], 1);
+    assert!(String::from_utf8_lossy(&layout_error.stderr).contains("not found in"));
+    assert!(String::from_utf8_lossy(&profile_error.stderr).contains("not found in"));
+    assert!(!fixture.path.join(".config").exists());
+}

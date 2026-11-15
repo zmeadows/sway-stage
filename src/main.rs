@@ -13,6 +13,7 @@ mod profile_capture;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use diagnostics::Diagnostics;
+use discovery::{ConfigDirectory, Discovery};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -177,14 +178,18 @@ fn help() -> io::Result<()> {
 }
 
 fn list(layouts_dir: Option<PathBuf>) -> Result<(), String> {
-    let discovery = discovery::LayoutDirectory::resolve(layouts_dir)?.discover()?;
+    let discovery = ConfigDirectory::layouts(layouts_dir)?.discover()?;
+    print_discovered_names(&discovery)
+}
 
+/// Warnings go to stderr so stdout lists only usable names.
+fn print_discovered_names(discovery: &Discovery) -> Result<(), String> {
     for warning in discovery.warnings() {
         let _ = writeln!(io::stderr().lock(), "sway-stage: warning: {warning}");
     }
 
     let mut stdout = io::stdout().lock();
-    for name in discovery.layouts.keys() {
+    for name in discovery.files.keys() {
         writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
     }
 
@@ -198,18 +203,8 @@ fn check(name: &str, layouts_dir: Option<PathBuf>) -> Result<(), String> {
 }
 
 fn list_profiles(profiles_dir: Option<PathBuf>) -> Result<(), String> {
-    let (names, warnings) = profile::discover_names_with_warnings(profiles_dir)?;
-
-    for warning in warnings {
-        let _ = writeln!(io::stderr().lock(), "sway-stage: warning: {warning}");
-    }
-
-    let mut stdout = io::stdout().lock();
-    for name in names {
-        writeln!(stdout, "{name}").map_err(|error| format!("stdout: {error}"))?;
-    }
-
-    Ok(())
+    let discovery = ConfigDirectory::profiles(profiles_dir)?.discover()?;
+    print_discovered_names(&discovery)
 }
 
 fn show_profile(name: &str, profiles_dir: Option<PathBuf>) -> Result<(), String> {
@@ -314,19 +309,8 @@ fn read_named_layout(
 
 /// Resolves a layout name to its discovered file. Parses no layout contents.
 fn find_layout(name: &str, layouts_dir: Option<PathBuf>) -> Result<PathBuf, String> {
-    if !discovery::valid_name(name) {
-        return Err(format!(
-            "invalid layout name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*"
-        ));
-    }
-
-    let directory = discovery::LayoutDirectory::resolve(layouts_dir)?;
-    let mut discovery = directory.discover()?;
-    if let Some(error) = discovery.ambiguities.get(name) {
-        return Err(error.clone());
-    }
-
-    discovery.layouts.remove(name).ok_or_else(|| {
+    let directory = ConfigDirectory::layouts(layouts_dir)?;
+    directory.find(name)?.ok_or_else(|| {
         format!(
             "layout {name:?} not found in {}; use list to see available layouts",
             directory.path.display()

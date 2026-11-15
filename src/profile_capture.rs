@@ -1,9 +1,10 @@
 //! One frozen Sway observation, complete in-memory drafts, then profile-last publication.
 
 use crate::capture::{self, CommandCounts, RenderedDraft, Snapshot};
+use crate::discovery::{self, ConfigDirectory};
+use crate::draft_file;
 use crate::draft_file::DraftSaveError;
-use crate::profile::{self, MAX_WORKSPACES, WorkspaceTarget};
-use crate::{discovery, draft_file};
+use crate::profile::{MAX_WORKSPACES, WorkspaceTarget};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
@@ -94,8 +95,8 @@ pub fn capture(
             error,
         )
     })?;
-    let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)?.path;
-    let (profiles_directory, _) = profile::profile_directory(profiles_dir)?;
+    let layouts_directory = ConfigDirectory::layouts(layouts_dir)?.path;
+    let profiles_directory = ConfigDirectory::profiles(profiles_dir)?.path;
 
     let snapshot = capture::snapshot().map_err(|error| format!("snapshot: {error}"))?;
     let prepared = prepare(&snapshot, &targets, all, infer_commands)?;

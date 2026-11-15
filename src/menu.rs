@@ -1,10 +1,11 @@
 //! Optional synchronous Fuzzel interface and private, non-overwriting saves of captured
 //! drafts into the layouts directory.
 
+use crate::discovery::ConfigDirectory;
 use crate::draft_file::{DraftSaveError, save_draft};
 #[cfg(test)]
 use crate::draft_file::{publish_draft, reject_existing_layout, validate_draft_name};
-use crate::{capture, config, diagnostics, discovery, profile, profile_capture};
+use crate::{capture, config, diagnostics, profile, profile_capture};
 use std::fs;
 #[cfg(test)]
 use std::fs::{File, OpenOptions};
@@ -67,11 +68,11 @@ pub fn select_action(
     let mut unavailable = Vec::new();
     match snapshot {
         Ok(snapshot) if snapshot.workspace_is_empty() => {
-            let layouts = discovery::LayoutDirectory::resolve(layouts_dir.clone())
+            let layouts = ConfigDirectory::layouts(layouts_dir.clone())
                 .and_then(|directory| directory.discover());
             match layouts {
                 Ok(discovery) => {
-                    for (name, path) in discovery.layouts {
+                    for (name, path) in discovery.files {
                         choices.push((MenuAction::Layout(name), config::read(&path).is_ok()));
                     }
                     if choices.is_empty() {
@@ -115,9 +116,12 @@ pub fn select_action(
         }
     }
 
-    match profile::discover_names(profiles_dir.clone()) {
-        Ok(names) => {
-            for name in names {
+    // The menu omits invalid and ambiguous filenames without reporting their warnings.
+    let profiles =
+        ConfigDirectory::profiles(profiles_dir.clone()).and_then(|directory| directory.discover());
+    match profiles {
+        Ok(discovery) => {
+            for name in discovery.files.into_keys() {
                 let is_valid =
                     profile::read_named(&name, profiles_dir.clone(), layouts_dir.clone()).is_ok();
                 choices.push((MenuAction::Profile(name), is_valid));
@@ -344,7 +348,7 @@ pub fn capture_draft(
             return Ok(());
         };
 
-        let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir.clone())
+        let layouts_directory = ConfigDirectory::layouts(layouts_dir.clone())
             .map_err(|error| Error::new(FailureKind::DraftSave, error))?;
         match save_draft(&layouts_directory.path, &name, &draft.yaml) {
             Ok(_) => {
@@ -371,10 +375,10 @@ pub fn capture_profile(
     };
     let prepared =
         profile_capture::prepare(snapshot, &[], true, infer_commands).map_err(profile_error)?;
-    let layouts_directory = discovery::LayoutDirectory::resolve(layouts_dir)
-        .map_err(|error| profile_error(error.into()))?;
-    let (profiles_directory, _) =
-        profile::profile_directory(profiles_dir).map_err(|error| profile_error(error.into()))?;
+    let layouts_directory =
+        ConfigDirectory::layouts(layouts_dir).map_err(|error| profile_error(error.into()))?;
+    let profiles_directory =
+        ConfigDirectory::profiles(profiles_dir).map_err(|error| profile_error(error.into()))?;
 
     let mut placeholder = None;
     loop {
@@ -389,7 +393,7 @@ pub fn capture_profile(
             return Ok(());
         };
 
-        match prepared.save(&name, &layouts_directory.path, &profiles_directory) {
+        match prepared.save(&name, &layouts_directory.path, &profiles_directory.path) {
             Ok(()) => {
                 diagnostics::notify_profile_saved(
                     prepared.workspace_count(),

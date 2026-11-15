@@ -3,57 +3,114 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub struct LayoutDirectory {
+/// Layouts and profiles share one filename contract; their kind names only the
+/// configuration directory and the noun in diagnostics.
+#[derive(Clone, Copy)]
+pub enum ConfigKind {
+    Layout,
+    Profile,
+}
+
+impl ConfigKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Layout => "layout",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+pub struct ConfigDirectory {
     pub path: PathBuf,
+    kind: ConfigKind,
     is_explicit: bool,
 }
 
 /// Recoverable filename problems stay separate from fatal directory I/O errors.
 #[derive(Default)]
 pub struct Discovery {
-    pub layouts: BTreeMap<String, PathBuf>,
-    pub ambiguities: BTreeMap<String, String>,
+    pub files: BTreeMap<String, PathBuf>,
+    /// Each ambiguous name maps to its complete diagnostic.
+    ambiguities: BTreeMap<String, String>,
     invalid_filenames: Vec<String>,
 }
 
 impl Discovery {
+    /// Invalid filenames in path order, then ambiguous names in lexical order.
     pub fn warnings(&self) -> impl Iterator<Item = &str> {
         self.invalid_filenames
             .iter()
             .chain(self.ambiguities.values())
             .map(String::as_str)
     }
+
+    /// An ambiguous name is an error; an absent one is left to the caller's context.
+    pub fn lookup(&self, name: &str) -> Result<Option<&Path>, &str> {
+        if let Some(ambiguity) = self.ambiguities.get(name) {
+            return Err(ambiguity);
+        }
+
+        Ok(self.files.get(name).map(PathBuf::as_path))
+    }
 }
 
-impl LayoutDirectory {
-    pub fn resolve(explicit: Option<PathBuf>) -> Result<Self, String> {
+impl ConfigDirectory {
+    pub fn layouts(explicit: Option<PathBuf>) -> Result<Self, String> {
+        Self::resolve(
+            ConfigKind::Layout,
+            explicit,
+            "--layouts-dir",
+            "sway-stage/layouts",
+        )
+    }
+
+    pub fn profiles(explicit: Option<PathBuf>) -> Result<Self, String> {
+        Self::resolve(
+            ConfigKind::Profile,
+            explicit,
+            "--profiles-dir",
+            "sway-stage/profiles",
+        )
+    }
+
+    fn resolve(
+        kind: ConfigKind,
+        explicit: Option<PathBuf>,
+        option_name: &str,
+        default_subdirectory: &str,
+    ) -> Result<Self, String> {
         if let Some(path) = explicit {
             if path.as_os_str().is_empty() {
-                return Err("--layouts-dir must not be empty".into());
+                return Err(format!("{option_name} must not be empty"));
             }
 
             return Ok(Self {
                 path,
+                kind,
                 is_explicit: true,
             });
         }
 
         Ok(Self {
-            path: config_home()?.join("sway-stage/layouts"),
+            path: config_home()?.join(default_subdirectory),
+            kind,
             is_explicit: false,
         })
     }
 
+    /// Names without parsing contents. A missing default directory is empty, but a missing
+    /// explicit one is an error like any other directory failure.
     pub fn discover(&self) -> Result<Discovery, String> {
-        let layout_paths = yaml_paths(&self.path, !self.is_explicit)?;
+        let noun = self.kind.noun();
+        let yaml_paths = yaml_paths(&self.path, !self.is_explicit)?;
 
         let mut discovery = Discovery::default();
         let mut paths_by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-        for path in layout_paths {
+        for path in yaml_paths {
             let name = path.file_stem().and_then(|stem| stem.to_str());
             let Some(name) = name.filter(|name| valid_name(name)) else {
                 discovery.invalid_filenames.push(format!(
-                    "skipping invalid layout filename {:?}; use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml",
+                    "skipping invalid {noun} filename {:?}; use [A-Za-z0-9][A-Za-z0-9_-]* with .yaml or .yml",
                     path.file_name().expect("directory entry has a filename")
                 ));
                 continue;
@@ -64,7 +121,7 @@ impl LayoutDirectory {
 
         for (name, mut paths) in paths_by_name {
             if paths.len() == 1 {
-                discovery.layouts.insert(name, paths.remove(0));
+                discovery.files.insert(name, paths.remove(0));
             } else {
                 let filenames = paths
                     .iter()
@@ -73,17 +130,34 @@ impl LayoutDirectory {
                     .join(" and ");
                 discovery.ambiguities.insert(
                     name.clone(),
-                    format!("ambiguous layout name {name:?}: {filenames}; rename one file"),
+                    format!("ambiguous {noun} name {name:?}: {filenames}; rename one file"),
                 );
             }
         }
 
         Ok(discovery)
     }
+
+    /// Resolves an explicitly requested name to its unambiguous file, or `None` when no file
+    /// has that name. Parses no contents.
+    pub fn find(&self, name: &str) -> Result<Option<PathBuf>, String> {
+        if !valid_name(name) {
+            return Err(format!(
+                "invalid {} name {name:?}; use [A-Za-z0-9][A-Za-z0-9_-]*",
+                self.kind.noun()
+            ));
+        }
+
+        let discovery = self.discover()?;
+        match discovery.lookup(name) {
+            Ok(path) => Ok(path.map(Path::to_path_buf)),
+            Err(ambiguity) => Err(ambiguity.to_owned()),
+        }
+    }
 }
 
 /// Immediate regular YAML files in deterministic order; never follows file symlinks.
-pub(crate) fn yaml_paths(directory: &Path, missing_is_empty: bool) -> Result<Vec<PathBuf>, String> {
+fn yaml_paths(directory: &Path, missing_is_empty: bool) -> Result<Vec<PathBuf>, String> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && missing_is_empty => {
