@@ -250,5 +250,25 @@ only while iterating.
 
 CI is Linux-only. Report checks that could not run and meaningful limitations; do not
 install packages or toolchains without authorization. Do not commit or push unless asked.
-If asked to commit, use a short Conventional Commit subject without generated-by
-attribution or co-author trailers. External reference repositories are read-only.
+External reference repositories are read-only.
+
+**Commit messages.** If asked to commit, use a short, imperative Conventional Commit
+subject, `type(scope): description`, with an existing type such as `feat`, `fix`,
+`refactor`, `test`, `docs`, `chore`, or `ci`, and without generated-by attribution or
+co-author trailers. The scope is optional; use one only when the change clearly belongs
+to one of these subsystems:
+
+- `profile`: multi-workspace profile loading, selection, and validation.
+- `launch`: layout construction, application launching, and window observation.
+- `capture`: layout/profile capture and command inference.
+- `menu`: Fuzzel menu behavior and interactions.
+- `diagnostics`: failures, logging, and notifications.
+- `integration`: headless integration infrastructure and scenarios.
+- `cli`: top-level CLI parsing, commands, and interactions.
+
+Omit the scope for cross-cutting, documentation-only, or general CI changes, or when none
+fits naturally; never force a change into one. Do not invent other scopes; changing this
+list requires an explicit decision. It applies only to new commits: earlier messages remain
+valid, and history is never rewritten to match it. For example,
+`fix(launch): reject misplaced windows`, `test(integration): cover multi-output profiles`,
+`refactor: simplify shared configuration handling`, and `ci: run headless integration tests`.
