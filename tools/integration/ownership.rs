@@ -25,7 +25,7 @@ pub struct ExpectedClose<'a> {
 }
 
 /// Title, urgency, and mark changes alter neither structure nor identity.
-fn is_harmless(change: WindowChange) -> bool {
+pub fn is_harmless(change: WindowChange) -> bool {
     matches!(
         change,
         WindowChange::Title | WindowChange::Urgent | WindowChange::Mark

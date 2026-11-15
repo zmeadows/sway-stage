@@ -23,7 +23,8 @@ use crate::headless::{
     SECOND_OUTPUT_NAME, is_session_ipc_socket, verify_virtual_outputs,
 };
 use crate::ipc::{
-    IPC_TIMEOUT, InitialWorkspaceLayout, Output, Swaymsg, TreeNode, WindowEvent, Workspace,
+    IPC_TIMEOUT, InitialWorkspaceLayout, Output, Swaymsg, TreeNode, WindowChange, WindowEvent,
+    Workspace,
 };
 use crate::layout::{
     LayoutMeasurements, Shape, Signature, is_window, outline, remove_from_shape, shape, signature,
@@ -38,16 +39,21 @@ use crate::ownership::{
 };
 use crate::preservation::{ForeignWindows, output_ancestry};
 use crate::scenarios::{
-    ConfiguredNode, ConfiguredWindow, Scenario, configuration_yaml, configure_process_execution,
-    foreign_fixture_scenario, session_roundtrip_layouts, standard_scenarios,
+    ConfiguredNode, ConfiguredWindow, Scenario, WINDOW_TIMEOUT_MS, configuration_yaml,
+    configure_process_execution, foreign_fixture_scenario, session_roundtrip_layouts,
+    standard_scenarios,
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
-use crate::{floating_refusal, interference, launch_context, load_failure, process, profile};
+use crate::{
+    floating_refusal, held_launch, interference, launch_context, load_failure, process, profile,
+};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the session round-trip looks for a window that Sway's `exec` is opening.
 const WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the harness looks for a held launch's progress while sway-stage loads.
+const HELD_LAUNCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A fresh compositor's only workspace. The foreign fixture loads here without a switch and
 /// stays for the whole run, so it is also the occupied target of the profile refusal.
@@ -65,7 +71,8 @@ const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
 const ASSIGNED_WORKSPACE: &str = "4";
 
 /// Every scenario in suite order: the standard scenarios, the failing standalone loads, the
-/// floating-occupancy refusals, the interfered loads, the profile cases, the sequentially verified profiles, the Sway exec entry points, the session
+/// floating-occupancy refusals, the interfered loads, the held-launch interference, the
+/// profile cases, the sequentially verified profiles, the Sway exec entry points, the session
 /// round-trip, the assigned-workspace refusal, then the two-output session's cross-output
 /// profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
@@ -76,6 +83,7 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.extend(load_failure::CASES.iter().map(|case| case.name()));
     names.extend(floating_refusal::CASES.iter().map(|case| case.name()));
     names.extend(interference::CASES.iter().map(|case| case.name()));
+    names.extend(held_launch::CASES.iter().map(|case| case.name()));
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(profile::SEQUENTIAL_CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
@@ -387,6 +395,11 @@ impl Harness {
         for case in interference::CASES {
             if selected.contains(&case.name()) {
                 self.run_interference(case, &directory)?;
+            }
+        }
+        for case in held_launch::CASES {
+            if selected.contains(&case.name()) {
+                self.run_held_launch(case, &directory)?;
             }
         }
 
@@ -2390,6 +2403,457 @@ impl Harness {
         Ok(())
     }
 
+    /// Loads a three-window layout on the empty, focused primary while one window's launch is
+    /// held, and interferes while sway-stage waits for it: focus moved to another accepted
+    /// window, once or beyond the restoration limit, or the first accepted window closed.
+    /// sway-stage runs on its own thread so that the harness can act during the wait. The
+    /// outcome counts only after sway-stage's report, the launch and hold records, its log
+    /// where relevant, and the ordered events and final desktop are verified independently.
+    /// Only then does the harness close the windows that remain.
+    fn run_held_launch(
+        &mut self,
+        case: held_launch::Case,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = case.name();
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let hold_script_path = files.path.join("hold.sh");
+        let hold = HeldLaunchFiles {
+            launch_record: files.path.join("launches"),
+            release: files.path.join("release"),
+            stop: files.path.join("stop"),
+            outcome: files.path.join("hold-outcome"),
+        };
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        fs::write(&hold_script_path, held_launch::HOLD_SCRIPT)
+            .map_err(|error| format!("write launch hold: {error}"))?;
+        let hold_prefix = held_launch::hold_command(
+            utf8_path(&hold_script_path)?,
+            utf8_path(&hold.release)?,
+            utf8_path(&hold.stop)?,
+            utf8_path(&hold.outcome)?,
+            &self.sleep,
+            WINDOW_TIMEOUT_MS,
+        );
+        let held = held_launch::held_load(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&hold.launch_record)?,
+            &hold_prefix,
+        );
+        directory.write(name, &configuration_yaml(&held.layout))?;
+        check_configuration(&self.binary, &directory.path, name, &self.stage)?;
+
+        self.stage = format!("{name}: fresh workspace baseline");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        if before.focused_workspace_id != primary.id {
+            return Err("the held load must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: load with a held launch");
+        process::check_interruption()?;
+        let mut load = configured_command(&self.binary, &directory.path, "load", name);
+        self.sway.select_socket(&mut load);
+        let load_stage = self.stage.clone();
+        let timeout = load_timeout(&held.layout);
+        let running_load =
+            thread::spawn(move || process::run_with_status(load, &load_stage, timeout));
+
+        let mut window_events = Vec::new();
+        let interference = self.interfere_with_held_launch(
+            &held,
+            &hold,
+            &primary,
+            &preexisting,
+            &running_load,
+            &mut window_events,
+        );
+        // A failed interference leaves the hold waiting: stop it, so the held application
+        // exits without a window, and sway-stage's wait ends by its own deadline.
+        let stop_error = match &interference {
+            Err(_) => request_hold_stop(&hold.stop).err(),
+            Ok(_) => None,
+        };
+        let load_result = running_load
+            .join()
+            .map_err(|_| "the load thread panicked".to_owned())?;
+        let completed = load_result?;
+        process::check_interruption()?;
+        let interference = interference.map_err(|error| {
+            let mut message = format!(
+                "{error}; sway-stage {}: {}",
+                completed.status,
+                completed.stderr.trim()
+            );
+            if let Some(stop_error) = &stop_error {
+                message.push_str(&format!("; {stop_error}"));
+            }
+            message
+        })?;
+
+        // sway-stage has exited, so the held application can no longer become a layout
+        // window: only now does the harness stop a hold it never released.
+        if !case.releases_hold() {
+            self.stage = format!("{name}: stop the held launch");
+            request_hold_stop(&hold.stop)?;
+        }
+        wait_for_hold_outcome(&hold.outcome, held_launch::expected_hold_outcome(case))?;
+        let loaded = self.observe_held_load(&mut window_events)?;
+
+        self.stage = format!("{name}: independent verification");
+        foreign.verify(&loaded)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+        // The held launch is the last one in every case: the third window's, or the second's
+        // when the third never launches.
+        let observed_record = fs::read_to_string(&hold.launch_record)
+            .map_err(|error| format!("read launch record: {error}"))?;
+        if observed_record != held.launch_record_through_hold {
+            return Err(format!(
+                "launch order/count differs: expected {:?}, observed {observed_record:?}",
+                held.launch_record_through_hold
+            ));
+        }
+
+        let (owned, expected_target) = match interference {
+            HeldLaunchInterference::FocusChanges {
+                disrupted_window_id,
+                insertion_window_id,
+                injection_indexes,
+                released_at,
+            } => {
+                let restorations = case.restorations();
+                held_launch::verify_focus_cycles(
+                    &window_events,
+                    &injection_indexes,
+                    restorations,
+                    disrupted_window_id,
+                    insertion_window_id,
+                )?;
+                held_launch::verify_restoration_log(
+                    &read_last_run_log()?,
+                    insertion_window_id,
+                    restorations,
+                )?;
+
+                let expected_target = held
+                    .expected_after_load
+                    .as_ref()
+                    .expect("focus cases leave their accepted windows");
+                let owned = bind_launches(&window_events, &expected_target.layout, &preexisting)?;
+                if let Some(released_at) = released_at {
+                    let released_window_id = owned
+                        .iter()
+                        .find(|(_, layout_id)| {
+                            layout_id.as_str() == held_launch::RELEASED_LAYOUT_ID
+                        })
+                        .map(|(&container_id, _)| container_id)
+                        .ok_or("the released window was not accepted")?;
+                    let held_window_event_index = window_events
+                        .iter()
+                        .position(|event| {
+                            event.change == WindowChange::New
+                                && event.container.id == released_window_id
+                        })
+                        .ok_or("the released window has no new event")?;
+                    held_launch::require_mapped_after_release(
+                        held_window_event_index,
+                        released_at,
+                    )?;
+                    if !completed.status.success() || !completed.stdout.trim().is_empty() {
+                        return Err(format!(
+                            "the load with restored focus failed: {}: {}",
+                            completed.status,
+                            completed.stderr.trim()
+                        ));
+                    }
+                } else {
+                    held_launch::verify_failure_report(case, &completed, insertion_window_id)?;
+                }
+                println!(
+                    "      the harness focused window1 id={disrupted_window_id} {} time(s) \
+                     during window3's wait; sway-stage restored window2 \
+                     id={insertion_window_id} after {restorations} of them",
+                    injection_indexes.len()
+                );
+                (owned, expected_target)
+            }
+            HeldLaunchInterference::WindowClosed {
+                closed_window_id,
+                close_requested_at,
+            } => {
+                held_launch::verify_failure_report(case, &completed, closed_window_id)?;
+                let bound_before_close = bind_launches(
+                    &window_events[..close_requested_at],
+                    &held.accepted_before_hold.layout,
+                    &preexisting,
+                )?;
+                if bound_before_close.keys().ne([&closed_window_id]) {
+                    return Err("the closed window was not the first accepted window".into());
+                }
+                held_launch::verify_closed_window_history(
+                    &window_events,
+                    close_requested_at,
+                    closed_window_id,
+                )?;
+                // No window of this layout exists anywhere, and the primary stays empty and
+                // focused with its own identity: nothing replaced or relaunched window1.
+                verify_ownership(
+                    &loaded.tree,
+                    primary.id,
+                    &held.layout.layout,
+                    &preexisting,
+                    &AcceptedWindows::new(),
+                )?;
+                require_empty(loaded.focused_workspace())?;
+                println!(
+                    "      the harness closed window1 id={closed_window_id} during window2's \
+                     wait; sway-stage stopped; window2 stayed held and window3 never launched"
+                );
+                self.passed += 1;
+                println!("PASS  {name} (independent verification; nothing left to clean up)");
+                return Ok(());
+            }
+        };
+        verify_ownership(
+            &loaded.tree,
+            primary.id,
+            &expected_target.layout,
+            &preexisting,
+            &owned,
+        )?;
+        let measurements = verify_layout(loaded.focused_workspace(), expected_target, &owned)?;
+        for note in &measurements.sizing_notes {
+            println!("      {note}");
+        }
+
+        // Only an independently verified outcome enters cleanup, which the harness performs.
+        self.stage = format!("{name}: verified cleanup");
+        let context = CleanupContext {
+            target: &primary,
+            layout: &expected_target.layout,
+            preexisting_ids: &preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &owned,
+            signature(loaded.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Waits until the held launch has started, binds and verifies the windows sway-stage
+    /// accepted before it, then performs the case's interference, each step only after
+    /// observing the previous one's effect. Every fenced snapshot's window events are
+    /// appended to `window_events` in order, and any workspace event fails.
+    fn interfere_with_held_launch(
+        &mut self,
+        held: &held_launch::HeldLoad,
+        hold: &HeldLaunchFiles,
+        primary: &WorkspaceIdentity,
+        preexisting: &HashSet<i64>,
+        running_load: &thread::JoinHandle<Result<process::CompletedProcess, String>>,
+        window_events: &mut Vec<WindowEvent>,
+    ) -> Result<HeldLaunchInterference, String> {
+        let case = held.case;
+        let name = case.name();
+        self.stage = format!("{name}: wait for the held launch");
+        // Each earlier window must appear within its own window timeout.
+        let accepted_count = held.accepted_before_hold.layout.leaves().len() as u32;
+        let deadline = Instant::now()
+            + Duration::from_millis(held.layout.window_timeout_ms) * accepted_count
+            + IPC_TIMEOUT;
+        loop {
+            process::check_interruption()?;
+            let observed_record = read_optional_record(&hold.launch_record)?;
+            if held_launch::held_launch_started(&observed_record, &held.launch_record_through_hold)?
+            {
+                break;
+            }
+            if running_load.is_finished() {
+                return Err("sway-stage exited before the held launch started".into());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "the held launch did not start; launch record {observed_record:?}"
+                ));
+            }
+            thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
+        }
+
+        // sway-stage starts the held launch only after accepting every earlier window. Bind
+        // and verify those windows from fresh evidence before acting on any of them.
+        let held_at = self.observe_held_load(window_events)?;
+        let accepted = bind_launches(
+            window_events,
+            &held.accepted_before_hold.layout,
+            preexisting,
+        )?;
+        let verify_accepted = |observed: &Snapshot| -> Result<(), String> {
+            verify_ownership(
+                &observed.tree,
+                primary.id,
+                &held.accepted_before_hold.layout,
+                preexisting,
+                &accepted,
+            )?;
+            verify_layout(
+                observed.focused_workspace(),
+                &held.accepted_before_hold,
+                &accepted,
+            )?;
+            Ok(())
+        };
+        verify_accepted(&held_at)?;
+        let accepted_window_id = |layout_id: &str| {
+            accepted
+                .iter()
+                .find(|(_, accepted_layout_id)| accepted_layout_id.as_str() == layout_id)
+                .map(|(&container_id, _)| container_id)
+                .ok_or_else(|| format!("{layout_id} was not accepted before the hold"))
+        };
+
+        if case == held_launch::Case::AcceptedWindowClosed {
+            let closed_window_id = accepted_window_id(held_launch::CLOSED_LAYOUT_ID)?;
+            self.stage = format!("{name}: close window1 id={closed_window_id}");
+            let close_requested_at = window_events.len();
+            // A deliberate harness mutation: the exact ID of a window this run has just
+            // verified as its own, never a criteria match.
+            process::check_interruption()?;
+            self.sway.close_owned_window(closed_window_id)?;
+
+            let deadline = Instant::now() + IPC_TIMEOUT;
+            loop {
+                process::check_interruption()?;
+                let observed = self.observe_held_load(window_events)?;
+                let close_observed = window_events[close_requested_at..].iter().any(|event| {
+                    event.change == WindowChange::Close && event.container.id == closed_window_id
+                });
+                let still_present = walk(&observed.tree)
+                    .iter()
+                    .any(|placed| placed.node.id == closed_window_id);
+                if close_observed && !still_present {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!("window1 id={closed_window_id} did not close"));
+                }
+                thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
+            }
+            return Ok(HeldLaunchInterference::WindowClosed {
+                closed_window_id,
+                close_requested_at,
+            });
+        }
+
+        let disrupted_window_id = accepted_window_id(held_launch::DISRUPTED_LAYOUT_ID)?;
+        let insertion_window_id = accepted_window_id(held_launch::INSERTION_LAYOUT_ID)?;
+        let focus_changes = case.focus_changes();
+        let mut injection_indexes = Vec::new();
+        for focus_change in 0..focus_changes {
+            self.stage = format!(
+                "{name}: focus change {} of {focus_changes} to window1 id={disrupted_window_id}",
+                focus_change + 1
+            );
+            let injected_at = window_events.len();
+            injection_indexes.push(injected_at);
+            // Both windows were just verified tiled on the focused primary, so this focus
+            // change stays inside sway-stage's target workspace.
+            process::check_interruption()?;
+            self.sway.focus_owned_window(disrupted_window_id)?;
+            let expects_restoration = focus_change < case.restorations();
+            if !expects_restoration {
+                // Beyond the limit: sway-stage must refuse rather than restore again.
+                break;
+            }
+
+            // The next change waits for this one's restoration, so each one is a distinct
+            // cycle that sway-stage observed and answered.
+            let deadline = Instant::now() + IPC_TIMEOUT;
+            loop {
+                process::check_interruption()?;
+                let observed = self.observe_held_load(window_events)?;
+                let cycle = held_launch::focus_cycle(
+                    &window_events[injected_at..],
+                    disrupted_window_id,
+                    insertion_window_id,
+                )?;
+                if matches!(cycle, held_launch::FocusCycle::Restored { .. }) {
+                    // Only focus changed: the same windows, hierarchy, and insertion focus.
+                    verify_accepted(&observed)?;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "sway-stage did not restore focus to window2 id={insertion_window_id}: \
+                         {cycle:?}"
+                    ));
+                }
+                thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
+            }
+        }
+
+        let released_at = if case.releases_hold() {
+            self.stage = format!("{name}: release the held launch");
+            let released_at = window_events.len();
+            fs::write(&hold.release, "")
+                .map_err(|error| format!("release the held launch: {error}"))?;
+            Some(released_at)
+        } else {
+            None
+        };
+        Ok(HeldLaunchInterference::FocusChanges {
+            disrupted_window_id,
+            insertion_window_id,
+            injection_indexes,
+            released_at,
+        })
+    }
+
+    /// A fenced snapshot taken while a held load runs or has just ended. Its window events
+    /// are appended to `window_events`, the load's ordered history. Nothing may create,
+    /// select, or remove a workspace, and the fence already rejects any focus change.
+    fn observe_held_load(
+        &mut self,
+        window_events: &mut Vec<WindowEvent>,
+    ) -> Result<Snapshot, String> {
+        let mut observed = snapshot(&self.sway, &mut self.events, None)?;
+        profile::verify_workspace_events(&observed.workspace_events, &[])?;
+        window_events.append(&mut observed.window_events);
+        Ok(observed)
+    }
+
     /// Loads a two-entry profile from the empty, focused primary and verifies it workspace by
     /// workspace, as the session round-trip's reload is: each target selected in profile
     /// order, exactly its own layout's new windows between its selection and the next, and
@@ -4122,6 +4586,77 @@ fn close_floating_window(
         }
         thread::sleep(CLOSE_POLL_INTERVAL);
     }
+}
+
+/// The private files of one held launch: the launch record, the harness's two possible
+/// decisions, and the hold's record of which one took effect.
+struct HeldLaunchFiles {
+    launch_record: PathBuf,
+    release: PathBuf,
+    stop: PathBuf,
+    outcome: PathBuf,
+}
+
+/// What the harness did while sway-stage waited for a held launch. Each position counts
+/// the load's ordered window events the harness had observed when it acted.
+enum HeldLaunchInterference {
+    FocusChanges {
+        disrupted_window_id: i64,
+        insertion_window_id: i64,
+        injection_indexes: Vec<usize>,
+        /// Set when the harness let the held application start.
+        released_at: Option<usize>,
+    },
+    WindowClosed {
+        closed_window_id: i64,
+        close_requested_at: usize,
+    },
+}
+
+/// Tells the held script to exit without starting its application.
+fn request_hold_stop(stop_file: &Path) -> Result<(), String> {
+    fs::write(stop_file, "").map_err(|error| format!("stop the held launch: {error}"))
+}
+
+/// Waits until the held script records its outcome, which it does just before it execs the
+/// application or exits, and requires `expected`. The script polls every
+/// `HOLD_POLL_INTERVAL_MS`, so it answers well within the bound.
+fn wait_for_hold_outcome(outcome_record: &Path, expected: &str) -> Result<(), String> {
+    let deadline = Instant::now() + IPC_TIMEOUT;
+    loop {
+        process::check_interruption()?;
+        let observed = read_optional_record(outcome_record)?;
+        if observed == expected {
+            return Ok(());
+        }
+        if !observed.is_empty() || Instant::now() >= deadline {
+            return Err(format!(
+                "held launch outcome: expected {expected:?}, observed {observed:?}"
+            ));
+        }
+        thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
+    }
+}
+
+/// A record that a script creates on its first write; until then it is empty.
+fn read_optional_record(path: &Path) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(record) => Ok(record),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    }
+}
+
+/// sway-stage's log of its last load, under the private session's state directory that the
+/// runner and every sway-stage it starts share.
+fn read_last_run_log() -> Result<String, String> {
+    let state_home = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("the runner has no absolute XDG_STATE_HOME")?;
+    let log_path = state_home.join("sway-stage/last-run.log");
+    fs::read_to_string(&log_path)
+        .map_err(|error| format!("read sway-stage's log {}: {error}", log_path.display()))
 }
 
 struct CleanupContext<'a> {

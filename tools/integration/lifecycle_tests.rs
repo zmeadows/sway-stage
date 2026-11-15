@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 48] = [
+const SUITE_ORDER: [&str; 51] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -76,6 +76,9 @@ const SUITE_ORDER: [&str; 48] = [
     "interference-switch-away",
     "interference-switch-and-return",
     "interference-unexpected-window",
+    "interference-focus-restored",
+    "interference-focus-unstable",
+    "interference-accepted-window-closed",
     "profile-success",
     "profile-occupied-refusal",
     "profile-partial-failure",
@@ -184,8 +187,15 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
         [
             "interference-switch-away",
             "interference-switch-and-return",
-            "interference-unexpected-window"
+            "interference-unexpected-window",
+            "interference-focus-restored",
+            "interference-focus-unstable",
+            "interference-accepted-window-closed"
         ]
+    );
+    assert_eq!(
+        select_scenarios(Some("interference-focus")).unwrap(),
+        ["interference-focus-restored", "interference-focus-unstable"]
     );
     assert_eq!(
         select_scenarios(Some("partial-failure")).unwrap(),

@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 48 scenarios
+tools/integration/run.sh                  # all 51 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -136,7 +136,8 @@ first command, then establishes its workspaces explicitly:
 The suite runs twenty-three standard Foot scenarios, the
 [failing standalone loads](#failing-standalone-loads), the
 [floating-occupancy refusals](#floating-occupancy-refusals), the
-[interfered loads](#interference-during-construction), then the profile scenarios, the
+[interfered loads](#interference-during-construction), the
+[held-launch interference](#held-launch-interference), then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
 [four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
@@ -269,6 +270,54 @@ The first negative run also showed that a switch landing between the loader's wo
 tree queries was reported as inconsistent workspaces rather than a focus loss. That was fixed
 in production before these scenarios were committed. The headless scenarios complement, but
 do not replace, the manual loader interference checks below.
+
+#### Held-launch interference
+
+Three standalone loads on the empty, focused primary, each of three Foot windows in one
+horizontal split (`uneven-siblings`), test interference that the harness performs itself
+while sway-stage waits for one window:
+
+```sh
+tools/integration/run.sh --filter interference-focus
+tools/integration/run.sh --filter accepted-window-closed
+```
+
+One window's recorded command first runs a private hold script, which starts that window's
+Foot only once the harness creates a release file, and exits without starting it once a
+stop file appears or the window timeout passes. It records which happened. sway-stage
+starts the held command only after accepting every earlier window, so when the launch
+record shows it, those windows are accepted and nothing can map. sway-stage runs on its own
+runner thread while the harness polls (every 50 ms, each wait bounded) and acts over its own
+connection. It binds the accepted windows by their ordered new-window events and verifies
+their ownership and layout before touching any of them. Every action names exact container
+IDs, and each effect is observed through fenced snapshots that collect the load's ordered
+window events and allow no workspace event.
+
+| Scenario | Interference | Independent expectations |
+| --- | --- | --- |
+| `interference-focus-restored` | While `window3` is held, focus `window1`. | The next window events are `window1`'s focus, then `window2`'s: sway-stage restored the insertion focus. Only after observing that, and verifying the unchanged accepted windows, does the harness release the hold. `window3`'s new event follows the release. The load succeeds and the whole layout is verified, including sizing and final focus. Cleanup follows. |
+| `interference-focus-unstable` | While `window3` is held, focus `window1` four times. | Each of the first three changes is followed by its own restoration of `window2` before the harness sends the next. Nothing else happens in between. The fourth leaves focus on `window1`. Require exit 1 with `window3`'s wait reporting that focus did not stay on `window2`'s ID after 3 restorations, with no window timeout. The two accepted windows stay, unsized and unmoved, with focus left on `window1`. Only after sway-stage exits does the harness stop the hold, which records that `window3` never started. Cleanup follows. |
+| `interference-accepted-window-closed` | While `window2` is held, close `window1` with `[con_id=ID] kill`. | This is a deliberate harness mutation of a window just verified as this run's own. `window1`'s new event precedes the launch of `window2`, and its close event follows the request. Nothing else happens afterwards: no replacement, move, or other close. Require exit 1 with `window2`'s wait reporting the accepted window closed or disappeared by that ID. No window of the layout exists anywhere, and the primary stays empty and focused with its identity. The hold records that `window2` never started, and `window3` never launched. Nothing is left to clean up. |
+
+Both focus cases require a launch record of all three windows, and the close case one of
+the first two. The focus cases also check sway-stage's log for exactly the numbered
+restorations of `window2`. The log is supporting evidence only. Within one workspace,
+nothing but sway-stage can focus `window2` after the harness focused `window1`, because the
+compositor has no input devices. A restored change ends in a successful load; a fourth
+change within one launch is refused as unstable focus. Neither may be a workspace focus
+loss, which never restores. The harness states the restoration limit of 3 independently.
+
+Negative checks with production temporarily changed (2026-11-15) showed that the cases
+discriminate:
+
+- With a restoration limit of 4, the unstable case failed on a restored fourth change.
+- With restoration logging without sending its focus command, the restored case failed
+  waiting for `window2`'s focus event.
+
+A failed wait stops the hold before the harness waits for sway-stage to exit, so neither
+leaves a process behind.
+
+#### Profile scenarios
 
 Expected profile failures count as passes only after independent verification:
 
@@ -427,7 +476,7 @@ can explain conservative failures.
 
 The harness's guards against unexpected focus changes, foreign-window changes, and
 owned-window state changes are covered by its offline tests. Apart from the interfered loads'
-own injector, nothing else connects to the private compositor during a run.
+own injectors, nothing else connects to the private compositor during a run.
 
 ### Sway exec entry points
 

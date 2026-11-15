@@ -86,6 +86,13 @@ impl Swaymsg {
         self.command(&close_command(container_id)?)
     }
 
+    /// Focuses exactly one window. The caller must have just verified that this run opened
+    /// it and that it is tiled on the focused workspace, so focus stays on that workspace;
+    /// the caller observes the result with a fence.
+    pub fn focus_owned_window(&self, container_id: i64) -> Result<(), String> {
+        self.command(&focus_command(container_id)?)
+    }
+
     /// Makes exactly one window floating. The caller must have just verified that this run
     /// opened it, and observes the result with a fence.
     pub fn float_owned_window(&self, container_id: i64) -> Result<(), String> {
@@ -287,6 +294,13 @@ fn close_command(container_id: i64) -> Result<String, String> {
         return Err("owned window must have a positive container ID".into());
     }
     Ok(format!("[con_id={container_id}] kill"))
+}
+
+fn focus_command(container_id: i64) -> Result<String, String> {
+    if container_id <= 0 {
+        return Err("owned window must have a positive container ID".into());
+    }
+    Ok(format!("[con_id={container_id}] focus"))
 }
 
 fn float_command(container_id: i64) -> Result<String, String> {
