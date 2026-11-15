@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 34 scenarios
+tools/integration/run.sh                  # all 35 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -107,10 +107,12 @@ first command, then establishes its workspaces explicitly:
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` starts its exec here. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
 | `3` | The second target of the successful and partial profile scenarios, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
+| `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
 
 The suite runs twenty-one standard Foot scenarios, then the profile scenarios, the
-[Sway exec entry points](#sway-exec-entry-points), and finally the cross-output profile in
-the two-output compositor. The
+[Sway exec entry points](#sway-exec-entry-points), the
+[assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
+profile in the two-output compositor. The
 original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
 siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested groups,
 process execution, default final focus, occupied-workspace refusal, and capture/reload
@@ -362,6 +364,32 @@ arguments, including `--index` and `--output=HEADLESS-1`, and exactly the rows
 workspace is empty and the fixture's workspace is capturable. The selected index must be
 the scenario's row. Fuzzel itself, keyboard selection, and rendering remain
 [manual checks](#manual-application-acceptance).
+
+### Assigned-workspace refusal
+
+`assigned-workspace-refusal` checks that sway-stage still refuses a matching window that
+Sway itself places on another workspace, now that applications start outside its process
+ancestry. It runs last in the one-output session.
+
+```sh
+tools/integration/run.sh --filter assigned
+```
+
+From the empty, focused primary `2`, the harness adds the Sway rule
+`assign [app_id="^ID$"] workspace "4"` for the run-unique app ID of a one-window layout, then
+runs `sway-stage load` directly. Sway keeps the rule until the private compositor stops;
+no other window can match it. The scenario requires:
+
+- exit 1 with sway-stage's `placement failure: wrong workspace` diagnostic, naming the
+  window, workspace `4`, and the primary as the expected workspace, and
+  `stopped without cleanup or relaunch`;
+- exactly one recorded launch and one new owned window, tiled on `4`;
+- Sway's creation of `4` as the only workspace event, so `4` was never selected;
+- the primary still focused and empty, and an unchanged foreign fixture.
+
+The window is thus neither moved, closed, adopted, nor launched again. Verified cleanup
+then selects `4`, which removes the empty `2`, closes only that window, and switches to a
+new `2`, which becomes the primary.
 
 ## Manual application acceptance
 

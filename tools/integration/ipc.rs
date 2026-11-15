@@ -94,6 +94,18 @@ impl Swaymsg {
         self.command(&exec_command(script)?)
     }
 
+    /// Adds a Sway `assign` rule that places every new window with exactly `app_id` on the
+    /// workspace named `workspace_name`, creating it if needed. Sway keeps the rule until
+    /// the private compositor stops, so the caller names an app ID that only its own
+    /// window has.
+    pub fn assign_app_id_to_workspace(
+        &self,
+        app_id: &str,
+        workspace_name: &str,
+    ) -> Result<(), String> {
+        self.command(&assign_command(app_id, workspace_name)?)
+    }
+
     /// Only after a fresh empty-target, focus, identity, and output check by the caller.
     pub fn set_empty_workspace_layout(&self, layout: InitialWorkspaceLayout) -> Result<(), String> {
         self.command(layout.command())
@@ -289,6 +301,24 @@ fn exec_command(script: &Path) -> Result<String, String> {
             )
         })?;
     Ok(format!("exec /bin/sh {text}"))
+}
+
+/// Criteria values are regular expressions inside a quoted argument, so only app IDs of
+/// lowercase ASCII letters, digits, and `-` are sent, anchored to match exactly.
+fn assign_command(app_id: &str, workspace_name: &str) -> Result<String, String> {
+    validate_workspace_name(workspace_name)?;
+    let is_plain_app_id = !app_id.is_empty()
+        && app_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if !is_plain_app_id {
+        return Err(format!(
+            "app ID {app_id:?} cannot be safely represented in a Sway assign rule"
+        ));
+    }
+    Ok(format!(
+        "assign [app_id=\"^{app_id}$\"] workspace \"{workspace_name}\""
+    ))
 }
 
 fn decode_command_reply(output: &str) -> Result<(), String> {

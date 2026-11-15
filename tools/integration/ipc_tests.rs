@@ -219,3 +219,25 @@ fn exec_commands_accept_only_plain_absolute_script_paths() {
         assert!(exec_command(Path::new(invalid)).is_err(), "{invalid:?}");
     }
 }
+
+#[test]
+fn assign_rules_name_one_exact_plain_app_id_and_a_safe_workspace() {
+    assert_eq!(
+        assign_command("sway-stage-it-0a1b-assigned-window1", "4").unwrap(),
+        "assign [app_id=\"^sway-stage-it-0a1b-assigned-window1$\"] workspace \"4\""
+    );
+    for invalid_app_id in [
+        "", "Upper", "a.b", "a b", "a\"b", "a]b", "a$", "a;exit", "a,b", "é",
+    ] {
+        assert!(
+            assign_command(invalid_app_id, "4").is_err(),
+            "{invalid_app_id:?}"
+        );
+    }
+    for invalid_workspace in ["", " 4", "4\"", "4;exit"] {
+        assert!(
+            assign_command("plain", invalid_workspace).is_err(),
+            "{invalid_workspace:?}"
+        );
+    }
+}

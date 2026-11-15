@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 34] = [
+const SUITE_ORDER: [&str; 35] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -79,6 +79,7 @@ const SUITE_ORDER: [&str; 34] = [
     "profile-exec-token-only",
     "profile-exec-occupied-origin",
     "profile-exec-menu",
+    "assigned-workspace-refusal",
     "profile-cross-output",
 ];
 
@@ -154,7 +155,11 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     );
     assert_eq!(
         select_scenarios(Some("refusal")).unwrap(),
-        ["occupied-workspace-refusal", "profile-occupied-refusal"]
+        [
+            "occupied-workspace-refusal",
+            "profile-occupied-refusal",
+            "assigned-workspace-refusal"
+        ]
     );
 
     // Matching is a case-sensitive substring test; no match is an error naming the filter.
@@ -187,7 +192,12 @@ fn workspace_plan_starts_on_the_fresh_workspace_and_uses_distinct_safe_names() {
     // The two-output session loads the same fixture on its first output's workspace.
     assert_eq!(FIXTURE_WORKSPACE, FIRST_OUTPUT_INITIAL_WORKSPACE);
 
-    let names = [FIXTURE_WORKSPACE, PRIMARY_WORKSPACE, PROFILE_WORKSPACE];
+    let names = [
+        FIXTURE_WORKSPACE,
+        PRIMARY_WORKSPACE,
+        PROFILE_WORKSPACE,
+        ASSIGNED_WORKSPACE,
+    ];
     let unique_names: HashSet<&str> = names.into_iter().collect();
     assert_eq!(unique_names.len(), names.len());
     for name in names {
@@ -1663,6 +1673,75 @@ fn partial_profile_diagnostics_require_the_completed_and_failed_workspace() {
         ),
     ] {
         assert!(verify_profile_partial_failure(&bad, &primary, "10").is_err());
+    }
+}
+
+#[test]
+fn the_assigned_layout_is_one_recorded_window_with_a_scenario_unique_app_id() {
+    let layout = assigned_workspace_layout(
+        "run",
+        "/usr/bin/foot",
+        "/usr/bin/sleep",
+        "/tmp/record.sh",
+        "/tmp/launches",
+    );
+    assert_eq!(layout.name, "assigned-workspace-refusal");
+    let leaves = layout.layout.leaves();
+    let [leaf] = leaves.as_slice() else {
+        panic!("one window");
+    };
+    let app_id = "sway-stage-it-run-assigned-workspace-refusal-single-window-window1";
+    assert_eq!(leaf.app_id, app_id);
+    assert_eq!(
+        leaf.command[..6],
+        [
+            "/bin/sh",
+            "/tmp/record.sh",
+            "assigned-workspace-refusal-window1",
+            "/tmp/launches",
+            "/usr/bin/foot",
+            &format!("--app-id={app_id}"),
+        ]
+    );
+}
+
+#[test]
+fn assigned_workspace_refusal_requires_the_window_both_workspaces_and_no_cleanup() {
+    let diagnostic = "sway-stage: wait leaf=\"window1\": layout \"assigned-workspace-refusal\": \
+        placement failure: wrong workspace: matching window id=42 (workspace=Some(41) \
+        scratchpad=false floating=false); expected workspace=40; check Sway assignment rules \
+        and activation context; stopped without cleanup or relaunch; inspect windows before \
+        retrying\n";
+    verify_assigned_workspace_refusal(&refused_output(1, diagnostic), 42, 41, 40).unwrap();
+
+    for (bad, window_id, assigned_id, target_id) in [
+        (refused_output(0, diagnostic), 42, 41, 40),
+        (refused_output(1, diagnostic), 43, 41, 40),
+        (refused_output(1, diagnostic), 42, 44, 40),
+        (refused_output(1, diagnostic), 42, 41, 45),
+        (
+            refused_output(
+                1,
+                &diagnostic.replace("wrong workspace", "unknown workspace"),
+            ),
+            42,
+            41,
+            40,
+        ),
+        (
+            refused_output(
+                1,
+                &diagnostic.replace("stopped without cleanup or relaunch", ""),
+            ),
+            42,
+            41,
+            40,
+        ),
+    ] {
+        assert!(
+            verify_assigned_workspace_refusal(&bad, window_id, assigned_id, target_id).is_err(),
+            "{bad:?}"
+        );
     }
 }
 

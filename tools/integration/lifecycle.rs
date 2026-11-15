@@ -48,9 +48,14 @@ const PRIMARY_WORKSPACE: &str = "2";
 /// Each profile's second target. Every profile leaves it empty and returns to the primary,
 /// so Sway removes it and the next profile load creates it again.
 const PROFILE_WORKSPACE: &str = "3";
+/// The scenario whose window a Sway `assign` rule sends to `ASSIGNED_WORKSPACE`.
+const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
+/// Created by Sway for that window alone, and removed after its cleanup.
+const ASSIGNED_WORKSPACE: &str = "4";
 
-/// Every scenario in suite order: the standard scenarios, the profile cases, the
-/// Sway exec entry points, then the two-output session's cross-output profile.
+/// Every scenario in suite order: the standard scenarios, the profile cases, the Sway exec
+/// entry points, the assigned-workspace refusal, then the two-output session's cross-output
+/// profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -58,6 +63,7 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = standard.iter().map(|scenario| scenario.name).collect();
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
+    names.push(ASSIGNED_WORKSPACE_SCENARIO);
     names.push(profile::CROSS_OUTPUT_SCENARIO);
     names
 }
@@ -366,6 +372,10 @@ impl Harness {
             } else {
                 self.run_exec_layout(case, &directory)?;
             }
+        }
+        // Its cleanup also leaves a replacement primary.
+        if selected.contains(&ASSIGNED_WORKSPACE_SCENARIO) {
+            self.run_assigned_workspace_refusal(&directory)?;
         }
 
         self.verify_fixture_survived()
@@ -846,6 +856,176 @@ impl Harness {
         require_quiet(&cleaned.window_events, None)?;
         foreign.verify(&cleaned)?;
         require_empty(cleaned.focused_workspace())?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Loads a one-window layout on the empty, focused primary after a Sway `assign` rule has
+    /// sent its app ID to `ASSIGNED_WORKSPACE`. sway-stage must refuse the window there after
+    /// its one launch, leaving it open where Sway put it. Verified cleanup then selects that
+    /// workspace, closes only the window, and returns to a new primary.
+    fn run_assigned_workspace_refusal(
+        &mut self,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = ASSIGNED_WORKSPACE_SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        let layout = assigned_workspace_layout(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+        );
+        directory.write(layout.name, &configuration_yaml(&layout))?;
+        check_configuration(&self.binary, &directory.path, layout.name, &self.stage)?;
+
+        // Sway keeps the rule until the private compositor stops. It names only this
+        // scenario's run-unique app ID, so no other window can match it.
+        self.stage = format!("{name}: assign rule");
+        let assigned_app_id = layout.layout.leaves()[0].app_id.clone();
+        process::check_interruption()?;
+        self.sway
+            .assign_app_id_to_workspace(&assigned_app_id, ASSIGNED_WORKSPACE)?;
+
+        self.stage = format!("{name}: fresh workspace baselines");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        if before.focused_workspace_id != primary.id {
+            return Err("the assigned-workspace case must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        if profile::Target::record(&before, ASSIGNED_WORKSPACE)?.is_some() {
+            return Err(format!(
+                "workspace {ASSIGNED_WORKSPACE} must not exist before Sway assigns the window to it"
+            ));
+        }
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: load refused by placement");
+        process::check_interruption()?;
+        let mut load = configured_command(&self.binary, &directory.path, "load", name);
+        self.sway.select_socket(&mut load);
+        let completed = process::run_with_status(load, &self.stage, load_timeout(&layout))?;
+        process::check_interruption()?;
+        let loaded = snapshot(&self.sway, &mut self.events, None)?;
+
+        self.stage = format!("{name}: independent verification");
+        let assigned = profile::Target::record(&loaded, ASSIGNED_WORKSPACE)?.ok_or_else(|| {
+            format!(
+                "Sway created no workspace {ASSIGNED_WORKSPACE} for the window; sway-stage {}: {}",
+                completed.status,
+                completed.stderr.trim()
+            )
+        })?;
+        if preexisting.contains(&assigned.workspace.id) {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        // Sway created the assigned workspace without selecting it; the primary stays
+        // focused and empty.
+        profile::verify_workspace_events(
+            &loaded.workspace_events,
+            &[profile::ExpectedWorkspaceEvent::Init(&assigned.workspace)],
+        )?;
+        require_empty(loaded.focused_workspace())?;
+        foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+
+        // The one launch's window is still where Sway put it: neither moved, closed,
+        // adopted, nor launched again.
+        let accepted = bind_launches(&loaded.window_events, &layout.layout, &preexisting)?;
+        let window_id = *accepted
+            .keys()
+            .next()
+            .expect("a one-window layout binds exactly one launch");
+        verify_ownership(
+            &loaded.tree,
+            assigned.workspace.id,
+            &layout.layout,
+            &preexisting,
+            &accepted,
+        )?;
+        let expected_record = format!("{name}-window1\n");
+        let observed_record = fs::read_to_string(&launch_record_path)
+            .map_err(|error| format!("read launch record: {error}"))?;
+        if observed_record != expected_record {
+            return Err(format!(
+                "launch count differs: expected {expected_record:?}, observed {observed_record:?}"
+            ));
+        }
+        verify_assigned_workspace_refusal(
+            &completed,
+            window_id,
+            assigned.workspace.id,
+            primary.id,
+        )?;
+        println!(
+            "      Sway assigned window id={window_id} to workspace {ASSIGNED_WORKSPACE} id={}; \
+             sway-stage refused it there and left it open",
+            assigned.workspace.id
+        );
+
+        // Only an independently verified refusal enters cleanup. The window is on an
+        // unfocused workspace: select it before closing only that window there. Sway removes
+        // the empty primary as focus leaves it.
+        self.stage = format!("{name}: select the assigned workspace");
+        process::check_interruption()?;
+        self.sway.switch_workspace(ASSIGNED_WORKSPACE)?;
+        let transition = ExpectedSwitch {
+            from_id: primary.id,
+            destination_name: ASSIGNED_WORKSPACE.into(),
+        };
+        let selected = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_return_focus(&selected.window_events, &accepted)?;
+        let expected_events = [
+            profile::ExpectedWorkspaceEvent::Focus {
+                from_id: primary.id,
+                to: &assigned.workspace,
+            },
+            profile::ExpectedWorkspaceEvent::Empty(&primary),
+        ];
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        verify_fixture_state(&selected, fixture, fixture_signature)?;
+
+        self.stage = format!("{name}: verified cleanup");
+        let assigned_foreign = ForeignWindows::record(&selected, assigned.workspace.id)?;
+        let context = CleanupContext {
+            target: &assigned.workspace,
+            layout: &layout.layout,
+            preexisting_ids: &preexisting,
+            foreign: &assigned_foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &accepted,
+            signature(selected.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        assigned_foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        self.return_to_primary_name(name, &assigned.workspace)?;
 
         self.passed += 1;
         println!("PASS  {name} (independent verification; success-path cleanup only)");
@@ -1830,6 +2010,62 @@ fn verify_fixture_state(
     baseline_without_focus.ignore_focus();
     if current != baseline_without_focus {
         return Err("foreign fixture hierarchy/identity/geometry/state changed".into());
+    }
+    Ok(())
+}
+
+/// `single-window` with a recorded launch and an app ID unique to this scenario and run,
+/// which its `assign` rule names.
+fn assigned_workspace_layout(
+    run_id: &str,
+    foot: &str,
+    sleep: &str,
+    launch_script: &str,
+    launch_record: &str,
+) -> Scenario {
+    let unique_id = format!("{run_id}-{ASSIGNED_WORKSPACE_SCENARIO}");
+    let mut layout = standard_scenarios(&unique_id, foot, sleep)
+        .into_iter()
+        .find(|scenario| scenario.name == "single-window")
+        .expect("standard single-window scenario");
+    layout.name = ASSIGNED_WORKSPACE_SCENARIO;
+    profile::wrap_launches(
+        &mut layout.layout,
+        layout.name,
+        launch_script,
+        launch_record,
+    );
+    layout
+}
+
+/// sway-stage's refusal of the window that Sway assigned elsewhere: exit 1, naming the
+/// window, the workspace it was found on, and the focused target, with no cleanup or
+/// relaunch.
+fn verify_assigned_workspace_refusal(
+    output: &process::CompletedProcess,
+    window_id: i64,
+    assigned_workspace_id: i64,
+    target_workspace_id: i64,
+) -> Result<(), String> {
+    let placement_failure = format!(
+        "placement failure: wrong workspace: matching window id={window_id} \
+         (workspace=Some({assigned_workspace_id}) "
+    );
+    let expected_target = format!("expected workspace={target_workspace_id};");
+    let refused = output.status.code() == Some(1)
+        && output.stdout.trim().is_empty()
+        && output.stderr.contains(&placement_failure)
+        && output.stderr.contains(&expected_target)
+        && output
+            .stderr
+            .contains("stopped without cleanup or relaunch");
+    if !refused {
+        return Err(format!(
+            "expected sway-stage to refuse window id={window_id} on assigned workspace \
+             id={assigned_workspace_id} (exit 1), got {}: {}",
+            output.status,
+            output.stderr.trim()
+        ));
     }
     Ok(())
 }
