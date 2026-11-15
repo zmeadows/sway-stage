@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 33] = [
+const SUITE_ORDER: [&str; 34] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -77,6 +77,7 @@ const SUITE_ORDER: [&str; 33] = [
     "profile-exec-context",
     "profile-exec-ancestry-only",
     "profile-exec-token-only",
+    "profile-exec-occupied-origin",
     "profile-exec-menu",
     "profile-cross-output",
 ];
@@ -119,6 +120,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
+            "profile-exec-occupied-origin",
             "profile-exec-menu",
             "profile-cross-output"
         ]
@@ -129,6 +131,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
+            "profile-exec-occupied-origin",
             "profile-exec-menu"
         ]
     );
@@ -141,6 +144,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
+            "profile-exec-occupied-origin",
             "profile-exec-menu"
         ]
     );

@@ -13,9 +13,10 @@
 //!
 //! The profile cases select another workspace, so the context names the wrong one. They
 //! leave Sway both paths, only the process ancestry, or only the token: either one alone
-//! misplaced the window before sway-stage was fixed. A layout loads on the focused
-//! workspace that the context names anyway, so the layout cases establish the entry points
-//! rather than the misplacement regression.
+//! misplaced the window before sway-stage was fixed. One case starts from the fixture's
+//! occupied workspace instead, which Sway keeps, so the context would place the window
+//! there directly. A layout loads on the focused workspace that the context names anyway,
+//! so the layout cases establish the entry points rather than the misplacement regression.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -29,12 +30,13 @@ use crate::process;
 use crate::profile::{self, ExpectedWorkspaceEvent};
 use crate::scenarios::{Scenario, standard_scenarios};
 
-pub const CASES: [Case; 6] = [
+pub const CASES: [Case; 7] = [
     Case::LayoutLoad,
     Case::MenuLayout,
     Case::ContextInherited,
     Case::AncestryOnly,
     Case::TokenOnly,
+    Case::OccupiedOrigin,
     Case::MenuProfile,
 ];
 
@@ -57,6 +59,8 @@ pub enum Case {
     AncestryOnly,
     /// sway-stage is orphaned from the process Sway started; only the token remains.
     TokenOnly,
+    /// As `ContextInherited`, but from the fixture's occupied workspace.
+    OccupiedOrigin,
     /// `sway-stage menu` from a keybinding, selecting the profile.
     MenuProfile,
 }
@@ -69,6 +73,7 @@ impl Case {
             Self::ContextInherited => "profile-exec-context",
             Self::AncestryOnly => "profile-exec-ancestry-only",
             Self::TokenOnly => "profile-exec-token-only",
+            Self::OccupiedOrigin => "profile-exec-occupied-origin",
             Self::MenuProfile => "profile-exec-menu",
         }
     }
@@ -91,6 +96,9 @@ impl Case {
             Self::TokenOnly => {
                 "sway-stage inherited the token but was orphaned from the exec'd process"
             }
+            Self::OccupiedOrigin => {
+                "sway-stage inherited the token and descended from the exec'd process on the fixture's workspace"
+            }
             Self::MenuProfile => {
                 "menu selected the profile; it inherited the token and descended from the exec'd process"
             }
@@ -108,10 +116,18 @@ impl Case {
         match self {
             Self::MenuLayout => Some(format!("Layout: {}", self.name())),
             Self::MenuProfile => Some(format!("Profile: {}", self.name())),
-            Self::LayoutLoad | Self::ContextInherited | Self::AncestryOnly | Self::TokenOnly => {
-                None
-            }
+            Self::LayoutLoad
+            | Self::ContextInherited
+            | Self::AncestryOnly
+            | Self::TokenOnly
+            | Self::OccupiedOrigin => None,
         }
+    }
+
+    /// Whether the exec starts from the fixture's occupied workspace rather than the empty
+    /// primary. Sway removes only an empty origin as focus leaves it.
+    pub fn starts_on_fixture_workspace(self) -> bool {
+        self == Self::OccupiedOrigin
     }
 
     /// Selects the entry script's branch.
@@ -119,9 +135,11 @@ impl Case {
         match self {
             Self::AncestryOnly => "without-token",
             Self::TokenOnly => "detached",
-            Self::LayoutLoad | Self::MenuLayout | Self::ContextInherited | Self::MenuProfile => {
-                "inherited"
-            }
+            Self::LayoutLoad
+            | Self::MenuLayout
+            | Self::ContextInherited
+            | Self::OccupiedOrigin
+            | Self::MenuProfile => "inherited",
         }
     }
 
@@ -432,20 +450,24 @@ impl MenuEvidence {
     }
 }
 
-/// A profile load's exact workspace events: creating and selecting the target removes the
-/// empty origin, and no workspace is recreated for the window.
+/// A profile load's exact workspace events: creating and selecting the target, then Sway's
+/// removal of an empty origin. No workspace is recreated for the window.
 pub fn expected_workspace_events<'a>(
+    case: Case,
     origin: &'a WorkspaceIdentity,
     target: &'a WorkspaceIdentity,
-) -> [ExpectedWorkspaceEvent<'a>; 3] {
-    [
+) -> Vec<ExpectedWorkspaceEvent<'a>> {
+    let mut expected = vec![
         ExpectedWorkspaceEvent::Init(target),
         ExpectedWorkspaceEvent::Focus {
             from_id: origin.id,
             to: target,
         },
-        ExpectedWorkspaceEvent::Empty(origin),
-    ]
+    ];
+    if !case.starts_on_fixture_workspace() {
+        expected.push(ExpectedWorkspaceEvent::Empty(origin));
+    }
+    expected
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ fn cases_have_distinct_names_entry_points_and_entry_modes() {
             "profile-exec-context",
             "profile-exec-ancestry-only",
             "profile-exec-token-only",
+            "profile-exec-occupied-origin",
             "profile-exec-menu"
         ]
     );
@@ -28,17 +29,27 @@ fn cases_have_distinct_names_entry_points_and_entry_modes() {
             "inherited",
             "without-token",
             "detached",
+            "inherited",
             "inherited"
         ]
     );
     let profile_loads: Vec<bool> = CASES.iter().map(|case| case.loads_profile()).collect();
-    assert_eq!(profile_loads, [false, false, true, true, true, true]);
+    assert_eq!(profile_loads, [false, false, true, true, true, true, true]);
+    let fixture_origins: Vec<bool> = CASES
+        .iter()
+        .map(|case| case.starts_on_fixture_workspace())
+        .collect();
+    assert_eq!(
+        fixture_origins,
+        [false, false, false, false, false, true, false]
+    );
     let base_layouts: Vec<&str> = CASES.iter().map(|case| case.base_layout()).collect();
     assert_eq!(
         base_layouts,
         [
             "horizontal-pair",
             "horizontal-pair",
+            "single-window",
             "single-window",
             "single-window",
             "single-window",
@@ -53,6 +64,7 @@ fn cases_have_distinct_names_entry_points_and_entry_modes() {
         [
             None,
             Some("Layout: layout-exec-menu".to_owned()),
+            None,
             None,
             None,
             None,
@@ -81,6 +93,10 @@ fn each_entry_point_has_its_own_command_line() {
         (
             Case::TokenOnly,
             vec!["profile", "load", "profile-exec-token-only"],
+        ),
+        (
+            Case::OccupiedOrigin,
+            vec!["profile", "load", "profile-exec-occupied-origin"],
         ),
         (Case::MenuProfile, vec!["menu"]),
     ] {
@@ -372,7 +388,7 @@ fn workspace_events_require_the_target_and_no_recreated_origin() {
             workspace_event("empty", 10, "2", None),
         ]
     };
-    let expected = expected_workspace_events(&origin, &target);
+    let expected = expected_workspace_events(Case::ContextInherited, &origin, &target);
     verify_workspace_events(&selection(), &expected).unwrap();
 
     // The misplacement's recreation of the origin, for the window, is an extra event.
@@ -393,4 +409,34 @@ fn workspace_events_require_the_target_and_no_recreated_origin() {
         workspace_event("empty", 10, "2", None),
     ];
     assert!(verify_workspace_events(&other_origin, &expected).is_err());
+}
+
+#[test]
+fn an_occupied_origin_is_kept_rather_than_removed() {
+    let origin = WorkspaceIdentity {
+        id: 5,
+        name: "1".into(),
+    };
+    let target = WorkspaceIdentity {
+        id: 40,
+        name: "3".into(),
+    };
+    let expected = expected_workspace_events(Case::OccupiedOrigin, &origin, &target);
+    let selection = || {
+        vec![
+            workspace_event("init", 40, "3", None),
+            workspace_event("focus", 40, "3", Some(5)),
+        ]
+    };
+    verify_workspace_events(&selection(), &expected).unwrap();
+
+    // Removing the occupied origin, or recreating it for the window, is an extra event.
+    for (change, workspace_id) in [("empty", 5), ("init", 41)] {
+        let mut observed = selection();
+        observed.push(workspace_event(change, workspace_id, "1", None));
+        assert!(
+            verify_workspace_events(&observed, &expected).is_err(),
+            "{change}"
+        );
+    }
 }

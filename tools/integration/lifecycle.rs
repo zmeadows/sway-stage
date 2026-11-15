@@ -636,11 +636,12 @@ impl Harness {
         })
     }
 
-    /// Starts sway-stage through Sway's own `exec`, as a keybinding would, from the empty,
-    /// focused primary, to load a one-entry profile for the absent `PROFILE_WORKSPACE`,
-    /// directly or through the menu. Each case requires the window on that target and a
-    /// successful load, whichever launch-context paths Sway was left. The case ends on an
-    /// empty, focused workspace with the primary's name, which becomes the primary.
+    /// Starts sway-stage through Sway's own `exec`, as a keybinding would, to load a
+    /// one-entry profile for the absent `PROFILE_WORKSPACE`, directly or through the menu.
+    /// The exec starts from the empty, focused primary, or for one case from the fixture's
+    /// occupied workspace. Each case requires the window on that target and a successful
+    /// load, whichever launch-context paths Sway was left. The case ends on an empty,
+    /// focused workspace with the primary's name, which becomes the primary.
     fn run_exec_profile(
         &mut self,
         case: launch_context::Case,
@@ -649,20 +650,26 @@ impl Harness {
         let name = case.name();
         let target_name = PROFILE_WORKSPACE;
         let entry = self.prepare_exec_entry(case, directory)?;
+        let origin = if case.starts_on_fixture_workspace() {
+            self.switch_to_fixture_workspace(name)?
+        } else {
+            self.primary
+                .clone()
+                .expect("primary selected before scenarios")
+        };
 
         self.stage = format!("{name}: fresh workspace baselines");
         let before = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&before.window_events, None)?;
-        let origin = self
-            .primary
-            .clone()
-            .expect("primary selected before scenarios");
         let recorded_origin = profile::Target::record(&before, &origin.name)?
-            .ok_or("primary workspace disappeared")?;
+            .ok_or("origin workspace disappeared")?;
         if before.focused_workspace_id != origin.id || recorded_origin.workspace != origin {
-            return Err("the launch-context case must start on the focused primary".into());
+            return Err("the exec'd profile case must start on its focused origin".into());
         }
-        require_empty(before.focused_workspace())?;
+        // The fixture's workspace holds only the fixture, which `verify_fixture_state` checks.
+        if !case.starts_on_fixture_workspace() {
+            require_empty(before.focused_workspace())?;
+        }
         if profile::Target::record(&before, target_name)?.is_some() {
             return Err(format!(
                 "workspace {target_name} must not exist before the load creates it"
@@ -695,6 +702,7 @@ impl Harness {
         if loaded.focused_workspace_id != target.workspace.id {
             return Err("the profile did not leave its target focused".into());
         }
+        // From an occupied origin, this also proves that no window opened there.
         verify_fixture_state(&loaded, fixture, fixture_signature)?;
 
         // Nothing may launch before the target is selected; afterwards, only this window.
@@ -710,7 +718,8 @@ impl Harness {
         println!("      launch context: {}", case.description());
 
         // The window is on the selected target, and nothing recreated the origin.
-        let expected_events = launch_context::expected_workspace_events(&origin, &target.workspace);
+        let expected_events =
+            launch_context::expected_workspace_events(case, &origin, &target.workspace);
         profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
         verify_ownership(
             &loaded.tree,
@@ -723,9 +732,14 @@ impl Harness {
         for note in &measurements.sizing_notes {
             println!("      {note}");
         }
+        let origin_outcome = if case.starts_on_fixture_workspace() {
+            "kept only the unchanged fixture"
+        } else {
+            "was removed"
+        };
         println!(
-            "      origin {} id={} was focused at exec and removed when target {target_name} \
-             id={} was selected; window id={window_id} appeared on the target",
+            "      origin {} id={} was focused at exec and {origin_outcome} when target \
+             {target_name} id={} was selected; window id={window_id} appeared on the target",
             origin.name, origin.id, target.workspace.id
         );
 
@@ -836,6 +850,45 @@ impl Harness {
         self.passed += 1;
         println!("PASS  {name} (independent verification; success-path cleanup only)");
         Ok(())
+    }
+
+    /// Selects the fixture's workspace from the empty, focused primary, so that the next
+    /// exec starts there. Sway removes the primary as focus leaves it; focus returning to
+    /// the fixture's window is the only window activity allowed.
+    fn switch_to_fixture_workspace(
+        &mut self,
+        scenario_name: &str,
+    ) -> Result<WorkspaceIdentity, String> {
+        self.stage = format!("{scenario_name}: switch to the fixture's workspace");
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+
+        process::check_interruption()?;
+        self.sway.switch_workspace(&fixture.workspace.name)?;
+        let transition = ExpectedSwitch {
+            from_id: primary.id,
+            destination_name: fixture.workspace.name.clone(),
+        };
+        let switched = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+
+        require_return_focus(&switched.window_events, &fixture.progress.accepted)?;
+        let expected_events = [
+            profile::ExpectedWorkspaceEvent::Focus {
+                from_id: primary.id,
+                to: &fixture.workspace,
+            },
+            profile::ExpectedWorkspaceEvent::Empty(&primary),
+        ];
+        profile::verify_workspace_events(&switched.workspace_events, &expected_events)?;
+        verify_fixture_state(
+            &switched,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        Ok(fixture.workspace.clone())
     }
 
     /// Selects `PRIMARY_WORKSPACE` from `from`, which is focused and empty after verified
