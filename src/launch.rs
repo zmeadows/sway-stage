@@ -968,11 +968,14 @@ impl<'a> Construction<'a> {
             let poll_until = window_deadline.min(Instant::now() + POLL_INTERVAL);
             while let Some(event) = self.observer.next_until(poll_until)? {
                 new_windows.observe_event(&event, self.diagnostics)?;
-                // Observe again at once rather than finishing the poll, so moved
-                // insertion focus can be restored before the window maps.
-                if insertion_container_id.is_some()
-                    && matches!(&event, Event::Window(window) if window.change == WindowChange::Focus)
-                {
+
+                // Observe again at once rather than finishing the poll, so moved insertion
+                // focus can be restored before the window maps, and a window that may be
+                // this leaf's is examined in a fresh tree as soon as it maps. The event
+                // itself never accepts a window.
+                let insertion_focus_moved = insertion_container_id.is_some()
+                    && matches!(&event, Event::Window(window) if window.change == WindowChange::Focus);
+                if insertion_focus_moved || new_windows.reports_possible_match(&event) {
                     break;
                 }
             }
@@ -1517,6 +1520,29 @@ impl NewWindowTracker<'_> {
         }
 
         Ok(())
+    }
+
+    /// Whether `event` reports the creation of a window that could be this leaf's: one
+    /// neither preexisting nor accepted, whose selector identity matches or is not yet
+    /// known. Sway reports each new window once, and the tracker refuses more than
+    /// `MAX_NEW_WINDOW_HISTORY` of them, so unrelated activity cannot prompt unbounded
+    /// observations.
+    fn reports_possible_match(&self, event: &Event) -> bool {
+        let Event::Window(window) = event else {
+            return false;
+        };
+        let node = &window.container;
+        if window.change != WindowChange::New
+            || self.accepted_windows.contains_key(&node.id)
+            || self.preexisting_container_ids.contains(&node.id)
+        {
+            return false;
+        }
+
+        match selector_identity(self.matcher, node) {
+            None => true,
+            Some(_) => matches_window(self.matcher, node),
+        }
     }
 
     /// Returns the matching new target window, or `None` while there is none or while

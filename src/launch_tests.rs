@@ -142,6 +142,9 @@ impl LaunchFixture {
                     json!({"first": false, "payload": token}),
                 );
                 send_message(&mut socket, 10, json!({"success": true}));
+                for (kind, event) in &step.events_after_fence {
+                    send_message(&mut events, *kind, event.clone());
+                }
             }
             consumed_steps
         });
@@ -197,6 +200,9 @@ struct IpcStep {
     tree: Value,
     workspaces: Value,
     events: Vec<(u32, Value)>,
+    /// Sent after this snapshot's fence completes, so the loader receives them while
+    /// waiting between observations rather than in this snapshot's history.
+    events_after_fence: Vec<(u32, Value)>,
     disconnect: bool,
     command: Option<(String, Value)>,
     /// Sway never answers this step's command; the loader must abandon it at its deadline.
@@ -208,6 +214,7 @@ fn snapshot_step(tree: Value) -> IpcStep {
         tree,
         workspaces: focused_workspace_reply(),
         events: Vec::new(),
+        events_after_fence: Vec::new(),
         disconnect: false,
         command: None,
         withhold_reply: false,
@@ -1000,6 +1007,61 @@ fn timeout_distinguishes_no_new_windows_and_unresolved_identity() {
             }),
             "{error}"
         );
+        assert_eq!(fixture.wait_for_launch_count(), 1);
+    }
+}
+
+#[test]
+fn possibly_matching_new_window_events_prompt_a_fresh_observation_before_the_poll_ends() {
+    for scenario in ["matching", "identity-pending", "unrelated"] {
+        let fixture = LaunchFixture::new();
+        let mut config = fixture.config();
+        // The first wait observation shows no window, so the poll that follows ends at the
+        // window deadline: only an observation the event prompts can still accept the window.
+        config.window_timeout_ms = u64::try_from(POLL_INTERVAL.as_millis()).unwrap();
+
+        let mut reported_window = match scenario {
+            "matching" => wayland_window(20, Some("expected")),
+            "identity-pending" => wayland_window(20, None),
+            _ => wayland_window(30, Some("other")),
+        };
+        reported_window["focused"] = json!(false);
+        let mut before_map = snapshot_step(empty_workspace_tree());
+        before_map.events_after_fence.push((
+            WINDOW_EVENT,
+            json!({"change": "new", "container": reported_window}),
+        ));
+        let mut steps = vec![
+            snapshot_step(empty_workspace_tree()),
+            snapshot_step(empty_workspace_tree()),
+            before_map,
+        ];
+
+        if scenario == "unrelated" {
+            // Another application's window waits for the ordinary poll, so this observation,
+            // which would locate it, is never requested before the deadline.
+            steps.push(snapshot_step(with_window_on_other_workspace(
+                empty_workspace_tree(),
+                reported_window,
+            )));
+            let error = fixture.run(&config, steps).unwrap_err();
+            assert!(error.contains("window timeout"), "{error}");
+            assert!(
+                error.contains(
+                    "id=30 app_id=Some(\"other\") class=None workspace=unknown (event; awaiting fresh tree)"
+                ),
+                "{error}"
+            );
+            assert_eq!(fixture.wait_for_launch_count(), 1);
+            continue;
+        }
+
+        // Acceptance still needs the mapped tree and a quiet second observation.
+        let mapped = tree_with_target_windows(vec![wayland_window(20, Some("expected"))]);
+        let mut first_mapped_observation = snapshot_step(mapped.clone());
+        first_mapped_observation.events = focus_events(&empty_workspace_tree(), &mapped);
+        steps.extend([first_mapped_observation, snapshot_step(mapped)]);
+        fixture.run_with_finalization(&config, steps).unwrap();
         assert_eq!(fixture.wait_for_launch_count(), 1);
     }
 }
