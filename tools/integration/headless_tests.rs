@@ -49,7 +49,7 @@ const SHARED_VARIABLES: [&str; 11] = [
 fn environments_contain_only_path_and_private_session_locations() {
     let directory = session_directory();
     let search_path = OsStr::new(SEARCH_PATH);
-    let compositor = compositor_environment(&directory, search_path);
+    let compositor = compositor_environment(&directory, search_path, OutputSetup::OneOutput);
     let client = client_environment(&directory, search_path, OsStr::new("wayland-1"));
 
     let mut expected_compositor_names = SHARED_VARIABLES.to_vec();
@@ -65,6 +65,12 @@ fn environments_contain_only_path_and_private_session_locations() {
 
     assert_eq!(variable(&compositor, "WLR_BACKENDS"), "headless");
     assert_eq!(variable(&compositor, "WLR_HEADLESS_OUTPUTS"), "1");
+    let two_output_compositor =
+        compositor_environment(&directory, search_path, OutputSetup::TwoOutputs);
+    assert_eq!(
+        variable(&two_output_compositor, "WLR_HEADLESS_OUTPUTS"),
+        "2"
+    );
     assert_eq!(variable(&client, "WAYLAND_DISPLAY"), "wayland-1");
 
     for environment in [&compositor, &client] {
@@ -106,7 +112,7 @@ fn environments_contain_only_path_and_private_session_locations() {
 
 #[test]
 fn configuration_disables_extras_and_sets_only_the_virtual_output() {
-    let configuration = sway_configuration();
+    let configuration = sway_configuration(OutputSetup::OneOutput);
 
     assert_eq!(
         configuration.lines().collect::<Vec<_>>(),
@@ -117,6 +123,28 @@ fn configuration_disables_extras_and_sets_only_the_virtual_output() {
             "default_floating_border none",
             "focus_follows_mouse no",
             "output HEADLESS-1 mode --custom 2560x1440 position 0 0",
+        ]
+    );
+}
+
+#[test]
+fn two_output_configuration_adds_the_second_output_and_sways_workspace_rules() {
+    let configuration = sway_configuration(OutputSetup::TwoOutputs);
+
+    assert_eq!(
+        configuration.lines().collect::<Vec<_>>(),
+        [
+            "swaynag_command -",
+            "xwayland disable",
+            "default_border none",
+            "default_floating_border none",
+            "focus_follows_mouse no",
+            "output HEADLESS-1 mode --custom 2560x1440 position 0 0",
+            "output HEADLESS-2 mode --custom 1920x1080 position 2560 0",
+            "workspace 1 output HEADLESS-1",
+            "workspace 2 output HEADLESS-2",
+            "workspace 3 output HEADLESS-2",
+            "workspace --no-auto-back-and-forth 1",
         ]
     );
 }
@@ -132,6 +160,8 @@ fn output(name: &str, rect: Rect) -> Output {
 
 #[test]
 fn only_the_configured_headless_output_is_ready() {
+    let verify_virtual_output =
+        |outputs: &[Output]| verify_virtual_outputs(outputs, OutputSetup::OneOutput);
     verify_virtual_output(&[output(OUTPUT_NAME, VIRTUAL_OUTPUT_RECT)]).unwrap();
 
     assert!(verify_virtual_output(&[]).unwrap_err().contains("found []"));
@@ -184,6 +214,39 @@ fn only_the_configured_headless_output_is_ready() {
 }
 
 #[test]
+fn the_two_output_session_requires_exactly_both_configured_outputs() {
+    let verify = |outputs: &[Output]| verify_virtual_outputs(outputs, OutputSetup::TwoOutputs);
+    let first = || output(OUTPUT_NAME, VIRTUAL_OUTPUT_RECT);
+    let second = || output(SECOND_OUTPUT_NAME, SECOND_OUTPUT_RECT);
+    verify(&[first(), second()]).unwrap();
+    // Sway's reply order is not part of the contract.
+    verify(&[second(), first()]).unwrap();
+
+    assert!(
+        verify(&[first()])
+            .unwrap_err()
+            .contains("found [\"HEADLESS-1\"]")
+    );
+    assert!(
+        verify(&[first(), second(), output("HEADLESS-3", SECOND_OUTPUT_RECT)])
+            .unwrap_err()
+            .contains("HEADLESS-3")
+    );
+    assert!(
+        verify(&[first(), output(SECOND_OUTPUT_NAME, VIRTUAL_OUTPUT_RECT)])
+            .unwrap_err()
+            .contains("HEADLESS-2 has")
+    );
+    let mut inactive = second();
+    inactive.active = false;
+    assert!(
+        verify(&[first(), inactive])
+            .unwrap_err()
+            .contains("HEADLESS-2 is not active")
+    );
+}
+
+#[test]
 fn only_numbered_wayland_display_sockets_are_recognized() {
     for accepted in ["wayland-0", "wayland-1", "wayland-12"] {
         assert!(is_wayland_socket_name(OsStr::new(accepted)), "{accepted}");
@@ -198,6 +261,17 @@ fn only_numbered_wayland_display_sockets_are_recognized() {
     ] {
         assert!(!is_wayland_socket_name(OsStr::new(rejected)), "{rejected}");
     }
+}
+
+#[test]
+fn a_two_output_session_directory_keeps_the_recognized_socket_shape() {
+    let label = OutputSetup::TwoOutputs.directory_label();
+    assert!(!label.is_empty());
+    assert_eq!(OutputSetup::OneOutput.directory_label(), "");
+    let socket = PathBuf::from(format!(
+        "/tmp/{SESSION_DIRECTORY_PREFIX}{label}1-2/{RUNTIME_DIRECTORY_NAME}/{IPC_SOCKET_NAME}"
+    ));
+    assert!(is_session_ipc_socket(&socket));
 }
 
 #[test]

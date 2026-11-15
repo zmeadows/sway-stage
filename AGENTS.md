@@ -176,8 +176,8 @@ manually by the user on disposable workspaces in their existing Sway session, fo
 A disposable workspace does not isolate the compositor or other workspaces.
 
 The integration harness, the `integration` Cargo example in `tools/integration/`, runs only
-through `tools/integration/run.sh`, which builds it and runs the selected scenarios in a
-private headless Sway started and stopped for that run. The launcher gives the compositor
+through `tools/integration/run.sh`, which builds it and runs the selected scenarios in
+private headless Sway compositors started and stopped for that run. The launcher gives the compositor
 and the scenario runner an environment built from nothing but `PATH`, never connects to the
 user's compositor, and signals only its own direct children, so starting it from a shell
 inside the user's session is safe. Agents may run the harness, but only as

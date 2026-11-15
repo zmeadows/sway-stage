@@ -1,6 +1,8 @@
 //! The integration suite's only entry point, run by `tools/integration/run.sh`. It parses
-//! the interface, starts a private headless compositor, runs the scenario runner as a child
-//! inside that compositor's environment, and stops the compositor on every outcome.
+//! the interface, then for each output setup with selected scenarios starts a private
+//! headless compositor, runs the scenario runner as a child inside that compositor's
+//! environment, and stops the compositor on every outcome. The one-output session runs
+//! first; a failure starts no later session.
 //!
 //! The launcher itself never talks to the scenarios' compositor except through
 //! `HeadlessSession`, and never starts anything with its own, inherited environment.
@@ -12,12 +14,14 @@ use std::process::{Child, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::headless::{HeadlessSession, OUTPUT_NAME, SessionDirectory, VIRTUAL_OUTPUT_RECT};
+use crate::headless::{HeadlessSession, OutputSetup, SessionDirectory};
 use crate::{lifecycle, process};
 
-/// The private first argument that selects the scenario runner. Only `run` passes it, through
-/// the session's command environment; the runner still verifies the compositor itself.
+/// The private first arguments that select the scenario runner for each output setup. Only
+/// `run` passes them, through the session's command environment; the runner still verifies
+/// the compositor itself.
 pub const RUNNER_FLAG: &str = "--integration-headless-runner";
+pub const TWO_OUTPUT_RUNNER_FLAG: &str = "--integration-two-output-runner";
 const USAGE: &str = "usage: tools/integration/run.sh [--filter TEXT]";
 /// Distinguishes a usage error from a failed run.
 const USAGE_EXIT_CODE: u8 = 2;
@@ -47,7 +51,14 @@ pub fn parse_filter(arguments: &[OsString]) -> Result<Option<String>, String> {
     }
 }
 
-/// Succeeds only when every selected scenario passed and the compositor stopped cleanly.
+fn runner_flag(setup: OutputSetup) -> &'static str {
+    match setup {
+        OutputSetup::OneOutput => RUNNER_FLAG,
+        OutputSetup::TwoOutputs => TWO_OUTPUT_RUNNER_FLAG,
+    }
+}
+
+/// Succeeds only when every selected scenario passed and each compositor stopped cleanly.
 pub fn run(arguments: &[OsString]) -> ExitCode {
     let filter = match parse_filter(arguments) {
         Ok(filter) => filter,
@@ -82,38 +93,55 @@ pub fn run(arguments: &[OsString]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let directory = match SessionDirectory::create() {
-        Ok(directory) => directory,
-        Err(error) => {
-            eprintln!("FAIL  session directory: {error}");
+    for setup in [OutputSetup::OneOutput, OutputSetup::TwoOutputs] {
+        let session_scenario_count = selected
+            .iter()
+            .filter(|name| lifecycle::output_setup(name) == setup)
+            .count();
+        if session_scenario_count == 0 {
+            continue;
+        }
+        if process::interruption_requested() {
+            eprintln!("FAIL  interrupted before the {setup:?} session started");
             return ExitCode::FAILURE;
         }
-    };
 
-    let selected_count = u32::try_from(selected.len()).expect("the suite has few scenarios");
-    let runner_timeout = RUNNER_SETUP_ALLOWANCE + RUNNER_ALLOWANCE_PER_SCENARIO * selected_count;
-    let session_result = run_in_headless_session(
-        &directory,
-        &harness_executable,
-        filter.as_deref(),
-        runner_timeout,
-    );
-    if let Err(error) = session_result {
-        eprintln!("FAIL  {error}");
-        eprintln!(
-            "Diagnostics preserved in {}: sway.log, final-tree.json, \
-             tmp/sway-stage-integration-*/ (scenario YAML), and \
-             home/.local/state/sway-stage/last-run.log",
-            directory.path().display()
+        let directory = match SessionDirectory::create(setup) {
+            Ok(directory) => directory,
+            Err(error) => {
+                eprintln!("FAIL  session directory: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let scenario_count =
+            u32::try_from(session_scenario_count).expect("the suite has few scenarios");
+        let runner_timeout =
+            RUNNER_SETUP_ALLOWANCE + RUNNER_ALLOWANCE_PER_SCENARIO * scenario_count;
+        let session_result = run_in_headless_session(
+            &directory,
+            setup,
+            &harness_executable,
+            filter.as_deref(),
+            runner_timeout,
         );
-        return ExitCode::FAILURE;
-    }
+        if let Err(error) = session_result {
+            eprintln!("FAIL  {error}");
+            eprintln!(
+                "Diagnostics preserved in {}: sway.log, final-tree.json, \
+                 tmp/sway-stage-integration-*/ (scenario YAML), and \
+                 home/.local/state/sway-stage/last-run.log",
+                directory.path().display()
+            );
+            return ExitCode::FAILURE;
+        }
 
-    if let Err(error) = directory.remove() {
-        eprintln!("FAIL  cleanup: {error}");
-        return ExitCode::FAILURE;
+        if let Err(error) = directory.remove() {
+            eprintln!("FAIL  cleanup: {error}");
+            return ExitCode::FAILURE;
+        }
+        println!("Headless Sway stopped; session files removed.");
     }
-    println!("Headless Sway stopped; session files removed.");
     ExitCode::SUCCESS
 }
 
@@ -121,24 +149,38 @@ pub fn run(arguments: &[OsString]) -> ExitCode {
 /// outcome.
 fn run_in_headless_session(
     directory: &SessionDirectory,
+    setup: OutputSetup,
     harness_executable: &Path,
     filter: Option<&str>,
     runner_timeout: Duration,
 ) -> Result<(), String> {
-    let session = HeadlessSession::start(directory).map_err(|error| format!("startup: {error}"))?;
-    let output = VIRTUAL_OUTPUT_RECT;
+    let session =
+        HeadlessSession::start(directory, setup).map_err(|error| format!("startup: {error}"))?;
+    let outputs: Vec<String> = setup
+        .outputs()
+        .iter()
+        .map(|(name, rect)| {
+            format!(
+                "output {name} {}x{} at {},{}",
+                rect.width, rect.height, rect.x, rect.y
+            )
+        })
+        .collect();
     println!(
-        "Headless Sway ready: pid {}, output {OUTPUT_NAME} {}x{} at {},{}, WAYLAND_DISPLAY={}",
+        "Headless Sway ready: pid {}, {}, WAYLAND_DISPLAY={}",
         session.compositor_pid(),
-        output.width,
-        output.height,
-        output.x,
-        output.y,
+        outputs.join(", "),
         session.wayland_display().display()
     );
     println!("      session directory {}", directory.path().display());
 
-    let runner_result = run_scenario_runner(&session, harness_executable, filter, runner_timeout);
+    let runner_result = run_scenario_runner(
+        &session,
+        runner_flag(setup),
+        harness_executable,
+        filter,
+        runner_timeout,
+    );
     let shutdown_result = session.stop();
 
     match (runner_result, shutdown_result) {
@@ -156,12 +198,13 @@ fn run_in_headless_session(
 /// terminal for its PASS/FAIL lines.
 fn run_scenario_runner(
     session: &HeadlessSession,
+    runner_flag: &str,
     harness_executable: &Path,
     filter: Option<&str>,
     timeout: Duration,
 ) -> Result<(), String> {
     let mut command = session.command(harness_executable);
-    command.arg(RUNNER_FLAG);
+    command.arg(runner_flag);
     if let Some(text) = filter {
         command.args(["--filter", text]);
     }

@@ -305,6 +305,12 @@ fn select_workspace(
         ));
     }
 
+    // Selecting the target hides its output's visible workspace, and Sway removes a hidden
+    // workspace that is empty. That is the previously focused workspace only when the target
+    // shares its output. Which output a missing target lands on is known only afterwards, so
+    // record each output's candidate from this validated snapshot now.
+    let hideable_empty_workspaces = empty_visible_workspaces(&before)?;
+
     let command = target.selection_command()?;
     diagnostics.record(&command);
     let replies = launch::run_command(
@@ -339,15 +345,13 @@ fn select_workspace(
             "selected workspace identity or output differs from the verified target".into(),
         );
     }
-    let previous_workspace = before
-        .tree
-        .find_as_ref(|node| node.id == expected_focus.id)
-        .ok_or("previous workspace missing before selection")?;
+    let hidden_empty_workspace = hideable_empty_workspaces
+        .iter()
+        .find(|workspace| workspace.output_id == selected.output_id && workspace.id != selected.id);
     let transition = WorkspaceTransition {
         selected: &selected,
         allow_creation: target_before.is_none(),
-        allow_previous_destruction: previous_workspace.nodes.is_empty()
-            && previous_workspace.floating_nodes.is_empty(),
+        hidden_empty_workspace,
     };
     validate_workspace_history(&after, &expected_focus, Some(transition))?;
     require_quiet_windows(&after)?;
@@ -374,6 +378,7 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
     let mut workspace_ids = HashSet::new();
     let mut workspace_numbers = HashSet::new();
     let mut workspace_names = HashSet::new();
+    let mut outputs_with_visible_workspace = HashSet::new();
     let mut focused = None;
     for workspace in &snapshot.workspaces {
         if !workspace_ids.insert(workspace.id)
@@ -406,6 +411,12 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
                 "workspace snapshot: workspace/tree identity, output, or focus is inconsistent"
                     .into(),
             );
+        }
+        // Selection relies on visibility to know which workspace Sway may remove.
+        if (workspace.focused && !workspace.visible)
+            || (workspace.visible && !outputs_with_visible_workspace.insert(output.id))
+        {
+            return Err("workspace snapshot: inconsistent workspace visibility".into());
         }
         if workspace.focused {
             if focused.is_some() {
@@ -469,6 +480,41 @@ fn empty_target(
     }))
 }
 
+/// The visible workspaces with no tiled or floating children, from a validated snapshot.
+/// A populated workspace never qualifies, even though Sway also hides it.
+fn empty_visible_workspaces(
+    snapshot: &WorkspaceSnapshot,
+) -> Result<Vec<WorkspaceIdentity>, String> {
+    let mut empty_visible_workspaces = Vec::new();
+    for workspace in snapshot
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.visible)
+    {
+        let node = snapshot
+            .tree
+            .find_as_ref(|node| node.id == workspace.id)
+            .ok_or("visible workspace missing from tree")?;
+        if !node.nodes.is_empty() || !node.floating_nodes.is_empty() {
+            continue;
+        }
+
+        let output = snapshot
+            .tree
+            .nodes
+            .iter()
+            .find(|output| output.find_as_ref(|node| node.id == workspace.id).is_some())
+            .ok_or("visible workspace has no containing output")?;
+        empty_visible_workspaces.push(WorkspaceIdentity {
+            id: workspace.id,
+            number: workspace.num,
+            name: workspace.name.clone(),
+            output_id: output.id,
+        });
+    }
+    Ok(empty_visible_workspaces)
+}
+
 /// Tree outputs represent active outputs; the internal scratchpad output is not a display.
 /// Names are compared as data only and never enter a Sway command.
 fn verify_output(
@@ -529,7 +575,9 @@ fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), String> {
 struct WorkspaceTransition<'a> {
     selected: &'a WorkspaceIdentity,
     allow_creation: bool,
-    allow_previous_destruction: bool,
+    /// The previously visible workspace on the selected workspace's output, empty before
+    /// the command, which Sway removes once the selection hides it.
+    hidden_empty_workspace: Option<&'a WorkspaceIdentity>,
 }
 
 /// Rejects malformed events and reloads. Returns the workspace change, if any, that only an
@@ -594,7 +642,7 @@ fn validate_workspace_history(
 ) -> Result<(), String> {
     let mut observed_focus_change = false;
     let mut observed_creation = false;
-    let mut observed_previous_destruction = false;
+    let mut observed_hidden_destruction = false;
     for event in &snapshot.events {
         let Some((event, current)) = workspace_change_requiring_transition(event)? else {
             continue;
@@ -625,14 +673,16 @@ fn validate_workspace_history(
             {
                 observed_creation = true;
             }
+            // Sway reports the focus change before removing the workspace it hid.
             WorkspaceChange::Empty
-                if transition.allow_previous_destruction
-                    && !observed_previous_destruction
+                if observed_focus_change
+                    && !observed_hidden_destruction
                     && event.old.is_none()
-                    && target.id != expected.id
-                    && event_matches_workspace(current, expected) =>
+                    && transition
+                        .hidden_empty_workspace
+                        .is_some_and(|hidden| event_matches_workspace(current, hidden)) =>
             {
-                observed_previous_destruction = true;
+                observed_hidden_destruction = true;
             }
             _ => return Err(unexpected_workspace_change(event, current)),
         }

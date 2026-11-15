@@ -4,10 +4,10 @@
 //! without this entry point.
 //!
 //! One executable with three roles, chosen by the first argument:
-//! - none, or `--filter TEXT`: the launcher, which starts a private headless Sway and runs
-//!   the scenario runner inside it;
-//! - `launcher::RUNNER_FLAG`: the scenario runner, which the launcher starts with the headless
-//!   session's environment;
+//! - none, or `--filter TEXT`: the launcher, which starts a private headless Sway for each
+//!   output setup with selected scenarios and runs the scenario runner inside it;
+//! - `launcher::RUNNER_FLAG` or `launcher::TWO_OUTPUT_RUNNER_FLAG`: the scenario runner for
+//!   that setup, which the launcher starts with the headless session's environment;
 //! - `process::PROBE_FLAG`: a terminal child used by process-execution. It never connects
 //!   to Sway.
 
@@ -30,6 +30,8 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
+use headless::OutputSetup;
+
 /// Long enough for process-execution to inspect the probe; window cleanup ends it sooner.
 const PROBE_LIFETIME: Duration = Duration::from_secs(300);
 
@@ -42,20 +44,25 @@ fn main() -> ExitCode {
             thread::sleep(PROBE_LIFETIME);
             ExitCode::SUCCESS
         }
-        Some(launcher::RUNNER_FLAG) => {
-            let filter = match launcher::parse_filter(&arguments[1..]) {
-                Ok(filter) => filter,
-                Err(error) => {
-                    eprintln!("FAIL  runner arguments: {error}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if lifecycle::run(filter.as_deref()) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
+        Some(launcher::RUNNER_FLAG) => run_scenarios(OutputSetup::OneOutput, &arguments[1..]),
+        Some(launcher::TWO_OUTPUT_RUNNER_FLAG) => {
+            run_scenarios(OutputSetup::TwoOutputs, &arguments[1..])
         }
         _ => launcher::run(&arguments),
+    }
+}
+
+fn run_scenarios(setup: OutputSetup, arguments: &[OsString]) -> ExitCode {
+    let filter = match launcher::parse_filter(arguments) {
+        Ok(filter) => filter,
+        Err(error) => {
+            eprintln!("FAIL  runner arguments: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if lifecycle::run(setup, filter.as_deref()) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }

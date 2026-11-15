@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use crate::ipc::{TreeNode, WindowEvent, Workspace};
+use crate::ipc::{Output, Rect, TreeNode, WindowEvent, Workspace};
 use crate::observation::walk;
 use crate::ownership::AcceptedWindows;
 use crate::scenarios::{Scenario, standard_scenarios};
@@ -20,6 +20,8 @@ pub const OTHER_WORKSPACE_ID: i64 = 5;
 /// A window on the other workspace that existed before the run, like the foreign fixture.
 pub const PREEXISTING_WINDOW_ID: i64 = 6;
 pub const TARGET_WORKSPACE_ID: i64 = 7;
+/// The two-output desktop's workspace "2" on HEADLESS-2.
+pub const SECOND_OUTPUT_WORKSPACE_ID: i64 = 11;
 
 pub fn standard_scenario(name: &str) -> Scenario {
     standard_scenarios(RUN_ID, FOOT, SLEEP)
@@ -128,22 +130,6 @@ pub fn desktop(
     target_children: Vec<Value>,
     focused_container_id: i64,
 ) -> Value {
-    let mut scratchpad = workspace(
-        SCRATCHPAD_WORKSPACE_ID,
-        "__i3_scratch",
-        "splith",
-        Vec::new(),
-    );
-    scratchpad["rect"] = rect(0, 0, 0, 0);
-    let mut scratchpad_output = container(
-        2,
-        "output",
-        "output",
-        rect(0, 0, 1920, 1080),
-        vec![scratchpad],
-    );
-    scratchpad_output["name"] = json!("__i3");
-
     let preexisting = wayland_window(PREEXISTING_WINDOW_ID, "firefox-esr", rect(0, 0, 1920, 1080));
     let other = workspace(OTHER_WORKSPACE_ID, "1", "splith", vec![preexisting]);
     let target = workspace(TARGET_WORKSPACE_ID, "9", target_layout, target_children);
@@ -161,11 +147,104 @@ pub fn desktop(
         "root",
         "splith",
         rect(0, 0, 1920, 1080),
-        vec![scratchpad_output, output],
+        vec![scratchpad_output(), output],
     );
     root["name"] = json!("root");
     set_focus(&mut root, focused_container_id);
     root
+}
+
+/// Sway's hidden output holding the scratchpad workspace.
+fn scratchpad_output() -> Value {
+    let mut scratchpad = workspace(
+        SCRATCHPAD_WORKSPACE_ID,
+        "__i3_scratch",
+        "splith",
+        Vec::new(),
+    );
+    scratchpad["rect"] = rect(0, 0, 0, 0);
+    let mut scratchpad_output = container(
+        2,
+        "output",
+        "output",
+        rect(0, 0, 1920, 1080),
+        vec![scratchpad],
+    );
+    scratchpad_output["name"] = json!("__i3");
+    scratchpad_output
+}
+
+/// The two-output session's starting desktop: empty workspace "1" on HEADLESS-1 and empty
+/// workspace "2" on HEADLESS-2, plus Sway's hidden scratchpad output. Only the container
+/// `focused_container_id` is focused.
+pub fn two_output_desktop(focused_container_id: i64) -> Value {
+    let first = workspace(OTHER_WORKSPACE_ID, "1", "splith", Vec::new());
+    let mut first_output = container(4, "output", "output", rect(0, 0, 2560, 1440), vec![first]);
+    first_output["name"] = json!("HEADLESS-1");
+
+    let second = workspace(SECOND_OUTPUT_WORKSPACE_ID, "2", "splith", Vec::new());
+    let mut second_output = container(
+        12,
+        "output",
+        "output",
+        rect(2560, 0, 1920, 1080),
+        vec![second],
+    );
+    second_output["name"] = json!("HEADLESS-2");
+
+    let mut root = container(
+        ROOT_ID,
+        "root",
+        "splith",
+        rect(0, 0, 4480, 1440),
+        vec![scratchpad_output(), first_output, second_output],
+    );
+    root["name"] = json!("root");
+    set_focus(&mut root, focused_container_id);
+    root
+}
+
+/// The `get_workspaces` reply that agrees with `two_output_desktop`.
+pub fn two_output_workspaces_reply(focused_name: &str) -> Vec<Workspace> {
+    let reply = json!([
+        {"id": OTHER_WORKSPACE_ID, "num": 1, "name": "1", "focused": focused_name == "1",
+         "visible": true, "urgent": false, "output": "HEADLESS-1"},
+        {"id": SECOND_OUTPUT_WORKSPACE_ID, "num": 2, "name": "2", "focused": focused_name == "2",
+         "visible": true, "urgent": false, "output": "HEADLESS-2"},
+    ]);
+    serde_json::from_value(reply).expect("a workspace reply in Sway's format")
+}
+
+/// The `get_outputs` reply for the two-output session, each showing its initial workspace.
+pub fn two_output_outputs() -> Vec<Output> {
+    let output = |name: &str, rect: Rect, workspace: &str| Output {
+        name: name.into(),
+        active: true,
+        rect,
+        current_workspace: Some(workspace.into()),
+    };
+    vec![
+        output(
+            "HEADLESS-1",
+            Rect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            "1",
+        ),
+        output(
+            "HEADLESS-2",
+            Rect {
+                x: 2560,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            "2",
+        ),
+    ]
 }
 
 /// Marks only the container `focused_container_id` as focused.

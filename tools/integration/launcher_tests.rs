@@ -49,9 +49,14 @@ fn removed_unknown_and_incomplete_arguments_are_refused() {
 }
 
 #[test]
-fn the_runner_role_is_a_private_flag_outside_the_interface() {
-    assert!(parse_filter(&arguments(&[RUNNER_FLAG])).is_err());
-    assert_ne!(RUNNER_FLAG, crate::process::PROBE_FLAG);
+fn the_runner_roles_are_private_flags_outside_the_interface() {
+    for flag in [RUNNER_FLAG, TWO_OUTPUT_RUNNER_FLAG] {
+        assert!(parse_filter(&arguments(&[flag])).is_err(), "{flag}");
+        assert_ne!(flag, crate::process::PROBE_FLAG);
+    }
+    assert_ne!(RUNNER_FLAG, TWO_OUTPUT_RUNNER_FLAG);
+    assert_eq!(runner_flag(OutputSetup::OneOutput), RUNNER_FLAG);
+    assert_eq!(runner_flag(OutputSetup::TwoOutputs), TWO_OUTPUT_RUNNER_FLAG);
 }
 
 #[test]

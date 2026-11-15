@@ -1,10 +1,12 @@
 use super::*;
 use crate::fixtures::{
     OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SCRATCHPAD_WORKSPACE_ID,
-    TARGET_WORKSPACE_ID, accepted_windows, assert_contains, configured_app_id, container_ids,
-    desktop, find, group, node_mut, parse_tree, rect, standard_scenario, wayland_window,
-    window_event, workspaces_reply,
+    SECOND_OUTPUT_WORKSPACE_ID, TARGET_WORKSPACE_ID, accepted_windows, assert_contains,
+    configured_app_id, container_ids, desktop, find, group, node_mut, parse_tree, rect,
+    standard_scenario, two_output_desktop, two_output_outputs, two_output_workspaces_reply,
+    wayland_window, window_event, workspaces_reply,
 };
+use crate::headless::FIRST_OUTPUT_INITIAL_WORKSPACE;
 use serde_json::{Value, json};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -43,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 26] = [
+const SUITE_ORDER: [&str; 27] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -70,6 +72,7 @@ const SUITE_ORDER: [&str; 26] = [
     "profile-partial-failure",
     "profile-named-success",
     "profile-event-burst",
+    "profile-cross-output",
 ];
 
 #[test]
@@ -106,7 +109,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-occupied-refusal",
             "profile-partial-failure",
             "profile-named-success",
-            "profile-event-burst"
+            "profile-event-burst",
+            "profile-cross-output"
         ]
     );
     assert_eq!(
@@ -123,8 +127,26 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
 }
 
 #[test]
+fn only_the_cross_output_profile_needs_the_two_output_session() {
+    for name in SUITE_ORDER {
+        let expected = if name == "profile-cross-output" {
+            OutputSetup::TwoOutputs
+        } else {
+            OutputSetup::OneOutput
+        };
+        assert_eq!(output_setup(name), expected, "{name}");
+    }
+    assert_eq!(
+        select_scenarios(Some("cross-output")).unwrap(),
+        ["profile-cross-output"]
+    );
+}
+
+#[test]
 fn workspace_plan_starts_on_the_fresh_workspace_and_uses_distinct_safe_names() {
     assert_eq!(FIXTURE_WORKSPACE, "1");
+    // The two-output session loads the same fixture on its first output's workspace.
+    assert_eq!(FIXTURE_WORKSPACE, FIRST_OUTPUT_INITIAL_WORKSPACE);
 
     let names = [FIXTURE_WORKSPACE, PRIMARY_WORKSPACE, PROFILE_WORKSPACE];
     let unique_names: HashSet<&str> = names.into_iter().collect();
@@ -193,6 +215,72 @@ fn only_a_fresh_compositor_starts_a_run() {
     assert_contains(
         &verify_fresh_compositor(&renamed).unwrap_err(),
         r#"starts on workspace "1", found "2""#,
+    );
+}
+
+fn fresh_two_output_snapshot(tree: Value, focused_name: &str, focused_id: i64) -> Snapshot {
+    Snapshot {
+        tree: parse_tree(tree),
+        workspaces: two_output_workspaces_reply(focused_name),
+        focused_workspace_id: focused_id,
+        window_events: Vec::new(),
+        workspace_events: Vec::new(),
+    }
+}
+
+#[test]
+fn a_fresh_two_output_compositor_shows_empty_initial_workspaces_on_both_outputs() {
+    let fresh = || {
+        fresh_two_output_snapshot(
+            two_output_desktop(OTHER_WORKSPACE_ID),
+            "1",
+            OTHER_WORKSPACE_ID,
+        )
+    };
+    let started = fresh();
+    let focused = verify_fresh_two_output_compositor(&started, &two_output_outputs()).unwrap();
+    assert_eq!(focused.name, "1");
+
+    let mut other_shown = two_output_outputs();
+    other_shown[1].current_workspace = Some("3".into());
+    assert_contains(
+        &verify_fresh_two_output_compositor(&started, &other_shown).unwrap_err(),
+        r#"shows workspace "2" on HEADLESS-2"#,
+    );
+
+    let mut occupied = two_output_desktop(OTHER_WORKSPACE_ID);
+    node_mut(&mut occupied, SECOND_OUTPUT_WORKSPACE_ID)["nodes"] =
+        json!([group(40, "splith", rect(0, 0, 10, 10), Vec::new())]);
+    let occupied = fresh_two_output_snapshot(occupied, "1", OTHER_WORKSPACE_ID);
+    assert_contains(
+        &verify_fresh_two_output_compositor(&occupied, &two_output_outputs()).unwrap_err(),
+        "occupied",
+    );
+
+    let second_focused = fresh_two_output_snapshot(
+        two_output_desktop(SECOND_OUTPUT_WORKSPACE_ID),
+        "2",
+        SECOND_OUTPUT_WORKSPACE_ID,
+    );
+    assert_contains(
+        &verify_fresh_two_output_compositor(&second_focused, &two_output_outputs()).unwrap_err(),
+        r#"starts on workspace "1", found "2""#,
+    );
+
+    let mut hidden_window = two_output_desktop(OTHER_WORKSPACE_ID);
+    node_mut(&mut hidden_window, SCRATCHPAD_WORKSPACE_ID)["floating_nodes"] =
+        json!([wayland_window(40, "hidden", rect(0, 0, 100, 100))]);
+    let hidden_window = fresh_two_output_snapshot(hidden_window, "1", OTHER_WORKSPACE_ID);
+    assert_contains(
+        &verify_fresh_two_output_compositor(&hidden_window, &two_output_outputs()).unwrap_err(),
+        "found container 40",
+    );
+
+    // The one-output desktop is not a two-output session.
+    let one_output = fresh_compositor_snapshot(fresh_compositor_tree());
+    assert_contains(
+        &verify_fresh_two_output_compositor(&one_output, &two_output_outputs()).unwrap_err(),
+        r#"found ["1"]"#,
     );
 }
 

@@ -48,19 +48,24 @@ fn command(command: String) -> Step {
 }
 
 fn workspaces(tree: &Value) -> Value {
+    let is_focused = |workspace: &Value| {
+        workspace["focused"] == true
+            || workspace["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| node["focused"] == true)
+    };
     let mut workspaces = vec![];
     for output in tree["nodes"].as_array().unwrap() {
-        for workspace in output["nodes"].as_array().unwrap() {
-            let focused = workspace["focused"] == true
-                || workspace["nodes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|node| node["focused"] == true);
+        let output_workspaces = output["nodes"].as_array().unwrap();
+        // Each output shows one workspace: the focused one, otherwise here its first.
+        let visible_index = output_workspaces.iter().position(is_focused).unwrap_or(0);
+        for (workspace_index, workspace) in output_workspaces.iter().enumerate() {
             workspaces.push(json!({
                 "id": workspace["id"], "num": workspace["num"], "name": workspace["name"],
-                "focused": focused, "visible": focused, "urgent": false,
-                "rect": workspace["rect"], "output": output["name"]
+                "focused": is_focused(workspace), "visible": workspace_index == visible_index,
+                "urgent": false, "rect": workspace["rect"], "output": output["name"]
             }));
         }
     }
@@ -91,9 +96,18 @@ fn tree() -> Value {
     sway_node(1, "root", 100, vec![output])
 }
 
+/// Every workspace on every output, mutably.
+fn all_workspaces(tree: &mut Value) -> impl Iterator<Item = &mut Value> {
+    tree["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|output| output["nodes"].as_array_mut().unwrap().iter_mut())
+}
+
 fn focus_workspace(tree: &Value, number: i64) -> Value {
     let mut tree = tree.clone();
-    for workspace in tree["nodes"][0]["nodes"].as_array_mut().unwrap() {
+    for workspace in all_workspaces(&mut tree) {
         workspace["focused"] = json!(workspace["num"] == number);
         for window in workspace["nodes"].as_array_mut().unwrap() {
             window["focused"] = json!(false);
@@ -145,10 +159,7 @@ fn selection_steps(
 
 fn construction_steps(empty: &Value, number: i64, window_id: i64) -> (Vec<Step>, Value) {
     let mut mapped = empty.clone();
-    let target = mapped["nodes"][0]["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
+    let target = all_workspaces(&mut mapped)
         .find(|workspace| workspace["num"] == number)
         .unwrap();
     target["focused"] = json!(false);
@@ -862,6 +873,8 @@ fn inconsistent_workspace_and_tree_replies_fail_read_only_preflight() {
         "focus",
         "missing",
         "duplicate-id",
+        "hidden-focus",
+        "two-visible",
     ] {
         let fixture = fixture();
         let initial = tree();
@@ -875,6 +888,8 @@ fn inconsistent_workspace_and_tree_replies_fail_read_only_preflight() {
                 reply.as_array_mut().unwrap().pop();
             }
             "duplicate-id" => reply[1]["id"] = json!(190),
+            "hidden-focus" => reply[0]["visible"] = json!(false),
+            "two-visible" => reply[1]["visible"] = json!(true),
             _ => unreachable!(),
         }
         let mut preflight = snapshot(&initial);
@@ -1208,6 +1223,176 @@ fn selecting_the_already_focused_target_does_not_require_a_focus_change() {
     steps.extend(construction);
     let output = run(&fixture, steps, false);
     assert!(output.status.success(), "{output:?}");
+}
+
+/// `fixture-output` keeps the focused, occupied workspace 90. `second-output` shows the
+/// empty workspace 5 and hides the empty target 3 and the empty workspace 6.
+fn two_output_tree() -> Value {
+    let mut tree = tree();
+    let target = tree["nodes"][0]["nodes"].as_array_mut().unwrap().remove(1);
+    let mut second_output = sway_node(
+        4,
+        "output",
+        100,
+        vec![workspace(5, false), target, workspace(6, false)],
+    );
+    second_output["name"] = json!("second-output");
+    tree["nodes"].as_array_mut().unwrap().push(second_output);
+    tree
+}
+
+fn remove_workspace(tree: &mut Value, number: i64) {
+    for output in tree["nodes"].as_array_mut().unwrap() {
+        output["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|workspace| workspace["num"] != number);
+    }
+}
+
+fn empty_event(workspace: Value) -> (u32, Value) {
+    (
+        WORKSPACE_EVENT,
+        json!({"change": "empty", "current": workspace, "old": null}),
+    )
+}
+
+#[test]
+fn cross_output_selection_permits_removing_the_destination_outputs_hidden_empty_workspace() {
+    for (scenario, output_expectation) in [
+        ("existing", ""),
+        ("existing", ", output: second-output"),
+        ("created", ""),
+        ("created", ", output: second-output"),
+        ("visible-target", ", output: second-output"),
+    ] {
+        let fixture = fixture();
+        let target = if scenario == "visible-target" { 5 } else { 3 };
+        fixture.file(
+            "work.yaml",
+            &format!(
+                "version: 1\nworkspaces: [{{workspace: {target}, layout: first{output_expectation}}}]\n"
+            ),
+        );
+        let mut before = two_output_tree();
+        let mut after = before.clone();
+        if scenario == "created" {
+            // Sway's workspace output rules place the new target on second-output.
+            remove_workspace(&mut before, 3);
+            remove_workspace(&mut after, 3);
+            after["nodes"][1]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(workspace(3, false));
+        }
+        // Selecting a hidden target hides 5, which Sway then removes because it is empty.
+        // A visible target hides nothing.
+        let removes_hidden_workspace = scenario != "visible-target";
+        if removes_hidden_workspace {
+            remove_workspace(&mut after, 5);
+        }
+        after = focus_workspace(&after, target);
+
+        let mut selection = selection_steps(&before, &after, target, 90, scenario == "created");
+        if removes_hidden_workspace && let Step::Command { events, .. } = &mut selection[1] {
+            events.push(empty_event(workspace(5, false)));
+        }
+        let mut steps = vec![snapshot(&before)];
+        steps.extend(selection);
+        steps.extend(construction_steps(&after, target, 20).0);
+
+        let output = run(&fixture, steps, false);
+        assert!(
+            output.status.success(),
+            "{scenario}{output_expectation}: {output:?}"
+        );
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path.join("launches")).unwrap(),
+            "first\n"
+        );
+    }
+}
+
+#[test]
+fn cross_output_selection_rejects_every_other_workspace_removal() {
+    for scenario in [
+        "previous-workspace",
+        "populated-destination",
+        "hidden-workspace",
+        "selected-target",
+        "wrong-name",
+        "wrong-number",
+        "with-old",
+        "duplicate",
+        "before-focus",
+        "same-output",
+    ] {
+        let fixture = fixture();
+        fixture.file(
+            "work.yaml",
+            "version: 1\nworkspaces: [{workspace: 3, layout: first}]\n",
+        );
+        let mut before = two_output_tree();
+        match scenario {
+            "previous-workspace" => {
+                // Empty and focused, but it stays visible on fixture-output, so Sway keeps it.
+                before["nodes"][0]["nodes"][0]["nodes"] = json!([]);
+                before["nodes"][0]["nodes"][0]["focused"] = json!(true);
+            }
+            "populated-destination" => {
+                before["nodes"][1]["nodes"][0]["nodes"] = json!([window(800, false)]);
+            }
+            "same-output" => {
+                // A target beside 90 hides nothing on second-output.
+                let target = before["nodes"][1]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(1);
+                before["nodes"][0]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(target);
+            }
+            _ => {}
+        }
+        let after = focus_workspace(&before, 3);
+
+        let mut renamed = workspace(5, false);
+        renamed["name"] = json!("other");
+        let mut renumbered = workspace(5, false);
+        renumbered["num"] = json!(-1);
+        let removal = match scenario {
+            "previous-workspace" => empty_event(workspace(90, false)),
+            "hidden-workspace" => empty_event(workspace(6, false)),
+            "selected-target" => empty_event(workspace(3, false)),
+            "wrong-name" => empty_event(renamed),
+            "wrong-number" => empty_event(renumbered),
+            "with-old" => (
+                WORKSPACE_EVENT,
+                json!({"change": "empty", "current": workspace(5, false), "old": workspace(90, false)}),
+            ),
+            _ => empty_event(workspace(5, false)),
+        };
+        let mut selection = selection_steps(&before, &after, 3, 90, false);
+        if let Step::Command { events, .. } = &mut selection[1] {
+            match scenario {
+                "duplicate" => events.extend([removal.clone(), removal]),
+                // Sway reports the removal only after the focus change.
+                "before-focus" => events.insert(0, removal),
+                _ => events.push(removal),
+            }
+        }
+        let mut steps = vec![snapshot(&before)];
+        steps.extend(selection);
+
+        let output = run(&fixture, steps, false);
+        assert_failure(&fixture, &output, "unexpected workspace change", 0);
+        assert!(
+            !fixture.path.join("launches").exists(),
+            "{scenario}: {output:?}"
+        );
+    }
 }
 
 // Retain the existing numeric transcript builders, then translate only workspace nodes

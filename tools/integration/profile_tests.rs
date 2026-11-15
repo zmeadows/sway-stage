@@ -1,10 +1,12 @@
 use super::*;
 use crate::fixtures::{
-    FOOT, OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SLEEP, TARGET_WORKSPACE_ID,
-    accepted_windows, container_ids, desktop, parse_tree, window_event, workspaces_reply,
+    FOOT, OTHER_WORKSPACE_ID, PREEXISTING_WINDOW_ID, RUN_ID, SECOND_OUTPUT_WORKSPACE_ID, SLEEP,
+    TARGET_WORKSPACE_ID, accepted_windows, container_ids, desktop, node_mut, parse_tree, set_focus,
+    two_output_desktop, two_output_outputs, two_output_workspaces_reply, wayland_window,
+    window_event, workspaces_reply,
 };
 use crate::scenarios::configuration_yaml;
-use serde_json::json;
+use serde_json::{Value, json};
 
 const SWAYMSG: &str = "/usr/bin/swaymsg";
 const PRIVATE_SOCKET: &str = "/private path/runtime/sway-ipc.sock";
@@ -381,6 +383,56 @@ fn workspace_events_must_match_the_expected_sequence_exactly() {
     let focus = || workspace_event("focus", 30, "3", 3, Some(10));
     verify_workspace_events(&[init(), focus()], &expected).unwrap();
 
+    // A cross-output selection must also report removing exactly the hidden workspace.
+    let hidden = WorkspaceIdentity {
+        id: 20,
+        name: "2".into(),
+    };
+    let with_removal = [
+        ExpectedWorkspaceEvent::Init(&created),
+        ExpectedWorkspaceEvent::Focus {
+            from_id: 10,
+            to: &created,
+        },
+        ExpectedWorkspaceEvent::Empty(&hidden),
+    ];
+    let empty = || workspace_event("empty", 20, "2", 2, None);
+    verify_workspace_events(&[init(), focus(), empty()], &with_removal).unwrap();
+    for (case, observed) in [
+        ("missing removal", vec![init(), focus()]),
+        (
+            "other workspace removed",
+            vec![init(), focus(), workspace_event("empty", 21, "2", 2, None)],
+        ),
+        (
+            "renamed removal",
+            vec![
+                init(),
+                focus(),
+                workspace_event("empty", 20, "2: x", 2, None),
+            ],
+        ),
+        (
+            "renumbered removal",
+            vec![init(), focus(), workspace_event("empty", 20, "2", -1, None)],
+        ),
+        (
+            "removal with old",
+            vec![
+                init(),
+                focus(),
+                workspace_event("empty", 20, "2", 2, Some(10)),
+            ],
+        ),
+        ("removal before focus", vec![init(), empty(), focus()]),
+        ("duplicate removal", vec![init(), focus(), empty(), empty()]),
+    ] {
+        assert!(
+            verify_workspace_events(&observed, &with_removal).is_err(),
+            "{case}"
+        );
+    }
+
     for (case, observed) in [
         ("missing focus", vec![init()]),
         (
@@ -418,4 +470,244 @@ fn workspace_events_must_match_the_expected_sequence_exactly() {
             "{case}"
         );
     }
+}
+
+#[test]
+fn the_cross_output_profile_targets_the_assigned_workspace_on_the_second_output() {
+    assert_eq!(
+        cross_output_configuration(),
+        "version: 1\nworkspaces:\n  - workspace: 3\n    layout: profile-cross-output\n    output: HEADLESS-2\n"
+    );
+    let layout = cross_output_layout(
+        RUN_ID,
+        FOOT,
+        SLEEP,
+        "/private path/record.sh",
+        "/private path/launches",
+    );
+    assert_eq!(layout.name, CROSS_OUTPUT_SCENARIO);
+    for leaf in layout.layout.leaves() {
+        assert!(leaf.app_id.contains(RUN_ID));
+        assert!(leaf.app_id.contains(CROSS_OUTPUT_SCENARIO));
+        assert_eq!(
+            &leaf.command[..4],
+            &[
+                "/bin/sh",
+                "/private path/record.sh",
+                &format!("profile-cross-output-{}", leaf.layout_id),
+                "/private path/launches"
+            ]
+        );
+        assert_eq!(leaf.command[4], FOOT);
+    }
+}
+
+const FIXTURE_WINDOW_ID: i64 = 40;
+const CREATED_WORKSPACE_ID: i64 = 13;
+/// HEADLESS-2's container in `two_output_desktop`.
+const SECOND_OUTPUT_ID: i64 = 12;
+
+fn fixture_workspace() -> WorkspaceIdentity {
+    WorkspaceIdentity {
+        id: OTHER_WORKSPACE_ID,
+        name: "1".into(),
+    }
+}
+
+/// The two-output desktop after the foreign fixture loaded on workspace "1".
+fn cross_output_before_tree() -> Value {
+    let mut tree = two_output_desktop(FIXTURE_WINDOW_ID);
+    node_mut(&mut tree, OTHER_WORKSPACE_ID)["nodes"] = json!([wayland_window(
+        FIXTURE_WINDOW_ID,
+        "fixture",
+        crate::fixtures::rect(0, 0, 2560, 1440)
+    )]);
+    set_focus(&mut tree, FIXTURE_WINDOW_ID);
+    tree
+}
+
+fn cross_output_before() -> Snapshot {
+    Snapshot {
+        tree: parse_tree(cross_output_before_tree()),
+        workspaces: two_output_workspaces_reply("1"),
+        focused_workspace_id: OTHER_WORKSPACE_ID,
+        window_events: Vec::new(),
+        workspace_events: Vec::new(),
+    }
+}
+
+/// After the profile: the created "3" is focused on HEADLESS-2, and Sway removed "2" unless
+/// `keep_hidden_workspace` models it surviving.
+fn cross_output_loaded(keep_hidden_workspace: bool) -> Snapshot {
+    let mut tree = two_output_desktop(CREATED_WORKSPACE_ID);
+    node_mut(&mut tree, OTHER_WORKSPACE_ID)["nodes"] = json!([wayland_window(
+        FIXTURE_WINDOW_ID,
+        "fixture",
+        crate::fixtures::rect(0, 0, 2560, 1440)
+    )]);
+    let mut created = node_mut(&mut tree, SECOND_OUTPUT_WORKSPACE_ID).clone();
+    created["id"] = json!(CREATED_WORKSPACE_ID);
+    created["name"] = json!("3");
+    created["num"] = json!(3);
+    let second_output_workspaces = node_mut(&mut tree, SECOND_OUTPUT_ID)["nodes"]
+        .as_array_mut()
+        .unwrap();
+    if !keep_hidden_workspace {
+        second_output_workspaces.clear();
+    }
+    second_output_workspaces.push(created);
+    set_focus(&mut tree, CREATED_WORKSPACE_ID);
+
+    let mut workspaces = two_output_workspaces_reply("none");
+    if !keep_hidden_workspace {
+        workspaces.pop();
+    }
+    workspaces.push(crate::ipc::Workspace {
+        id: CREATED_WORKSPACE_ID,
+        num: 3,
+        name: "3".into(),
+        focused: true,
+    });
+    Snapshot {
+        tree: parse_tree(tree),
+        workspaces,
+        focused_workspace_id: CREATED_WORKSPACE_ID,
+        window_events: Vec::new(),
+        workspace_events: Vec::new(),
+    }
+}
+
+#[test]
+fn cross_output_baseline_requires_the_empty_initial_workspace_shown_on_the_second_output() {
+    let before = cross_output_before();
+    let baseline =
+        CrossOutputBaseline::record(&before, &two_output_outputs(), &fixture_workspace()).unwrap();
+    assert_eq!(
+        baseline.hidden_workspace,
+        WorkspaceIdentity {
+            id: SECOND_OUTPUT_WORKSPACE_ID,
+            name: "2".into(),
+        }
+    );
+
+    let mut occupied = cross_output_before();
+    occupied.tree.nodes[2].nodes[0].nodes = vec![parse_tree(wayland_window(
+        41,
+        "other",
+        crate::fixtures::rect(0, 0, 10, 10),
+    ))];
+    assert!(
+        CrossOutputBaseline::record(&occupied, &two_output_outputs(), &fixture_workspace())
+            .err()
+            .unwrap()
+            .contains("must be empty")
+    );
+
+    let mut not_shown = two_output_outputs();
+    not_shown[1].current_workspace = Some("4".into());
+    assert!(
+        CrossOutputBaseline::record(&before, &not_shown, &fixture_workspace())
+            .err()
+            .unwrap()
+            .contains("shown on HEADLESS-2")
+    );
+
+    let other_fixture = WorkspaceIdentity {
+        id: SECOND_OUTPUT_WORKSPACE_ID,
+        name: "2".into(),
+    };
+    assert!(
+        CrossOutputBaseline::record(&before, &two_output_outputs(), &other_fixture)
+            .err()
+            .unwrap()
+            .contains("start on the fixture workspace")
+    );
+
+    // The target must still be absent, so that the load creates it.
+    let mut created_early_tree = cross_output_before_tree();
+    let mut created_early_workspace =
+        node_mut(&mut created_early_tree, SECOND_OUTPUT_WORKSPACE_ID).clone();
+    created_early_workspace["id"] = json!(CREATED_WORKSPACE_ID);
+    created_early_workspace["name"] = json!("3");
+    created_early_workspace["num"] = json!(3);
+    node_mut(&mut created_early_tree, SECOND_OUTPUT_ID)["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(created_early_workspace);
+    let mut created_early_workspaces = two_output_workspaces_reply("1");
+    created_early_workspaces.push(crate::ipc::Workspace {
+        id: CREATED_WORKSPACE_ID,
+        num: 3,
+        name: "3".into(),
+        focused: false,
+    });
+    let created_early = Snapshot {
+        tree: parse_tree(created_early_tree),
+        workspaces: created_early_workspaces,
+        focused_workspace_id: OTHER_WORKSPACE_ID,
+        window_events: Vec::new(),
+        workspace_events: Vec::new(),
+    };
+    assert!(
+        CrossOutputBaseline::record(&created_early, &two_output_outputs(), &fixture_workspace())
+            .err()
+            .unwrap()
+            .contains("must not exist")
+    );
+}
+
+#[test]
+fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture() {
+    let baseline = CrossOutputBaseline::record(
+        &cross_output_before(),
+        &two_output_outputs(),
+        &fixture_workspace(),
+    )
+    .unwrap();
+    let created = WorkspaceIdentity {
+        id: CREATED_WORKSPACE_ID,
+        name: "3".into(),
+    };
+    baseline
+        .verify_result(&cross_output_loaded(false), &created, OTHER_WORKSPACE_ID)
+        .unwrap();
+
+    assert!(
+        baseline
+            .verify_result(&cross_output_loaded(true), &created, OTHER_WORKSPACE_ID)
+            .unwrap_err()
+            .contains("still exists")
+    );
+
+    // The created workspace on the first output, beside the fixture.
+    let mut wrong_output = cross_output_loaded(false);
+    let target = wrong_output.tree.nodes[2].nodes.remove(0);
+    wrong_output.tree.nodes[1].nodes.push(target);
+    assert!(
+        baseline
+            .verify_result(&wrong_output, &created, OTHER_WORKSPACE_ID)
+            .unwrap_err()
+            .contains("not on the second output")
+    );
+
+    // The fixture workspace moved to the second output.
+    let mut moved_fixture = cross_output_loaded(false);
+    let fixture = moved_fixture.tree.nodes[1].nodes.remove(0);
+    moved_fixture.tree.nodes[2].nodes.push(fixture);
+    assert!(
+        baseline
+            .verify_result(&moved_fixture, &created, OTHER_WORKSPACE_ID)
+            .unwrap_err()
+            .contains("fixture workspace changed output")
+    );
+
+    let unfocused = WorkspaceIdentity {
+        id: OTHER_WORKSPACE_ID,
+        name: "1".into(),
+    };
+    assert!(
+        baseline
+            .verify_result(&cross_output_loaded(false), &unfocused, OTHER_WORKSPACE_ID)
+            .is_err()
+    );
 }

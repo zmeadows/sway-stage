@@ -268,7 +268,11 @@ starts. Existing names such as `1: development` match by numeric
 identity only when the configured target is an integer. Distinct named workspaces remain
 distinct even though they all report `num = -1`. Each successful selection
 requires observed focus, identity, emptiness, and event history to agree before the ordinary
-layout loader starts. Only the coordinator selects workspaces; each individual construction
+layout loader starts. A selection hides the previously visible workspace on the target's
+output, which Sway removes if it is empty: the previously focused workspace when both share an
+output, otherwise the other output's. That workspace's removal, reported after the focus
+change, is the only one accepted, matched by exact identity and only if it was empty before
+the selection. Only the coordinator selects workspaces; each individual construction
 retains all loader ownership, matching, hierarchy, focus, and containing-output safeguards.
 Sway's existing workspace/output rules determine placement, including creation on an output;
 profiles do not assign outputs or move workspaces. Availability cannot guarantee where

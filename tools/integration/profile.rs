@@ -3,8 +3,13 @@
 
 use std::collections::HashSet;
 
+use crate::headless::{
+    OUTPUT_NAME, SECOND_OUTPUT_ASSIGNED_WORKSPACE, SECOND_OUTPUT_INITIAL_WORKSPACE,
+    SECOND_OUTPUT_NAME,
+};
 use crate::ipc::{
-    EventWorkspace, NodeType, TreeNode, WindowChange, WindowEvent, WorkspaceChange, WorkspaceEvent,
+    EventWorkspace, NodeType, Output, TreeNode, WindowChange, WindowEvent, WorkspaceChange,
+    WorkspaceEvent,
 };
 use crate::observation::{Snapshot, WorkspaceIdentity, walk};
 use crate::ownership::{AcceptedWindows, bind_launches, require_quiet};
@@ -41,6 +46,9 @@ impl Case {
         }
     }
 }
+
+/// The two-output session's only scenario.
+pub const CROSS_OUTPUT_SCENARIO: &str = "profile-cross-output";
 
 /// The wrapper records *launches*, including launches that never create a window. It
 /// preserves the configured executable and every argument through a literal exec.
@@ -160,6 +168,37 @@ fn wrap_launches(
             }
         }
     }
+}
+
+/// `horizontal-pair` with recorded launches, for the cross-output profile's one target.
+pub fn cross_output_layout(
+    run_id: &str,
+    foot: &str,
+    sleep: &str,
+    launch_script: &str,
+    launch_record: &str,
+) -> Scenario {
+    let unique_id = format!("{run_id}-{CROSS_OUTPUT_SCENARIO}");
+    let mut layout = standard_scenarios(&unique_id, foot, sleep)
+        .into_iter()
+        .find(|scenario| scenario.name == "horizontal-pair")
+        .expect("standard horizontal-pair scenario");
+    layout.name = CROSS_OUTPUT_SCENARIO;
+    wrap_launches(
+        &mut layout.layout,
+        layout.name,
+        launch_script,
+        launch_record,
+    );
+    layout
+}
+
+/// One entry: the workspace Sway's rules create on the second output, with the profile's
+/// own expectation that it is there.
+pub fn cross_output_configuration() -> String {
+    format!(
+        "version: 1\nworkspaces:\n  - workspace: {SECOND_OUTPUT_ASSIGNED_WORKSPACE}\n    layout: {CROSS_OUTPUT_SCENARIO}\n    output: {SECOND_OUTPUT_NAME}\n"
+    )
 }
 
 pub fn configuration(primary: &str, second: &str) -> String {
@@ -379,10 +418,11 @@ pub enum ExpectedWorkspaceEvent<'a> {
         from_id: i64,
         to: &'a WorkspaceIdentity,
     },
+    Empty(&'a WorkspaceIdentity),
 }
 
 /// A fence's non-urgent workspace events must be exactly `expected`, in order. A missing,
-/// extra, or reordered creation, focus change, or any other workspace change fails.
+/// extra, or reordered creation, focus change, destruction, or other change fails.
 pub fn verify_workspace_events(
     observed: &[WorkspaceEvent],
     expected: &[ExpectedWorkspaceEvent],
@@ -422,7 +462,114 @@ fn workspace_event_matches(event: &WorkspaceEvent, expected: &ExpectedWorkspaceE
                 && is_workspace(current, to)
                 && event.old.as_ref().is_some_and(|old| old.id == *from_id)
         }
+        ExpectedWorkspaceEvent::Empty(workspace) => {
+            event.change == WorkspaceChange::Empty
+                && is_workspace(current, workspace)
+                && event.old.is_none()
+        }
     }
+}
+
+/// The cross-output profile's starting state: the fixture workspace focused on the first
+/// output, and the second output showing its empty initial workspace, which selecting the
+/// target will hide.
+pub struct CrossOutputBaseline {
+    /// The only workspace whose removal the load may cause.
+    pub hidden_workspace: WorkspaceIdentity,
+    fixture_output: Vec<(i64, Option<String>)>,
+    second_output: Vec<(i64, Option<String>)>,
+}
+
+impl CrossOutputBaseline {
+    pub fn record(
+        observed: &Snapshot,
+        outputs: &[Output],
+        fixture_workspace: &WorkspaceIdentity,
+    ) -> Result<Self, String> {
+        observed.validate()?;
+        if observed.focused_workspace_id != fixture_workspace.id {
+            return Err("the cross-output profile must start on the fixture workspace".into());
+        }
+        if Target::record(observed, SECOND_OUTPUT_ASSIGNED_WORKSPACE)?.is_some() {
+            return Err(format!(
+                "workspace {SECOND_OUTPUT_ASSIGNED_WORKSPACE} must not exist before the load creates it"
+            ));
+        }
+
+        let hidden = Target::record(observed, SECOND_OUTPUT_INITIAL_WORKSPACE)?
+            .ok_or("the second output's initial workspace is missing")?;
+        let hidden_node = hidden.verify(observed)?;
+        if !hidden_node.nodes.is_empty() || !hidden_node.floating_nodes.is_empty() {
+            return Err("the second output's initial workspace must be empty".into());
+        }
+
+        let fixture_output = output_ancestry(&observed.tree, fixture_workspace.id)?;
+        let second_output = output_ancestry(&observed.tree, hidden.workspace.id)?;
+        let fixture_shown = output_shows(outputs, OUTPUT_NAME, &fixture_workspace.name);
+        let hidden_shown =
+            output_shows(outputs, SECOND_OUTPUT_NAME, SECOND_OUTPUT_INITIAL_WORKSPACE);
+        if !is_output(&fixture_output, OUTPUT_NAME)
+            || !is_output(&second_output, SECOND_OUTPUT_NAME)
+            || !fixture_shown
+            || !hidden_shown
+        {
+            return Err(format!(
+                "expected the fixture workspace shown on {OUTPUT_NAME} and workspace \
+                 {SECOND_OUTPUT_INITIAL_WORKSPACE} shown on {SECOND_OUTPUT_NAME}"
+            ));
+        }
+
+        Ok(Self {
+            hidden_workspace: hidden.workspace,
+            fixture_output,
+            second_output,
+        })
+    }
+
+    /// The hidden workspace is gone, the created target is focused on the second output,
+    /// and the fixture workspace is still on the first.
+    pub fn verify_result(
+        &self,
+        loaded: &Snapshot,
+        target: &WorkspaceIdentity,
+        fixture_workspace_id: i64,
+    ) -> Result<(), String> {
+        loaded.validate()?;
+        let hidden_id = self.hidden_workspace.id;
+        if walk(&loaded.tree)
+            .iter()
+            .any(|placed| placed.node.id == hidden_id)
+            || loaded
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == hidden_id)
+        {
+            return Err(format!(
+                "hidden empty workspace id={hidden_id} still exists"
+            ));
+        }
+        if loaded.focused_workspace_id != target.id {
+            return Err("the profile did not leave its target focused".into());
+        }
+        if output_ancestry(&loaded.tree, target.id)? != self.second_output {
+            return Err("the profile target is not on the second output".into());
+        }
+        if output_ancestry(&loaded.tree, fixture_workspace_id)? != self.fixture_output {
+            return Err("the fixture workspace changed output".into());
+        }
+        Ok(())
+    }
+}
+
+/// Whether `get_outputs` reports `workspace_name` as the workspace shown on `output_name`.
+fn output_shows(outputs: &[Output], output_name: &str, workspace_name: &str) -> bool {
+    outputs.iter().any(|output| {
+        output.name == output_name && output.current_workspace.as_deref() == Some(workspace_name)
+    })
+}
+
+fn is_output(ancestry: &[(i64, Option<String>)], output_name: &str) -> bool {
+    matches!(ancestry, [(_, Some(name))] if name == output_name)
 }
 
 #[cfg(test)]

@@ -46,25 +46,27 @@ only application the harness launches, and it cannot be replaced or configured. 
 repository root:
 
 ```sh
-tools/integration/run.sh                  # all 26 scenarios
+tools/integration/run.sh                  # all 27 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the five
+suite order: `--filter single-window` runs one scenario and `--filter profile` the six
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
 Each run starts and stops its own Sway on the wlroots headless backend, with one 2560×1440
-`HEADLESS-1` output and no Xwayland, bar, or input devices. Its sockets and private home,
+`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when `profile-cross-output`
+is selected does a second, separate compositor start afterwards, with a 1920×1080
+`HEADLESS-2` to the right of `HEADLESS-1`; `--filter profile-cross-output` starts only that one. Its sockets and private home,
 XDG, and temporary directories live in a new owner-only session directory under `$TMPDIR`
 (default `/tmp`), and everything it runs receives an environment built from nothing but
 `PATH`. It never connects to your session's compositor, notification daemon, or launch log,
 so it is safe to start from a terminal inside your Sway session.
 
-A passing run prints a ready line, one `PASS` line per selected scenario, `N of N selected
-scenarios passed.`, and `Headless Sway stopped; session files removed.` It exits 0 only
+For each compositor, a passing run prints a ready line, one `PASS` line per selected scenario,
+`N of N selected scenarios passed.`, and `Headless Sway stopped; session files removed.` It exits 0 only
 when every selected scenario passed and the compositor stopped cleanly. Foot windows end
 with the compositor; they are never signalled.
 
@@ -106,7 +108,8 @@ first command, then establishes its workspaces explicitly:
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
 | `3` | The second target of the successful and partial profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
 
-The suite runs twenty-one standard Foot scenarios, then five profile scenarios. The
+The suite runs twenty-one standard Foot scenarios, then six profile scenarios, the last in
+the two-output compositor. The
 original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
 siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested groups,
 process execution, default final focus, occupied-workspace refusal, and capture/reload
@@ -146,6 +149,7 @@ Expected profile failures count as passes only after independent verification:
 | `profile-occupied-refusal` | Use the still-live foreign fixture as the second entry; require exit 1 and its occupied-target diagnostic, no recorded launches, no workspace activity, and an unchanged complete observed desktop. |
 | `profile-partial-failure` | Complete the first Foot layout, then run `sleep 0` with a 500 ms matching-window timeout on the second target. Require exit 1, completed/failed workspace diagnostics, an intact first layout, an empty focused second target, and no observed rollback. |
 | `profile-event-burst` | Load `horizontal-pair` then `vertical-pair` with the profile-success checks, including capture. The first window's command first sends 400 IPC ticks through the explicitly named private socket, pausing after every ten (at most 100 per second), then execs Foot. Every tick must succeed or the window never starts. The burst therefore falls inside the first construction, after sway-stage's coordinator and loader have both subscribed, and exceeds the coordinator's 256-event queue while the loader keeps draining. The load's workspace events must be exactly the creation of `3` and the switch to it. |
+| `profile-cross-output` | In the two-output compositor, with the foreign fixture on `1` (`HEADLESS-1`, focused) and empty `2` shown on `HEADLESS-2`, load a one-entry profile for `3` with `output: HEADLESS-2`; Sway's `workspace … output` rules create `3` there. Require exactly the creation of `3`, the switch from `1`, and Sway's removal of `2`, matched by its exact identity: without that removal the regression is not demonstrated. Verify `2` is gone, `3` is new, focused, and on `HEADLESS-2`, `1` and the fixture are unchanged on `HEADLESS-1`, and the layout's launch order, ownership, hierarchy, and sizing. |
 | `profile-named-success` | Temporarily rename the exact empty focused primary slot to a unique `stage-… music` name with `num = -1`; load a mixed named/numeric profile and independently verify names, numbers, IDs, outputs, hierarchy, and final focus. Capture both the inactive named target and focused numeric target with the same independent draft/reference and preservation checks. After verified owned-window cleanup, restore the original numeric name with fresh identity, output, collision, emptiness, and event checks. |
 
 The named scenario reuses workspace `2`; no fourth workspace is required. It accepts exactly
@@ -154,7 +158,7 @@ unexpected result or interruption stops the run without renaming the workspace b
 closing windows. It never renames an occupied workspace.
 
 The three success cases capture with inference disabled into additional private directories,
-using only the two explicit targets; the harness never runs `--all`. All five use private
+using only the two explicit targets; the harness never runs `--all`. All six use private
 layout/profile directories, explicit directory overrides, and the pinned Sway socket.
 Private launch records cover commands that produce no windows; ordered window events on
 either side of the single expected transition independently establish launch bindings. The
@@ -171,9 +175,12 @@ owned windows first, returns to the primary, then establishes fresh evidence bef
 its windows. Unexpected or ambiguous outcomes leave remaining windows untouched. The
 short-lived timeout command has no window to close.
 
-With one virtual output, every target shares `HEADLESS-1`. The harness still checks actual
-output placement and rejects migration, without assigning or rearranging outputs, but it
-does not cover multiple outputs. Record `sway --version` with results. The event/snapshot
+In the one-output compositor, every target shares `HEADLESS-1`. The harness still checks
+actual output placement and rejects migration, without assigning or rearranging outputs.
+Only `profile-cross-output` covers a second output, using Sway's own workspace rules rather
+than any harness output assignment. Its compositor configuration makes Sway itself select
+`1` once both outputs are enabled, so the starting focus does not depend on which output the
+backend enables first. Record `sway --version` with results. The event/snapshot
 limits described below still apply; an unchanged tree cannot prove that an unobservable
 no-op IPC command was never attempted.
 

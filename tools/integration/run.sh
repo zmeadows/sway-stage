@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds sway-stage and the integration harness, then runs the integration scenarios in a
-# private, disposable headless Sway compositor that exists only for this run.
+# Builds sway-stage and the integration harness, then runs the integration scenarios in
+# private, disposable headless Sway compositors that exist only for this run: one output for
+# most scenarios, and a separate two-output compositor only for the cross-output scenario.
 #
 #   tools/integration/run.sh                 run every scenario
 #   tools/integration/run.sh --filter TEXT   run the scenarios whose names contain TEXT

@@ -9,8 +9,9 @@
 //! - Runtime, home, XDG, and temporary directories live in one exclusively created,
 //!   owner-only session directory. Sway binds the IPC socket path named there, and its
 //!   Wayland socket appears in the private runtime directory.
-//! - Readiness requires those private sockets and exactly one active `HEADLESS-1` output
-//!   of the configured size. Any other output name would mean the wrong compositor.
+//! - Readiness requires those private sockets and exactly the session's configured
+//!   `HEADLESS-N` outputs, active and at their configured sizes. Any other output name would
+//!   mean the wrong compositor.
 //!
 //! Only the session's own compositor, a direct child, is ever signalled. Its Wayland
 //! clients exit with it and are observed, never signalled. A failure preserves the session
@@ -31,13 +32,56 @@ use crate::ipc::{IPC_TIMEOUT, Output, Rect, Swaymsg, TreeNode};
 use crate::process;
 
 pub const OUTPUT_NAME: &str = "HEADLESS-1";
-/// The single virtual output's logical area, at scale 1.
+/// The first virtual output's logical area, at scale 1.
 pub const VIRTUAL_OUTPUT_RECT: Rect = Rect {
     x: 0,
     y: 0,
     width: 2560,
     height: 1440,
 };
+/// Only the two-output session has this output: right of the first, and smaller.
+pub const SECOND_OUTPUT_NAME: &str = "HEADLESS-2";
+pub const SECOND_OUTPUT_RECT: Rect = Rect {
+    x: 2560,
+    y: 0,
+    width: 1920,
+    height: 1080,
+};
+/// The two-output session's Sway rules put these initial workspaces on the two outputs...
+pub const FIRST_OUTPUT_INITIAL_WORKSPACE: &str = "1";
+pub const SECOND_OUTPUT_INITIAL_WORKSPACE: &str = "2";
+/// ...and create this one there when it is first selected.
+pub const SECOND_OUTPUT_ASSIGNED_WORKSPACE: &str = "3";
+
+/// The virtual outputs of one session's compositor. Every scenario runs with one output,
+/// except the dedicated cross-output scenario, which needs a second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputSetup {
+    OneOutput,
+    TwoOutputs,
+}
+
+impl OutputSetup {
+    /// Each output's name and logical area, in name order.
+    pub fn outputs(self) -> &'static [(&'static str, Rect)] {
+        match self {
+            Self::OneOutput => &[(OUTPUT_NAME, VIRTUAL_OUTPUT_RECT)],
+            Self::TwoOutputs => &[
+                (OUTPUT_NAME, VIRTUAL_OUTPUT_RECT),
+                (SECOND_OUTPUT_NAME, SECOND_OUTPUT_RECT),
+            ],
+        }
+    }
+
+    /// Keeps a two-output session's directory distinct from the one-output session's,
+    /// which a single run may also create.
+    fn directory_label(self) -> &'static str {
+        match self {
+            Self::OneOutput => "",
+            Self::TwoOutputs => "two-outputs-",
+        }
+    }
+}
 
 /// Every session directory's name starts with this; `is_session_ipc_socket` relies on it.
 const SESSION_DIRECTORY_PREFIX: &str = "sway-stage-headless-";
@@ -66,7 +110,7 @@ impl SessionDirectory {
     /// Creates a new directory under the temporary directory. Creation is exclusive, so
     /// the IPC socket path cannot exist yet: Sway binds `SWAYSOCK` only when nothing is
     /// there, and would otherwise silently choose a different path.
-    pub fn create() -> Result<Self, String> {
+    pub fn create(setup: OutputSetup) -> Result<Self, String> {
         let parent = path::absolute(env::temp_dir())
             .map_err(|error| format!("temporary directory: {error}"))?;
         let started_seconds = SystemTime::now()
@@ -75,7 +119,8 @@ impl SessionDirectory {
             .as_secs();
         let directory = Self {
             root: parent.join(format!(
-                "{SESSION_DIRECTORY_PREFIX}{started_seconds}-{}",
+                "{SESSION_DIRECTORY_PREFIX}{}{started_seconds}-{}",
+                setup.directory_label(),
                 std::process::id()
             )),
         };
@@ -161,7 +206,7 @@ pub struct HeadlessSession {
 impl HeadlessSession {
     /// Starts the compositor and waits until it is verifiably ready. On failure, the
     /// compositor has already been stopped.
-    pub fn start(directory: &SessionDirectory) -> Result<Self, String> {
+    pub fn start(directory: &SessionDirectory, setup: OutputSetup) -> Result<Self, String> {
         let sway_executable = process::find_executable("sway")?;
         let swaymsg_executable = process::find_executable("swaymsg")?;
         let setpriv_executable = process::find_executable("setpriv")?;
@@ -169,7 +214,7 @@ impl HeadlessSession {
 
         let configuration_path = directory.configuration();
         create_private_file(&configuration_path)?
-            .write_all(sway_configuration().as_bytes())
+            .write_all(sway_configuration(setup).as_bytes())
             .map_err(|error| format!("write {}: {error}", configuration_path.display()))?;
         let log = create_private_file(&directory.compositor_log())?;
 
@@ -185,10 +230,10 @@ impl HeadlessSession {
             .arg(&configuration_path)
             .current_dir(&directory.root)
             .env_clear()
-            .envs(compositor_environment(directory, &search_path));
+            .envs(compositor_environment(directory, &search_path, setup));
         let mut compositor = process::spawn_with_log(command, "start headless Sway", &log)?;
 
-        let (sway, wayland_display) = match wait_until_ready(directory, &mut compositor) {
+        let (sway, wayland_display) = match wait_until_ready(directory, setup, &mut compositor) {
             Ok(ready) => ready,
             Err(error) => {
                 // Never leave a half-started compositor behind. Its log stays for diagnosis.
@@ -323,23 +368,45 @@ impl Drop for HeadlessSession {
 
 /// No Xwayland, swaynag, bar, background, decorations, or startup applications.
 /// `swaynag_command` comes first so that no later configuration error can start swaynag.
-fn sway_configuration() -> String {
-    let Rect {
-        x,
-        y,
-        width,
-        height,
-    } = VIRTUAL_OUTPUT_RECT;
-    format!(
+fn sway_configuration(setup: OutputSetup) -> String {
+    let mut configuration = String::from(
         "\
 swaynag_command -
 xwayland disable
 default_border none
 default_floating_border none
 focus_follows_mouse no
-output {OUTPUT_NAME} mode --custom {width}x{height} position {x} {y}
-"
-    )
+",
+    );
+    for (name, rect) in setup.outputs() {
+        let Rect {
+            x,
+            y,
+            width,
+            height,
+        } = rect;
+        configuration.push_str(&format!(
+            "output {name} mode --custom {width}x{height} position {x} {y}\n"
+        ));
+    }
+
+    // Sway's own workspace rules, as a user would configure placement: each output starts
+    // with its own workspace, and Sway creates the assigned one on the second output.
+    if setup == OutputSetup::TwoOutputs {
+        for (workspace, output) in [
+            (FIRST_OUTPUT_INITIAL_WORKSPACE, OUTPUT_NAME),
+            (SECOND_OUTPUT_INITIAL_WORKSPACE, SECOND_OUTPUT_NAME),
+            (SECOND_OUTPUT_ASSIGNED_WORKSPACE, SECOND_OUTPUT_NAME),
+        ] {
+            configuration.push_str(&format!("workspace {workspace} output {output}\n"));
+        }
+        // The backend decides which output Sway enables, and so focuses, first. Sway defers
+        // this selection until both are enabled; it hides neither initial workspace.
+        configuration.push_str(&format!(
+            "workspace --no-auto-back-and-forth {FIRST_OUTPUT_INITIAL_WORKSPACE}\n"
+        ));
+    }
+    configuration
 }
 
 /// Variables shared by the compositor and its clients, built from nothing. Only `PATH`
@@ -370,13 +437,20 @@ fn base_environment(directory: &SessionDirectory, search_path: &OsStr) -> Enviro
     ]
 }
 
-/// The wlroots headless backend with one virtual output and no input devices. Renderer
-/// selection stays automatic, as in the proven manual setup.
-fn compositor_environment(directory: &SessionDirectory, search_path: &OsStr) -> Environment {
+/// The wlroots headless backend with the setup's virtual outputs and no input devices.
+/// Renderer selection stays automatic, as in the proven manual setup.
+fn compositor_environment(
+    directory: &SessionDirectory,
+    search_path: &OsStr,
+    setup: OutputSetup,
+) -> Environment {
     let mut environment = base_environment(directory, search_path);
     environment.extend([
         ("WLR_BACKENDS", OsString::from("headless")),
-        ("WLR_HEADLESS_OUTPUTS", "1".into()),
+        (
+            "WLR_HEADLESS_OUTPUTS",
+            setup.outputs().len().to_string().into(),
+        ),
         ("WLR_LIBINPUT_NO_DEVICES", "1".into()),
     ]);
     environment
@@ -397,6 +471,7 @@ fn client_environment(
 /// or the deadline passes. The last IPC query may outlast the deadline by `IPC_TIMEOUT`.
 fn wait_until_ready(
     directory: &SessionDirectory,
+    setup: OutputSetup,
     compositor: &mut Child,
 ) -> Result<(Swaymsg, OsString), String> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -412,7 +487,7 @@ fn wait_until_ready(
             ));
         }
 
-        let not_ready_reason = match observe_readiness(directory) {
+        let not_ready_reason = match observe_readiness(directory, setup) {
             Ok(ready) => return Ok(ready),
             Err(reason) => reason,
         };
@@ -427,41 +502,46 @@ fn wait_until_ready(
 }
 
 /// One readiness check, entirely through paths this session named.
-fn observe_readiness(directory: &SessionDirectory) -> Result<(Swaymsg, OsString), String> {
+fn observe_readiness(
+    directory: &SessionDirectory,
+    setup: OutputSetup,
+) -> Result<(Swaymsg, OsString), String> {
     let sway = Swaymsg::at_socket(directory.ipc_socket())?;
-    verify_virtual_output(&sway.get_outputs()?)?;
+    verify_virtual_outputs(&sway.get_outputs()?, setup)?;
     let wayland_display = find_wayland_display(&directory.runtime())?;
     Ok((sway, wayland_display))
 }
 
-/// Exactly the configured headless output. A real output name means the wrong compositor;
+/// Exactly the setup's headless outputs. A real output name means the wrong compositor;
 /// the backend's 1280x720 default means the configuration has not been applied. The
 /// scenario runner repeats this check before it changes anything.
-pub fn verify_virtual_output(outputs: &[Output]) -> Result<(), String> {
-    let [output] = outputs else {
-        let names: Vec<&str> = outputs.iter().map(|output| output.name.as_str()).collect();
+pub fn verify_virtual_outputs(outputs: &[Output], setup: OutputSetup) -> Result<(), String> {
+    let mut observed_names: Vec<&str> = outputs.iter().map(|output| output.name.as_str()).collect();
+    observed_names.sort_unstable();
+    let expected_names: Vec<&str> = setup.outputs().iter().map(|(name, _)| *name).collect();
+    if observed_names != expected_names {
         return Err(format!(
-            "expected only output {OUTPUT_NAME}, found {names:?}"
+            "expected only outputs {expected_names:?}, found {observed_names:?}"
         ));
-    };
+    }
 
-    if output.name != OUTPUT_NAME {
-        return Err(format!(
-            "expected output {OUTPUT_NAME}, found {:?}",
-            output.name
-        ));
-    }
-    if !output.active {
-        return Err(format!("{OUTPUT_NAME} is not active"));
-    }
-    if output.rect != VIRTUAL_OUTPUT_RECT {
-        return Err(format!(
-            "{OUTPUT_NAME} has {:?}, expected {VIRTUAL_OUTPUT_RECT:?}",
-            output.rect
-        ));
-    }
-    if output.current_workspace.is_none() {
-        return Err(format!("{OUTPUT_NAME} has no workspace yet"));
+    for (name, expected_rect) in setup.outputs() {
+        let output = outputs
+            .iter()
+            .find(|output| output.name == *name)
+            .expect("output names were compared above");
+        if !output.active {
+            return Err(format!("{name} is not active"));
+        }
+        if output.rect != *expected_rect {
+            return Err(format!(
+                "{name} has {:?}, expected {expected_rect:?}",
+                output.rect
+            ));
+        }
+        if output.current_workspace.is_none() {
+            return Err(format!("{name} has no workspace yet"));
+        }
     }
     Ok(())
 }
