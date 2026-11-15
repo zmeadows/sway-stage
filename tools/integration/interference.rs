@@ -1,4 +1,4 @@
-//! Deliberate interference while sway-stage constructs a standalone layout.
+//! Deliberate interference while sway-stage constructs a standalone layout or a profile.
 //!
 //! The layout's second window is not an application: its configured command is
 //! `INJECTOR_SCRIPT`, which sends prepared Sway commands through the private socket and then
@@ -6,12 +6,17 @@
 //! first window, so the interference always falls inside construction, during the second
 //! window's wait, without any timed sleep. No window can ever match the second leaf, so
 //! nothing races with the interference: sway-stage must stop because of it, and the third
-//! window never launches. The decisions here are pure; lifecycle runs the cases against the
-//! private compositor and verifies independently what each injected command did.
+//! window never launches. A profile's second entry is interrupted the same way.
+//!
+//! A profile's first entry can instead send its request from a window's command just before
+//! that window starts, so the construction still completes and only the profile coordinator
+//! can object. The decisions here are pure; lifecycle runs the cases against the private
+//! compositor and verifies independently what each injected command did.
 
 use std::path::Path;
 
 use crate::ipc::{exec_command, switch_command};
+use crate::observation::WorkspaceIdentity;
 use crate::process::CompletedProcess;
 use crate::profile::wrap_launches;
 use crate::scenarios::{ConfiguredNode, GroupLayout, Scenario, standard_scenarios};
@@ -149,29 +154,15 @@ pub fn interfering_load(
 ) -> InterferingLoad {
     let unique_id = format!("{run_id}-{}", case.name());
     let standard = standard_scenarios(&unique_id, foot, sleep);
-    let mut layout = standard
-        .iter()
-        .find(|scenario| scenario.name == "uneven-siblings")
-        .cloned()
-        .expect("standard uneven-siblings scenario");
-    layout.name = case.name();
-
-    let ConfiguredNode::Group { children, .. } = &mut layout.layout else {
-        unreachable!("uneven-siblings has a split root")
-    };
-    children[1].first_leaf_mut().command = injector.to_vec();
-    wrap_launches(
-        &mut layout.layout,
-        layout.name,
+    let layout = layout_with_injector(
+        case.name(),
+        &standard,
         launch_script,
         launch_record,
+        injector,
     );
-
+    let accepted_part = first_window_alone(&layout);
     let first_leaf = layout.layout.leaves()[0].clone();
-    let mut accepted_part = layout.clone();
-    accepted_part.layout = ConfiguredNode::Window(first_leaf.clone());
-    accepted_part.expected_focus = "window1";
-    accepted_part.configured_focus = Some("window1");
 
     let observed_target = if case == Case::UnexpectedWindow {
         // Another standard scenario's window, so its app ID names neither this layout nor
@@ -213,6 +204,277 @@ pub fn interfering_load(
         accepted_part,
         observed_target,
     }
+}
+
+/// `uneven-siblings`, named `name`, with the injector as its second window's command. Every
+/// launch is recorded through `launch_script`.
+fn layout_with_injector(
+    name: &'static str,
+    standard: &[Scenario],
+    launch_script: &str,
+    launch_record: &str,
+    injector: &[String],
+) -> Scenario {
+    let mut layout = standard
+        .iter()
+        .find(|scenario| scenario.name == "uneven-siblings")
+        .cloned()
+        .expect("standard uneven-siblings scenario");
+    layout.name = name;
+
+    let ConfiguredNode::Group { children, .. } = &mut layout.layout else {
+        unreachable!("uneven-siblings has a split root")
+    };
+    children[1].first_leaf_mut().command = injector.to_vec();
+    wrap_launches(
+        &mut layout.layout,
+        layout.name,
+        launch_script,
+        launch_record,
+    );
+    layout
+}
+
+/// Everything sway-stage accepts before the injector runs: the first window alone.
+fn first_window_alone(layout: &Scenario) -> Scenario {
+    let first_leaf = layout.layout.leaves()[0].clone();
+    let mut accepted_part = layout.clone();
+    accepted_part.layout = ConfiguredNode::Window(first_leaf);
+    accepted_part.expected_focus = "window1";
+    accepted_part.configured_focus = Some("window1");
+    accepted_part
+}
+
+/// A two-entry profile whose second construction the injector interrupts by selecting the
+/// first entry's workspace again. The coordinator has already verified and recorded the
+/// first entry's completion, so this is interference during the second entry, not in the
+/// coordinator's interval between the entries.
+pub const PROFILE_SECOND_ENTRY_SCENARIO: &str = "profile-second-entry-interference";
+
+/// The interfered profile's entries and what the harness expects afterwards.
+pub struct InterferingProfile {
+    /// The first entry's layout, `horizontal-pair`, which must complete and stay intact.
+    pub first: Scenario,
+    /// The second entry's layout, whose second window is the injector.
+    pub second: Scenario,
+    /// The second entry's first window alone: all of it that sway-stage accepts.
+    pub second_accepted_part: Scenario,
+    /// One line per started launch, in order: both first-entry windows, then the second
+    /// entry's first window and the injector.
+    pub expected_launch_record: String,
+}
+
+/// The interfered profile's layouts, each named after its position in the profile. Every
+/// launch is recorded through `launch_script`; `injector` is from `injector_command`.
+pub fn interfering_profile(
+    run_id: &str,
+    foot: &str,
+    sleep: &str,
+    launch_script: &str,
+    launch_record: &str,
+    injector: &[String],
+) -> InterferingProfile {
+    let unique_id = format!("{run_id}-{PROFILE_SECOND_ENTRY_SCENARIO}");
+    let standard = standard_scenarios(&unique_id, foot, sleep);
+
+    let mut first = standard
+        .iter()
+        .find(|scenario| scenario.name == "horizontal-pair")
+        .cloned()
+        .expect("standard horizontal-pair scenario");
+    first.name = "profile-first";
+    wrap_launches(&mut first.layout, first.name, launch_script, launch_record);
+
+    let second = layout_with_injector(
+        "profile-second",
+        &standard,
+        launch_script,
+        launch_record,
+        injector,
+    );
+    let second_accepted_part = first_window_alone(&second);
+
+    // The second entry's third window never launches.
+    let mut expected_launch_record = String::new();
+    for leaf in first.layout.leaves() {
+        expected_launch_record.push_str(&format!("{}-{}\n", first.name, leaf.layout_id));
+    }
+    for leaf in &second.layout.leaves()[..2] {
+        expected_launch_record.push_str(&format!("{}-{}\n", second.name, leaf.layout_id));
+    }
+
+    InterferingProfile {
+        first,
+        second,
+        second_accepted_part,
+        expected_launch_record,
+    }
+}
+
+/// sway-stage's report of the interrupted profile: exit status 1, no stdout, the second
+/// entry's progress with exactly the first workspace completed, a focus loss of the second
+/// target `second_target_id` during its second window's wait, and the stop advice that
+/// follows started applications. A window timeout, or any other failure, is never it.
+pub fn verify_profile_failure_report(
+    output: &CompletedProcess,
+    first_target: &WorkspaceIdentity,
+    second_target_name: &str,
+    second_target_id: i64,
+) -> Result<(), String> {
+    let stderr = output.stderr.as_str();
+    let progress = format!(
+        "profile load: workspace {second_target_name}, layout \"profile-second\"; completed 1 \
+         workspaces [({}, {})]; ",
+        first_target.name, first_target.id
+    );
+    let wait_context = format!(
+        "{progress}wait leaf=\"window2\": profile {PROFILE_SECOND_ENTRY_SCENARIO:?}: layout \
+         construction: "
+    );
+    let focus_event =
+        format!("{wait_context}workspace focus changed from target id={second_target_id}");
+    let focused_elsewhere =
+        format!("{wait_context}snapshot: focus left target id={second_target_id}");
+    let reported = stderr.contains(&focus_event) || stderr.contains(&focused_elsewhere);
+    let stopped_without_cleanup = stderr.contains(
+        "application launches may have left partial layouts; stopped without cleanup or relaunch",
+    );
+
+    if output.status.code() != Some(1)
+        || !output.stdout.trim().is_empty()
+        || !reported
+        || !stopped_without_cleanup
+        || stderr.contains("window timeout")
+    {
+        return Err(format!(
+            "expected a focus loss during the second entry's window2 wait after one completed \
+             workspace (exit 1), got {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// A two-entry profile whose first entry renames its own target while it loads: the first
+/// entry's second window renames the focused workspace before Foot starts. The loader knows
+/// its target only by container ID, so the first construction completes. Only the profile
+/// coordinator, which checks every workspace event that arrives while a layout loads,
+/// refuses the rename, at its completion verification and so before selecting the second
+/// target. The rename happens during the first construction; it is the coordinator's own
+/// check, not the timing, that this case places at the boundary between the entries.
+pub const PROFILE_COMPLETION_SCENARIO: &str = "profile-completion-interference";
+
+/// Arguments: swaymsg, the private IPC socket, a record file, and one Sway command request,
+/// then a window's own command. The request goes through the explicitly named socket and
+/// must succeed; it is recorded before the window's command replaces the script, and a
+/// failure exits before the window starts.
+pub const INJECT_BEFORE_LAUNCH_SCRIPT: &str = "\
+#!/bin/sh
+swaymsg=$1 socket=$2 record=$3 sway_command=$4
+shift 4
+\"$swaymsg\" -s \"$socket\" -t command \"$sway_command\" >/dev/null || exit 1
+printf '%s\\n' \"$sway_command\" >> \"$record\" || exit 1
+exec \"$@\"
+";
+
+/// The command prefix that runs `INJECT_BEFORE_LAUNCH_SCRIPT` with `sway_command` before a
+/// window's own command.
+pub fn inject_before_launch_command(
+    script: &str,
+    swaymsg: &str,
+    socket: &str,
+    record: &str,
+    sway_command: &str,
+) -> Vec<String> {
+    vec![
+        "/bin/sh".into(),
+        script.into(),
+        swaymsg.into(),
+        socket.into(),
+        record.into(),
+        sway_command.into(),
+    ]
+}
+
+/// The renaming profile's layouts in profile order: `horizontal-pair`, whose second window's
+/// command is prefixed by `inject_prefix`, then `vertical-pair`, which never launches. Every
+/// launch is recorded through `launch_script`.
+pub fn renaming_profile(
+    run_id: &str,
+    foot: &str,
+    sleep: &str,
+    launch_script: &str,
+    launch_record: &str,
+    inject_prefix: &[String],
+) -> [Scenario; 2] {
+    let unique_id = format!("{run_id}-{PROFILE_COMPLETION_SCENARIO}");
+    let standard = standard_scenarios(&unique_id, foot, sleep);
+    let take_layout = |standard_name: &str, layout_name: &'static str| {
+        let mut layout = standard
+            .iter()
+            .find(|scenario| scenario.name == standard_name)
+            .cloned()
+            .expect("standard renaming profile scenario");
+        layout.name = layout_name;
+        layout
+    };
+
+    let mut first = take_layout("horizontal-pair", "profile-first");
+    let mut second = take_layout("vertical-pair", "profile-second");
+    let ConfiguredNode::Group { children, .. } = &mut first.layout else {
+        unreachable!("horizontal-pair has a split root")
+    };
+    let renaming_window = children[1].first_leaf_mut();
+    let mut command = inject_prefix.to_vec();
+    command.append(&mut renaming_window.command);
+    renaming_window.command = command;
+
+    for layout in [&mut first, &mut second] {
+        wrap_launches(
+            &mut layout.layout,
+            layout.name,
+            launch_script,
+            launch_record,
+        );
+    }
+    [first, second]
+}
+
+/// sway-stage's report of the renamed first target: exit status 1, no stdout, the first
+/// entry's progress with no workspace completed, the coordinator's refusal of the rename of
+/// `renamed_workspace_id` at its completion verification, and the stop advice that follows
+/// started applications. A failure inside the construction, or any other, is never it.
+pub fn verify_completion_failure_report(
+    output: &CompletedProcess,
+    first_target_name: &str,
+    renamed_workspace_id: i64,
+) -> Result<(), String> {
+    let stderr = output.stderr.as_str();
+    let refused = format!(
+        "profile load: workspace {first_target_name}, layout \"profile-first\"; completed 0 \
+         workspaces []; workspace completion verification: profile \
+         {PROFILE_COMPLETION_SCENARIO:?}: unexpected workspace change Rename \
+         id={renamed_workspace_id}"
+    );
+    let stopped_without_cleanup = stderr.contains(
+        "application launches may have left partial layouts; stopped without cleanup or relaunch",
+    );
+
+    if output.status.code() != Some(1)
+        || !output.stdout.trim().is_empty()
+        || !stderr.contains(&refused)
+        || !stopped_without_cleanup
+        || stderr.contains("layout construction")
+    {
+        return Err(format!(
+            "expected the coordinator to refuse the rename after the first construction (exit \
+             1), got {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(())
 }
 
 /// sway-stage's own report of the interference: exit status 1, no stdout, the second

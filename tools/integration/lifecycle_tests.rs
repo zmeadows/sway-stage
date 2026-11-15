@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 51] = [
+const SUITE_ORDER: [&str; 53] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -79,6 +79,8 @@ const SUITE_ORDER: [&str; 51] = [
     "interference-focus-restored",
     "interference-focus-unstable",
     "interference-accepted-window-closed",
+    "profile-second-entry-interference",
+    "profile-completion-interference",
     "profile-success",
     "profile-occupied-refusal",
     "profile-partial-failure",
@@ -130,6 +132,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
         select_scenarios(Some("profile")).unwrap(),
         [
             "profile-floating-refusal",
+            "profile-second-entry-interference",
+            "profile-completion-interference",
             "profile-success",
             "profile-occupied-refusal",
             "profile-partial-failure",
@@ -190,12 +194,18 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "interference-unexpected-window",
             "interference-focus-restored",
             "interference-focus-unstable",
-            "interference-accepted-window-closed"
+            "interference-accepted-window-closed",
+            "profile-second-entry-interference",
+            "profile-completion-interference"
         ]
     );
     assert_eq!(
         select_scenarios(Some("interference-focus")).unwrap(),
         ["interference-focus-restored", "interference-focus-unstable"]
+    );
+    assert_eq!(
+        select_scenarios(Some("entry-interference")).unwrap(),
+        ["profile-second-entry-interference"]
     );
     assert_eq!(
         select_scenarios(Some("partial-failure")).unwrap(),

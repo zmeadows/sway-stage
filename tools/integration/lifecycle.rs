@@ -72,9 +72,9 @@ const ASSIGNED_WORKSPACE: &str = "4";
 
 /// Every scenario in suite order: the standard scenarios, the failing standalone loads, the
 /// floating-occupancy refusals, the interfered loads, the held-launch interference, the
-/// profile cases, the sequentially verified profiles, the Sway exec entry points, the session
-/// round-trip, the assigned-workspace refusal, then the two-output session's cross-output
-/// profile.
+/// interfered profiles, the profile cases, the sequentially verified profiles, the Sway exec
+/// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
+/// session's cross-output profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -84,6 +84,8 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.extend(floating_refusal::CASES.iter().map(|case| case.name()));
     names.extend(interference::CASES.iter().map(|case| case.name()));
     names.extend(held_launch::CASES.iter().map(|case| case.name()));
+    names.push(interference::PROFILE_SECOND_ENTRY_SCENARIO);
+    names.push(interference::PROFILE_COMPLETION_SCENARIO);
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(profile::SEQUENTIAL_CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
@@ -401,6 +403,14 @@ impl Harness {
             if selected.contains(&case.name()) {
                 self.run_held_launch(case, &directory)?;
             }
+        }
+        // Creates `3` and has it removed again, with the primary keeping its identity.
+        if selected.contains(&interference::PROFILE_SECOND_ENTRY_SCENARIO) {
+            self.run_profile_second_entry_interference(&directory)?;
+        }
+        // Renames the primary and gives it its name back, keeping its identity.
+        if selected.contains(&interference::PROFILE_COMPLETION_SCENARIO) {
+            self.run_profile_completion_interference(&directory)?;
         }
 
         for case in profile::CASES {
@@ -2852,6 +2862,445 @@ impl Harness {
         profile::verify_workspace_events(&observed.workspace_events, &[])?;
         window_events.append(&mut observed.window_events);
         Ok(observed)
+    }
+
+    /// Loads a two-entry profile from the empty, focused primary whose first entry renames
+    /// the primary before its second window starts. The first construction must complete,
+    /// and the coordinator must then refuse the rename before selecting the absent `3`. The
+    /// outcome counts only after the report, the rename and launch records, the single
+    /// workspace event, and the complete first layout are verified independently. Only then
+    /// does the harness close its windows and give the primary its name back.
+    fn run_profile_completion_interference(
+        &mut self,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = interference::PROFILE_COMPLETION_SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let profiles_directory = files.subdirectory("profiles")?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        let inject_script_path = files.path.join("inject-before-launch.sh");
+        let inject_record_path = files.path.join("injected-commands");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write profile launch recorder: {error}"))?;
+        fs::write(
+            &inject_script_path,
+            interference::INJECT_BEFORE_LAUNCH_SCRIPT,
+        )
+        .map_err(|error| format!("write interference injector: {error}"))?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        let renamed = WorkspaceIdentity {
+            id: primary.id,
+            name: format!("stage-{}-renamed", self.run_id),
+        };
+
+        let rename = crate::ipc::rename_command(&primary.name, &renamed.name)?;
+        let inject_prefix = interference::inject_before_launch_command(
+            utf8_path(&inject_script_path)?,
+            utf8_path(self.sway.executable())?,
+            utf8_path(self.sway.socket())?,
+            utf8_path(&inject_record_path)?,
+            &rename,
+        );
+        let [first, second] = interference::renaming_profile(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+            &inject_prefix,
+        );
+        let entries = [
+            profile::ProfileEntry {
+                workspace: primary.name.clone(),
+                layout: first.clone(),
+            },
+            profile::ProfileEntry {
+                workspace: PROFILE_WORKSPACE.into(),
+                layout: second.clone(),
+            },
+        ];
+        for entry in &entries {
+            layouts_directory.write(entry.layout.name, &configuration_yaml(&entry.layout))?;
+        }
+        profiles_directory.write(name, &profile::sequential_configuration(&entries))?;
+        let profile_command = |operation: &str| {
+            let mut command = Command::new(&self.binary);
+            command
+                .arg("--layouts-dir")
+                .arg(&layouts_directory.path)
+                .arg("--profiles-dir")
+                .arg(&profiles_directory.path)
+                .args(["profile", operation, name]);
+            self.sway.select_socket(&mut command);
+            command
+        };
+        let checked = process::run(profile_command("check"), &self.stage, IPC_TIMEOUT)?;
+        if checked != format!("{name}: valid\n") {
+            return Err("unexpected profile check output".into());
+        }
+
+        self.stage = format!("{name}: fresh workspace baselines");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        if before.focused_workspace_id != primary.id {
+            return Err("the profile must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        // The second target is absent, and nothing has the primary's new name yet.
+        session_roundtrip::require_workspace_names(&before, &[FIXTURE_WORKSPACE, &primary.name])?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: profile load stopped by its coordinator");
+        process::check_interruption()?;
+        let timeout = load_timeout(&first) + load_timeout(&second);
+        let completed = process::run_with_status(profile_command("load"), &self.stage, timeout)?;
+        process::check_interruption()?;
+        // The fence accepts one workspace event: the rename of the focused primary to its
+        // exact new name, keeping its ID. Creating or selecting `3` would fail it.
+        let loaded =
+            crate::observation::snapshot_after_rename(&self.sway, &mut self.events, &renamed)
+                .map_err(|error| {
+                    format!(
+                        "{error}; sway-stage {}: {}",
+                        completed.status,
+                        completed.stderr.trim()
+                    )
+                })?;
+        // The harness's focus history now names the primary by its new name.
+        self.primary = Some(renamed.clone());
+
+        self.stage = format!("{name}: independent verification");
+        let inject_record = read_optional_record(&inject_record_path)?;
+        if inject_record != interference::expected_injector_record(&[rename]) {
+            return Err(format!(
+                "Sway did not accept the injected rename: {inject_record:?}"
+            ));
+        }
+        // The first entry's two launches, and nothing of the second entry.
+        let expected_launch_record: String = first
+            .layout
+            .leaves()
+            .iter()
+            .map(|leaf| format!("{}-{}\n", first.name, leaf.layout_id))
+            .collect();
+        let observed_launch_record = read_optional_record(&launch_record_path)?;
+        if observed_launch_record != expected_launch_record {
+            return Err(format!(
+                "profile launch order/count differs: expected {expected_launch_record:?}, \
+                 observed {observed_launch_record:?}"
+            ));
+        }
+        session_roundtrip::require_workspace_names(&loaded, &[FIXTURE_WORKSPACE, &renamed.name])?;
+        foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+
+        // The whole first layout, sized and focused as configured, on the renamed primary.
+        let owned = bind_launches(&loaded.window_events, &first.layout, &preexisting)?;
+        verify_ownership(
+            &loaded.tree,
+            primary.id,
+            &first.layout,
+            &preexisting,
+            &owned,
+        )?;
+        let measurements = verify_layout(loaded.focused_workspace(), &first, &owned)?;
+        for note in &measurements.sizing_notes {
+            println!("      {note}");
+        }
+        interference::verify_completion_failure_report(&completed, &primary.name, primary.id)?;
+        println!(
+            "      window2's command renamed {} id={} to {:?}; the first layout {:?} completed; \
+             the coordinator stopped before selecting {PROFILE_WORKSPACE}",
+            primary.name,
+            primary.id,
+            renamed.name,
+            owned.keys().collect::<Vec<_>>()
+        );
+
+        // Only an independently verified failure enters cleanup, which the harness performs.
+        self.stage = format!("{name}: verified cleanup");
+        let context = CleanupContext {
+            target: &renamed,
+            layout: &first.layout,
+            preexisting_ids: &preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &owned,
+            signature(loaded.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+        // The harness, not sway-stage, gives the empty primary its name back.
+        self.rename_empty_primary(&primary.name)?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; cleanup and original name verified)");
+        Ok(())
+    }
+
+    /// Loads a two-entry profile from the empty, focused primary: `horizontal-pair` on the
+    /// primary, then a three-window layout on the absent `3` whose second window is the
+    /// injector, which selects the primary again. sway-stage must stop the whole profile
+    /// during the second entry, with the first entry reported complete and left intact.
+    /// The outcome counts only after the report, the injector and launch records, the exact
+    /// workspace events, each entry's windows bound between its own selection and the next,
+    /// and both workspaces are verified independently. Only then does the harness select
+    /// `3` and close the windows from the last workspace back to the primary.
+    fn run_profile_second_entry_interference(
+        &mut self,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = interference::PROFILE_SECOND_ENTRY_SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let profiles_directory = files.subdirectory("profiles")?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        let injector_script_path = files.path.join("inject.sh");
+        let injector_record_path = files.path.join("injected-commands");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write profile launch recorder: {error}"))?;
+        fs::write(&injector_script_path, interference::INJECTOR_SCRIPT)
+            .map_err(|error| format!("write interference injector: {error}"))?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+
+        let sway_commands = vec![crate::ipc::switch_command(&primary.name)?];
+        let injector = interference::injector_command(
+            utf8_path(&injector_script_path)?,
+            utf8_path(self.sway.executable())?,
+            utf8_path(self.sway.socket())?,
+            utf8_path(&injector_record_path)?,
+            &sway_commands,
+        );
+        let interfering = interference::interfering_profile(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+            &injector,
+        );
+        let entries = [
+            profile::ProfileEntry {
+                workspace: primary.name.clone(),
+                layout: interfering.first.clone(),
+            },
+            profile::ProfileEntry {
+                workspace: PROFILE_WORKSPACE.into(),
+                layout: interfering.second.clone(),
+            },
+        ];
+        for entry in &entries {
+            layouts_directory.write(entry.layout.name, &configuration_yaml(&entry.layout))?;
+        }
+        profiles_directory.write(name, &profile::sequential_configuration(&entries))?;
+        let profile_command = |operation: &str| {
+            let mut command = Command::new(&self.binary);
+            command
+                .arg("--layouts-dir")
+                .arg(&layouts_directory.path)
+                .arg("--profiles-dir")
+                .arg(&profiles_directory.path)
+                .args(["profile", operation, name]);
+            self.sway.select_socket(&mut command);
+            command
+        };
+        let checked = process::run(profile_command("check"), &self.stage, IPC_TIMEOUT)?;
+        if checked != format!("{name}: valid\n") {
+            return Err("unexpected profile check output".into());
+        }
+
+        self.stage = format!("{name}: fresh workspace baselines");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let recorded_primary = profile::Target::record(&before, &primary.name)?
+            .ok_or("primary profile workspace disappeared")?;
+        if before.focused_workspace_id != primary.id || recorded_primary.workspace != primary {
+            return Err("the profile must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        // The second target is absent, so the profile must create it.
+        session_roundtrip::require_workspace_names(&before, &[FIXTURE_WORKSPACE, &primary.name])?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: profile load stopped by interference");
+        process::check_interruption()?;
+        let timeout = load_timeout(&interfering.first) + load_timeout(&interfering.second);
+        let completed = process::run_with_status(profile_command("load"), &self.stage, timeout)?;
+        process::check_interruption()?;
+        // The profile's own selection of `3`, then the injector's selection of the primary,
+        // are the only switches the fence accepts; any other focus change fails it.
+        let expected_switches = ExpectedSwitches {
+            from_id: primary.id,
+            destination_names: vec![PROFILE_WORKSPACE.into(), primary.name.clone()],
+        };
+        let (loaded, switch_indexes) =
+            snapshot_with_switches(&self.sway, &mut self.events, &expected_switches).map_err(
+                |error| {
+                    format!(
+                        "{error}; sway-stage {}: {}",
+                        completed.status,
+                        completed.stderr.trim()
+                    )
+                },
+            )?;
+
+        self.stage = format!("{name}: independent verification");
+        let injector_record = read_optional_record(&injector_record_path)?;
+        if injector_record != interference::expected_injector_record(&sway_commands) {
+            return Err(format!(
+                "Sway did not accept every injected command: {injector_record:?}"
+            ));
+        }
+        let observed_launch_record = read_optional_record(&launch_record_path)?;
+        if observed_launch_record != interfering.expected_launch_record {
+            return Err(format!(
+                "profile launch order/count differs: expected {:?}, observed \
+                 {observed_launch_record:?}",
+                interfering.expected_launch_record
+            ));
+        }
+
+        let second_target = profile::Target::record(&loaded, PROFILE_WORKSPACE)?
+            .ok_or("the second profile target is missing")?;
+        if preexisting.contains(&second_target.workspace.id) {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        recorded_primary.verify(&loaded)?;
+        // The selection of the absent `3` from the occupied primary, which Sway keeps, then
+        // the injector's selection of the primary, which keeps `3` because the second entry's
+        // first window is there. Nothing from sway-stage follows: no selection of `3` again.
+        profile::verify_workspace_events(
+            &loaded.workspace_events,
+            &[
+                profile::ExpectedWorkspaceEvent::Init(&second_target.workspace),
+                profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: primary.id,
+                    to: &second_target.workspace,
+                },
+                profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: second_target.workspace.id,
+                    to: &primary,
+                },
+            ],
+        )?;
+        session_roundtrip::require_workspace_names(
+            &loaded,
+            &[FIXTURE_WORKSPACE, &primary.name, PROFILE_WORKSPACE],
+        )?;
+        if output_ancestry(&loaded.tree, second_target.workspace.id)?
+            != output_ancestry(&loaded.tree, primary.id)?
+        {
+            return Err(format!(
+                "profile target {PROFILE_WORKSPACE} is not on {OUTPUT_NAME}"
+            ));
+        }
+        foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+
+        // Each entry's windows open between its own selection and the next switch: the first
+        // entry selected its final focus before the coordinator selected `3`, and after the
+        // injector's switch only the first entry's windows may take focus.
+        let (before_injection, after_injection) = loaded.window_events.split_at(switch_indexes[1]);
+        let layouts = [
+            interfering.first.clone(),
+            interfering.second_accepted_part.clone(),
+        ];
+        let accepted_per_layout = profile::bind_sequential_launches(
+            before_injection,
+            &[0, switch_indexes[0]],
+            &layouts,
+            &preexisting,
+        )?;
+        require_return_focus(after_injection, &accepted_per_layout[0])?;
+        let workspaces: Vec<SessionWorkspace> = [recorded_primary, second_target]
+            .into_iter()
+            .zip(layouts)
+            .zip(accepted_per_layout)
+            .map(|((target, layout), accepted)| SessionWorkspace {
+                target,
+                layout,
+                accepted,
+            })
+            .collect();
+        session_roundtrip::verify_session_ownership(&loaded.tree, &workspaces, &preexisting)?;
+        // The injector left the primary focused, so its completed layout is checked with its
+        // global focus, and the second entry's partial layout through its saved focus.
+        verify_session_layout(&loaded, &workspaces[0], true)?;
+        verify_session_layout(&loaded, &workspaces[1], false)?;
+        interference::verify_profile_failure_report(
+            &completed,
+            &primary,
+            PROFILE_WORKSPACE,
+            workspaces[1].target.workspace.id,
+        )?;
+        println!(
+            "      the injector selected {} during the second entry's window2 wait; sway-stage \
+             stopped with 1 completed workspace; windows {:?} on {} and {:?} on {} stayed; \
+             window3 never launched",
+            primary.name,
+            workspaces[0].accepted.keys().collect::<Vec<_>>(),
+            primary.name,
+            workspaces[1].accepted.keys().collect::<Vec<_>>(),
+            PROFILE_WORKSPACE
+        );
+
+        // Only an independently verified failure enters cleanup, which the harness performs.
+        // It selects `3` itself, where cleanup starts, while the primary keeps its windows.
+        self.stage = format!("{name}: select {PROFILE_WORKSPACE} for cleanup");
+        process::check_interruption()?;
+        self.sway.switch_workspace(PROFILE_WORKSPACE)?;
+        let transition = ExpectedSwitch {
+            from_id: primary.id,
+            destination_name: PROFILE_WORKSPACE.into(),
+        };
+        let selected = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_return_focus(&selected.window_events, &workspaces[1].accepted)?;
+        profile::verify_workspace_events(
+            &selected.workspace_events,
+            &[profile::ExpectedWorkspaceEvent::Focus {
+                from_id: primary.id,
+                to: &workspaces[1].target.workspace,
+            }],
+        )?;
+        let first_target = self.clean_session_workspaces(name, &workspaces, &preexisting)?;
+        if first_target != primary {
+            return Err("cleanup did not end on the original primary".into());
+        }
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
     }
 
     /// Loads a two-entry profile from the empty, focused primary and verifies it workspace by

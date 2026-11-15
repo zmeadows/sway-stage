@@ -46,13 +46,13 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 51 scenarios
+tools/integration/run.sh                  # all 53 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the sixteen
+suite order: `--filter single-window` runs one scenario and `--filter profile` the eighteen
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
@@ -128,8 +128,8 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `0` | The second target of `profile-workspace-zero`, created and removed like `3`. |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. The injector of `interference-switch-away` and `interference-switch-and-return` selects it during a load. |
-| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` temporarily renames it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. The [floating refusals](#floating-occupancy-refusals) leave one floating window on it while focus is on `3`, so it keeps its identity. |
-| `3` | The second target of the successful, partial, and shared-layout profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. `profile-floating-refusal` selects `3` before its load as the empty, focused first target; Sway removes it again on the return to `2`. |
+| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` and `profile-completion-interference` temporarily rename it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. The [floating refusals](#floating-occupancy-refusals) leave one floating window on it while focus is on `3`, so it keeps its identity. |
+| `3` | The second target of the successful, partial, shared-layout, and second-entry interference profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. `profile-floating-refusal` selects `3` before its load as the empty, focused first target; Sway removes it again on the return to `2`. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
 | `5`–`8` | The [session round-trip](#four-workspace-session-round-trip)'s workspaces, created twice in that order and removed by Sway after each cleanup. |
 
@@ -137,7 +137,8 @@ The suite runs twenty-three standard Foot scenarios, the
 [failing standalone loads](#failing-standalone-loads), the
 [floating-occupancy refusals](#floating-occupancy-refusals), the
 [interfered loads](#interference-during-construction), the
-[held-launch interference](#held-launch-interference), then the profile scenarios, the
+[held-launch interference](#held-launch-interference), the
+[interfered profiles](#profile-interference), then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
 [four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
@@ -316,6 +317,32 @@ discriminate:
 
 A failed wait stops the hold before the harness waits for sway-stage to exit, so neither
 leaves a process behind.
+
+#### Profile interference
+
+Two profiles from the empty, focused primary stop because of deliberate workspace activity
+while they load:
+
+```sh
+tools/integration/run.sh --filter entry-interference
+tools/integration/run.sh --filter completion-interference
+```
+
+| Scenario | Interference | Independent expectations |
+| --- | --- | --- |
+| `profile-second-entry-interference` | `horizontal-pair` on `2`, then the interfered three-window layout on the absent `3`. Its second window is the [injector](#interference-during-construction), which selects `2` again. | The workspace events are exactly the creation of `3`, the switch to it, and the injector's switch back. sway-stage never selects `3` again. Require exit 1 with the second entry's progress, `completed 1 workspaces [(2, ID)]`, a focus loss of `3` during its `window2` wait, and no window timeout. Window events bind the first entry's windows before the coordinator's switch, with its final focus, and the second entry's first window before the injector's. Afterwards only the first entry's windows take focus. The first layout is verified complete and focused on `2`, and the second entry's first window on `3` through its saved focus. Records show four launches and the one accepted request. Cleanup selects `3`, closes its window, returns to `2` (Sway removes the emptied `3`), and closes the first layout. |
+| `profile-completion-interference` | `horizontal-pair` on `2`, then `vertical-pair` on the absent `3`. The first layout's second window's command first renames `2` to a run-unique name through the private socket. | sway-stage's loader knows its target only by container ID, so the first construction completes. Only the coordinator's own check of events that arrive during construction refuses the rename. The fence accepts exactly that one rename of the focused primary and no creation or selection of `3`. Require exit 1 with `completed 0 workspaces []` and the refusal of the rename by the primary's ID at `workspace completion verification`, rather than in layout construction. The launch record holds only the first layout's two launches. The whole first layout is verified, including sizing and final focus. Cleanup closes its windows, then the harness gives the empty primary its name back. |
+
+Neither scenario covers the exact interval in which the coordinator, having verified the
+first entry's completion, revalidates focus, identity, and occupancy and selects the next
+target. The interval is too short for an external process to reach reliably. Hitting it
+deterministically would need a test hook in the production coordinator. That is not
+justified: the offline profile CLI transcripts already drive that recheck, the same code
+for every entry, to refuse changed occupancy, identity, output, and away-and-back focus
+history. `profile-completion-interference` instead places activity during the first
+construction that only the coordinator reports, at that boundary. A negative check with
+the coordinator's per-event check disabled (2026-11-15) left only its focused-identity check
+at completion to stop the profile, with another report, which the scenario rejected.
 
 #### Profile scenarios
 

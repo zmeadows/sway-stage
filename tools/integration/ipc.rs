@@ -74,11 +74,7 @@ impl Swaymsg {
 
     /// Lifecycle has just fenced and independently verified the empty workspace's ID.
     pub fn rename_workspace(&self, old_name: &str, new_name: &str) -> Result<(), String> {
-        validate_workspace_name(old_name)?;
-        validate_workspace_name(new_name)?;
-        self.command(&format!(
-            "rename workspace \"{old_name}\" to \"{new_name}\""
-        ))
+        self.command(&rename_command(old_name, new_name)?)
     }
 
     /// The caller must have just revalidated this window's ownership and hierarchy.
@@ -287,6 +283,13 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
 pub fn switch_command(name: &str) -> Result<String, String> {
     validate_workspace_name(name)?;
     Ok(format!("workspace --no-auto-back-and-forth \"{name}\""))
+}
+
+/// Also the text an interference script sends, so it is validated the same way.
+pub fn rename_command(old_name: &str, new_name: &str) -> Result<String, String> {
+    validate_workspace_name(old_name)?;
+    validate_workspace_name(new_name)?;
+    Ok(format!("rename workspace \"{old_name}\" to \"{new_name}\""))
 }
 
 fn close_command(container_id: i64) -> Result<String, String> {

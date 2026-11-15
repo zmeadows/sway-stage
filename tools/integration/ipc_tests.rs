@@ -25,6 +25,12 @@ fn commands_accept_only_validated_workspace_names_and_exact_ids() {
     assert_eq!(float_command(42).unwrap(), "[con_id=42] floating enable");
     assert!(float_command(0).is_err());
     assert!(float_command(-1).is_err());
+    assert_eq!(
+        rename_command("2", "stage-a1 renamed").unwrap(),
+        "rename workspace \"2\" to \"stage-a1 renamed\""
+    );
+    assert!(rename_command("2\"; kill", "3").is_err());
+    assert!(rename_command("2", "3; kill").is_err());
     assert_eq!(focus_command(42).unwrap(), "[con_id=42] focus");
     assert!(focus_command(0).is_err());
     assert!(focus_command(-1).is_err());
