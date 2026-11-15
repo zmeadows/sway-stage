@@ -1,18 +1,16 @@
 //! Sequential launch and guarded, recursive tiled construction.
 
+use crate::application_process::{LaunchedApplication, application_command};
 use crate::config::{Config, GroupLayout, LayoutNode, Matcher, NodeKind};
 use crate::diagnostics::{Diagnostics, SizingWarning};
 use crate::observation::{
     self, Observer, Snapshot, app_id, class, locate_windows, proportions, sibling_dimensions,
 };
 use std::collections::{BTreeMap, HashSet};
-use std::env;
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -843,11 +841,15 @@ impl<'a> Construction<'a> {
             "expected {matcher:?}; launching once (argv/env omitted)"
         ));
         let effective_cwd = cwd.as_ref().or(self.default_cwd);
-        let mut process = spawn(command, effective_cwd, env)?;
-        // From here on, a failure may leave this application and a partial layout behind.
-        self.diagnostics.spawned(process.id());
+        let application_command = application_command(command, effective_cwd, env)?;
+        // Once it starts, a failure may leave this application and a partial layout
+        // behind. Its supervision never outlasts the window deadline.
+        let mut application = LaunchedApplication::start(
+            application_command,
+            window_deadline.saturating_duration_since(Instant::now()),
+            self.diagnostics,
+        )?;
 
-        let mut process_exit_status = None;
         let mut provisional_window_id = None;
         let mut expected_after = self.expected_hierarchy.clone();
         loop {
@@ -861,7 +863,7 @@ impl<'a> Construction<'a> {
             if Instant::now() >= window_deadline {
                 return Err(self.diagnostics.window_timeout(
                     &new_windows.wait_diagnostics(launch_started_at),
-                    process_exit_status,
+                    application.exit_status(),
                 ));
             }
 
@@ -923,7 +925,7 @@ impl<'a> Construction<'a> {
                     self.diagnostics.record(&format!(
                         "accepted leaf={configured_window_id:?} id={provisional_window_id}; hierarchy/identity verified"
                     ));
-                    reap_if_exited(&mut process, &mut process_exit_status, self.diagnostics)?;
+                    application.record_exit_if_reported(self.diagnostics)?;
                     self.accepted_windows.insert(provisional_window_id, matcher);
                     self.expected_hierarchy = expected_after;
                     return Ok(window_path);
@@ -962,7 +964,7 @@ impl<'a> Construction<'a> {
                 }
             }
 
-            reap_if_exited(&mut process, &mut process_exit_status, self.diagnostics)?;
+            application.record_exit_if_reported(self.diagnostics)?;
             let poll_until = window_deadline.min(Instant::now() + POLL_INTERVAL);
             while let Some(event) = self.observer.next_until(poll_until)? {
                 new_windows.observe_event(&event, self.diagnostics)?;
@@ -1341,56 +1343,6 @@ fn reject_unsafe_window_event(
         return Err(format!(
             "accepted window id={} closed or changed identity/floating/fullscreen state",
             node.id
-        ));
-    }
-
-    Ok(())
-}
-
-fn spawn(
-    argv: &[String],
-    cwd: Option<&PathBuf>,
-    environment: &BTreeMap<String, String>,
-) -> Result<Child, String> {
-    let parent_cwd =
-        env::current_dir().map_err(|error| format!("read current directory: {error}"))?;
-    let effective_cwd = cwd.map_or_else(|| parent_cwd.clone(), |cwd| parent_cwd.join(cwd));
-    // Resolve explicit relative executables ourselves: Command's relative-program plus
-    // current_dir behavior is platform dependent. Bare names retain child PATH lookup.
-    let executable = if argv[0].contains('/') {
-        effective_cwd.join(&argv[0])
-    } else {
-        PathBuf::from(&argv[0])
-    };
-
-    Command::new(executable)
-        .args(&argv[1..])
-        .current_dir(effective_cwd)
-        .envs(environment)
-        // A terminal interrupt directed at the launcher must not also kill the app.
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!("spawn application: {error}; check executable, child PATH and cwd")
-        })
-}
-
-fn reap_if_exited(
-    process: &mut Child,
-    process_exit_status: &mut Option<ExitStatus>,
-    diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
-    if process_exit_status.is_none()
-        && let Some(status) = process
-            .try_wait()
-            .map_err(|error| format!("inspect child: {error}"))?
-    {
-        *process_exit_status = Some(status);
-        diagnostics.record(&format!(
-            "launch process exited: {status}; continuing window observation (delegation is allowed)"
         ));
     }
 

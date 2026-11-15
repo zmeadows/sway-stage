@@ -19,6 +19,7 @@ unimplemented = "warn"
 
 [dependencies]
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+libc = { version = "0.2.191", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize", "serialize"] }
 serde_path_to_error = "0.1"

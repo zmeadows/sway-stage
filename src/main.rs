@@ -1,3 +1,4 @@
+mod application_process;
 mod capture;
 mod command_inference;
 mod config;

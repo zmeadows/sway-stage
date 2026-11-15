@@ -236,10 +236,14 @@ impl Diagnostics {
         let _ = io::stderr().lock().write_all(line.as_bytes());
     }
 
-    /// Records a successful `Command::spawn`. A spawn that failed started nothing.
-    pub fn spawned(&mut self, pid: u32) {
+    /// Records a started application. A spawn that failed started nothing. The PID is
+    /// unknown only if the launch supervisor died before reporting it.
+    pub fn spawned(&mut self, application_pid: Option<u32>) {
         self.application_spawned = true;
-        self.record(&format!("spawned pid={pid}"));
+        match application_pid {
+            Some(pid) => self.record(&format!("spawned pid={pid}")),
+            None => self.record("spawned an application whose pid was not reported"),
+        }
     }
 
     /// Retains observed process status without another poll or changing the window deadline.
@@ -941,7 +945,7 @@ mod tests {
             assert_eq!(diagnostics.failure_urgency(cause), "critical", "{cause}");
         }
 
-        diagnostics.spawned(42);
+        diagnostics.spawned(Some(42));
         assert_eq!(
             diagnostics.failure_urgency("profile target occupied: workspace 3"),
             "critical"
@@ -969,7 +973,7 @@ mod tests {
                     let mut diagnostics = without_log("profile load");
                     diagnostics.profile_started(256);
                     diagnostics.profile_workspace(&WorkspaceTarget::Number(1), "private", 1);
-                    diagnostics.spawned(42);
+                    diagnostics.spawned(Some(42));
                     diagnostics.profile_workspace_completed(101);
                     diagnostics.profile_workspace(&target, "private", 256);
                     if cause.starts_with("window timeout: ") {
@@ -1020,7 +1024,7 @@ mod tests {
         assert!(!failed_spawn.contains("Windows may remain"));
         assert!(!failed_spawn.contains("nothing changed"));
 
-        diagnostics.spawned(42);
+        diagnostics.spawned(Some(42));
         let body = diagnostics.failure_notification("window timeout: private selector");
         assert!(body.contains("Windows may remain. Inspect before retrying."));
         assert!(!body.contains("last-run.log"));
@@ -1059,7 +1063,7 @@ mod tests {
         assert!(!selection.contains("Windows may remain"));
         assert!(!selection.contains("nothing changed"));
 
-        diagnostics.spawned(42);
+        diagnostics.spawned(Some(42));
         diagnostics.stage("workspace completion verification");
         let unverified = diagnostics.failure_notification("unexpected workspace change Focus");
         assert!(unverified.contains("0/3 completed"));
@@ -1362,7 +1366,7 @@ mod tests {
         let path = directory.join("last-run.log");
         let mut diagnostics = Diagnostics::for_test(path.clone());
         diagnostics.stage("launch");
-        diagnostics.spawned(42);
+        diagnostics.spawned(Some(42));
 
         let launch_log = fs::read_to_string(&path).unwrap();
         assert!(launch_log.contains("spawned pid=42"), "{launch_log}");

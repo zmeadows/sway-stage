@@ -89,7 +89,7 @@ A window node has the following fields:
 | `command` | Required nonempty string sequence: nonempty executable first, then literal arguments. |
 | `match` | Required Sway window selector with exactly one nonempty string: Wayland `app_id` or Xwayland `class`. |
 | `cwd` | Optional working directory overriding the layout default. |
-| `env` | Optional string-to-string map of child environment overrides; default empty. |
+| `env` | Optional string-to-string map of child environment overrides; default empty. `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` are reserved. |
 
 Children of `splith` and `splitv` may have `weight`, a finite positive number defaulting
 to `1`. This includes groups of any type. Its share is `weight / sum(sibling weights)`
@@ -152,6 +152,18 @@ environment only in that child. Keys must be nonempty and contain neither `=` no
 arguments, paths, and environment values cannot contain NUL. An empty argument or
 environment value is allowed. Users may explicitly invoke a shell in `command`; layout
 files are executable instructions and should be trusted accordingly.
+
+Every application starts outside Sway's launch context for whatever started sway-stage.
+When Sway's `exec` starts sway-stage, as any keybinding does, Sway records the workspace
+focused at that moment. It places the first window that presents the exported activation
+token, or whose process descends from the process it started, on that workspace instead of
+the selected target. Each child therefore inherits sway-stage's environment without
+`XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, and validation rejects either key in `env`.
+The child is also started by a short-lived supervisor that has first left sway-stage's
+process ancestry, so the application descends from neither sway-stage nor that `exec`.
+The supervisor reports the application's PID and, if it exits before its window is
+accepted, its exit status. It exits as soon as the window is accepted, the run stops, or
+the window deadline passes, leaving a running application to the system.
 
 Validation rejects unknown or duplicate keys, mixed group/window fields, wrong types,
 missing required values, empty children/commands/selectors, invalid weights, duplicate
@@ -431,10 +443,12 @@ correct hierarchy. Gaps, borders, integer rounding, and application minimum size
 in effect. Structural and ownership errors are always fatal.
 
 App IDs/classes identify a window type, not which process created it. Concurrent launches
-with the same selector can be indistinguishable; distinct IDs reduce ambiguity. Sway rules,
-inherited activation context, and single-instance applications can place a window elsewhere;
-the loader refuses rather than moving it. IPC observations and commands are not atomic:
-these safeguards do not provide isolation from concurrent desktop activity. For example,
+with the same selector can be indistinguishable; distinct IDs reduce ambiguity. Sway rules
+and single-instance applications can place a window elsewhere; the loader refuses rather
+than moving it. An application cannot escape the launch context when a child subreaper
+runs between Sway's `exec` and sway-stage, such as a keybinding that wraps sway-stage in an
+init process; its window is then refused in the same way. IPC observations and commands
+are not atomic: these safeguards do not provide isolation from concurrent desktop activity. For example,
 Sway cannot target a workspace's own layout by criteria, so construction focuses the
 workspace through its first child container in the same request. If that container
 closes or moves at that instant, the layout change can reach another container or

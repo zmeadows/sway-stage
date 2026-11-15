@@ -139,6 +139,12 @@ Do not add dependencies for stylistic reasons.
   in place. No closing, killing, moving, destructive rollback, or automatic relaunching.
 - Preserve argument boundaries and apply cwd/environment to the child process only.
   Do not implicitly evaluate a shell or rewrite application commands to inject IDs.
+- Start every application without inherited activation variables and outside sway-stage's
+  process ancestry, so Sway's launch context for whatever started sway-stage cannot place
+  its window. Bound its supervisor by the window deadline: it reports the application's
+  own PID and exit status, holds only its status pipe and pidfd, reaps only that
+  application, and exits once sway-stage stops listening. Keep `unsafe` confined to that
+  post-fork code, which may call only async-signal-safe functions.
 - Report the failing stage and cause to stderr and attempt a desktop error notification.
   Notification or log failures must not mask the original error. Do not log environment
   values or complete command arguments by default.

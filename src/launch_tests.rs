@@ -1,6 +1,7 @@
 use super::*;
 use crate::observation::fixtures::*;
 use serde_json::{Value, json};
+use std::env;
 use std::fs;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

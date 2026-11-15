@@ -313,6 +313,7 @@ name = "sway-stage"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "serde",
  "serde-saphyr",
  "serde_json",

@@ -1,3 +1,4 @@
+use crate::application_process::ACTIVATION_ENVIRONMENT_KEYS;
 use crate::discovery::valid_name;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_saphyr::Spanned;
@@ -535,6 +536,16 @@ fn validate_node(
                         "environment keys must be nonempty and contain neither '=' nor NUL",
                     ));
                 }
+                if ACTIVATION_ENVIRONMENT_KEYS.contains(&environment_key.as_str()) {
+                    return Err(fail(
+                        ".env",
+                        &format!(
+                            "{environment_key} is reserved: sway-stage removes launch activation \
+                             context from every application so its window opens on the target \
+                             workspace; remove this key"
+                        ),
+                    ));
+                }
                 if environment_value.contains('\0') {
                     return Err(fail(".env", "environment values cannot contain NUL"));
                 }
@@ -1052,6 +1063,21 @@ mod tests {
                 "version: 1\nlayout: {{id: t, command: [foot], match: {{app_id: foot}}, env: {env}}}"
             );
             rejects(&input, "env");
+        }
+        // Activation context would place the window on the workspace focused when Sway
+        // started sway-stage, so even an explicit value is a configuration error.
+        for reserved_key in ACTIVATION_ENVIRONMENT_KEYS {
+            let input = format!(
+                "version: 1\nlayout:\n  group: splith\n  children:\n    - {WINDOW}\n    \
+                 - {{id: t, command: [foot], match: {{app_id: foot}}, env: {{{reserved_key}: ''}}}}"
+            );
+            rejects(
+                &input,
+                &format!(
+                    "layout.children[1].env (line 6, column 7): {reserved_key} is reserved: \
+                     sway-stage removes launch activation context"
+                ),
+            );
         }
     }
 
