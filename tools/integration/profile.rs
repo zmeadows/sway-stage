@@ -145,7 +145,8 @@ pub fn layouts(
     [first, second]
 }
 
-fn wrap_launches(
+/// Prefixes each window's command with `LAUNCH_SCRIPT`, which records `{name}-{layout_id}`.
+pub fn wrap_launches(
     node: &mut crate::scenarios::ConfiguredNode,
     name: &str,
     script: &str,

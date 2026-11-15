@@ -15,6 +15,7 @@ mod capture;
 mod fixtures;
 mod headless;
 mod ipc;
+mod launch_context;
 mod launcher;
 mod layout;
 mod lifecycle;

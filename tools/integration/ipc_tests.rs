@@ -192,3 +192,30 @@ fn empty_workspace_layout_commands_use_native_sway_spelling() {
         Layout::Stacked
     );
 }
+
+#[test]
+fn exec_commands_accept_only_plain_absolute_script_paths() {
+    assert_eq!(
+        exec_command(Path::new(
+            "/tmp/sway-stage-headless-1-2/tmp/run_a.b-c/entry.sh"
+        ))
+        .unwrap(),
+        "exec /bin/sh /tmp/sway-stage-headless-1-2/tmp/run_a.b-c/entry.sh"
+    );
+    for invalid in [
+        "",
+        "entry.sh",
+        "./entry.sh",
+        "/tmp/a b/entry.sh",
+        "/tmp/a'b",
+        "/tmp/a\"b",
+        "/tmp/a;exit",
+        "/tmp/a,b",
+        "/tmp/$HOME",
+        "/tmp/a\nb",
+        "/tmp/a\\b",
+        "/tmp/é",
+    ] {
+        assert!(exec_command(Path::new(invalid)).is_err(), "{invalid:?}");
+    }
+}

@@ -86,6 +86,14 @@ impl Swaymsg {
         self.command(&close_command(container_id)?)
     }
 
+    /// Starts `/bin/sh SCRIPT` through Sway's own `exec`, as a keybinding would, so Sway
+    /// records a launch context for the focused workspace. The process inherits the
+    /// compositor's environment, never the harness's, and is not our child: it is observed
+    /// through files it writes and never signalled.
+    pub fn exec_script(&self, script: &Path) -> Result<(), String> {
+        self.command(&exec_command(script)?)
+    }
+
     /// Only after a fresh empty-target, focus, identity, and output check by the caller.
     pub fn set_empty_workspace_layout(&self, layout: InitialWorkspaceLayout) -> Result<(), String> {
         self.command(layout.command())
@@ -260,6 +268,27 @@ fn close_command(container_id: i64) -> Result<String, String> {
         return Err("owned window must have a positive container ID".into());
     }
     Ok(format!("[con_id={container_id}] kill"))
+}
+
+/// Sway's command parser and the `sh -c` that `exec` runs would both interpret quotes,
+/// whitespace, `;`, `,`, and `$`, so only an absolute path made of plainly safe bytes is
+/// sent. Everything else the script needs is already written inside it.
+fn exec_command(script: &Path) -> Result<String, String> {
+    let text = script
+        .to_str()
+        .filter(|text| text.starts_with('/'))
+        .filter(|text| {
+            text.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+        })
+        .ok_or_else(|| {
+            format!(
+                "script path {} cannot be safely represented in a Sway exec command; \
+                 set TMPDIR to a plain absolute directory",
+                script.display()
+            )
+        })?;
+    Ok(format!("exec /bin/sh {text}"))
 }
 
 fn decode_command_reply(output: &str) -> Result<(), String> {

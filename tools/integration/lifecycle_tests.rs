@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 27] = [
+const SUITE_ORDER: [&str; 30] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -72,6 +72,9 @@ const SUITE_ORDER: [&str; 27] = [
     "profile-partial-failure",
     "profile-named-success",
     "profile-event-burst",
+    "profile-exec-context",
+    "profile-exec-ancestry-only",
+    "profile-exec-token-only",
     "profile-cross-output",
 ];
 
@@ -110,7 +113,18 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-partial-failure",
             "profile-named-success",
             "profile-event-burst",
+            "profile-exec-context",
+            "profile-exec-ancestry-only",
+            "profile-exec-token-only",
             "profile-cross-output"
+        ]
+    );
+    assert_eq!(
+        select_scenarios(Some("profile-exec")).unwrap(),
+        [
+            "profile-exec-context",
+            "profile-exec-ancestry-only",
+            "profile-exec-token-only"
         ]
     );
     assert_eq!(
