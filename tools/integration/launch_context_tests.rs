@@ -6,7 +6,7 @@ use crate::ipc::WorkspaceEvent;
 use crate::profile::verify_workspace_events;
 
 #[test]
-fn cases_have_distinct_names_and_entry_modes_and_expect_the_known_bug() {
+fn cases_have_distinct_names_and_entry_modes() {
     let names: Vec<&str> = CASES.iter().map(|case| case.name()).collect();
     assert_eq!(
         names,
@@ -18,9 +18,6 @@ fn cases_have_distinct_names_and_entry_modes_and_expect_the_known_bug() {
     );
     let modes: Vec<&str> = CASES.iter().map(|case| case.entry_mode()).collect();
     assert_eq!(modes, ["inherited", "without-token", "detached"]);
-    for case in CASES {
-        assert_eq!(case.expected_placement(), Placement::RecreatedOrigin);
-    }
 }
 
 #[test]
@@ -114,7 +111,7 @@ fn outcome(exit_code: i32, stdout: &str, stderr: &str, context: &str) -> ExecOut
     }
 }
 
-/// The shape of sway-stage's profile failure for a misplaced window.
+/// The shape of sway-stage's profile failure, as from a misplaced window.
 const REFUSAL: &str = "sway-stage: profile load: workspace 3, layout \"profile-exec-context\"; \
     completed 0 workspaces []; launch window1: placement failure: wrong workspace: matching \
     window id=42 (workspace=Some(41) scratchpad=false floating=false); expected workspace=40; \
@@ -142,49 +139,20 @@ fn only_an_exported_launch_context_counts() {
 }
 
 #[test]
-fn a_misplacement_refusal_must_name_the_window_its_workspace_and_the_target() {
-    let refused = outcome(1, "", REFUSAL, LAUNCH_CONTEXT_EXPORTED);
-    refused.require_misplacement_refusal(42, 41, 40).unwrap();
-
-    // Another window, workspace, or target; a different exit; stdout; or a missing summary.
-    for (window_id, workspace_id, target_id) in [(43, 41, 40), (42, 4, 40), (42, 41, 4)] {
-        assert!(
-            refused
-                .require_misplacement_refusal(window_id, workspace_id, target_id)
-                .is_err()
-        );
-    }
-    for wrong in [
-        outcome(0, "", REFUSAL, LAUNCH_CONTEXT_EXPORTED),
-        outcome(2, "", REFUSAL, LAUNCH_CONTEXT_EXPORTED),
-        outcome(1, "loaded\n", REFUSAL, LAUNCH_CONTEXT_EXPORTED),
-        outcome(
-            1,
-            "",
-            &REFUSAL.replace(
-                "completed 0 workspaces []",
-                "completed 1 workspaces [(3, 40)]",
-            ),
-            LAUNCH_CONTEXT_EXPORTED,
-        ),
-        outcome(
-            1,
-            "",
-            &REFUSAL.replace("stopped without cleanup", "stopped"),
-            LAUNCH_CONTEXT_EXPORTED,
-        ),
-    ] {
-        assert!(wrong.require_misplacement_refusal(42, 41, 40).is_err());
-    }
-}
-
-#[test]
 fn success_requires_exit_zero_and_no_stdout() {
     outcome(0, "", "", LAUNCH_CONTEXT_EXPORTED)
         .require_success()
         .unwrap();
-    assert!(outcome(1, "", REFUSAL, "").require_success().is_err());
-    assert!(outcome(0, "loaded\n", "", "").require_success().is_err());
+    assert!(
+        outcome(1, "", REFUSAL, LAUNCH_CONTEXT_EXPORTED)
+            .require_success()
+            .is_err()
+    );
+    assert!(
+        outcome(0, "loaded\n", "", LAUNCH_CONTEXT_EXPORTED)
+            .require_success()
+            .is_err()
+    );
 }
 
 fn workspace_event(
@@ -203,7 +171,7 @@ fn workspace_event(
 }
 
 #[test]
-fn workspace_events_distinguish_a_recreated_origin_from_a_correct_placement() {
+fn workspace_events_require_the_target_and_no_recreated_origin() {
     let origin = WorkspaceIdentity {
         id: 10,
         name: "2".into(),
@@ -211,10 +179,6 @@ fn workspace_events_distinguish_a_recreated_origin_from_a_correct_placement() {
     let target = WorkspaceIdentity {
         id: 40,
         name: "3".into(),
-    };
-    let recreated = WorkspaceIdentity {
-        id: 41,
-        name: "2".into(),
     };
     // Selecting the target creates it and removes the empty origin.
     let selection = || {
@@ -224,28 +188,25 @@ fn workspace_events_distinguish_a_recreated_origin_from_a_correct_placement() {
             workspace_event("empty", 10, "2", None),
         ]
     };
-    let with_last = |last: WorkspaceEvent| {
-        let mut events = selection();
-        events.push(last);
-        events
-    };
-    let misplaced = with_last(workspace_event("init", 41, "2", None));
+    let expected = expected_workspace_events(&origin, &target);
+    verify_workspace_events(&selection(), &expected).unwrap();
 
-    let correct_expectation = expected_workspace_events(&origin, &target, None);
-    let bug_expectation = expected_workspace_events(&origin, &target, Some(&recreated));
-    verify_workspace_events(&selection(), &correct_expectation).unwrap();
-    verify_workspace_events(&misplaced, &bug_expectation).unwrap();
-    assert!(verify_workspace_events(&selection(), &bug_expectation).is_err());
-    assert!(verify_workspace_events(&misplaced, &correct_expectation).is_err());
+    // The misplacement's recreation of the origin, for the window, is an extra event.
+    let mut recreated_origin = selection();
+    recreated_origin.push(workspace_event("init", 41, "2", None));
+    assert!(verify_workspace_events(&recreated_origin, &expected).is_err());
 
-    // Recreation must be a new identity, after the origin's removal.
-    let reused = with_last(workspace_event("init", 10, "2", None));
-    assert!(verify_workspace_events(&reused, &bug_expectation).is_err());
-    let early = vec![
-        workspace_event("init", 40, "3", None),
-        workspace_event("focus", 40, "3", Some(10)),
-        workspace_event("init", 41, "2", None),
+    // Another target, or a switch from elsewhere, also differs.
+    let other_target = vec![
+        workspace_event("init", 41, "3", None),
+        workspace_event("focus", 41, "3", Some(10)),
         workspace_event("empty", 10, "2", None),
     ];
-    assert!(verify_workspace_events(&early, &bug_expectation).is_err());
+    assert!(verify_workspace_events(&other_target, &expected).is_err());
+    let other_origin = vec![
+        workspace_event("init", 40, "3", None),
+        workspace_event("focus", 40, "3", Some(11)),
+        workspace_event("empty", 10, "2", None),
+    ];
+    assert!(verify_workspace_events(&other_origin, &expected).is_err());
 }

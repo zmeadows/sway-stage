@@ -1,17 +1,18 @@
-//! A known production bug, reproduced: when Sway's own `exec` starts sway-stage, as any
-//! keybinding does, including one for `sway-stage menu`, a profile's first window can appear
-//! on the workspace that was focused at that `exec` instead of on the selected target.
+//! Regressions for Sway's launch context: when Sway's own `exec` starts sway-stage, as any
+//! keybinding does, including one for `sway-stage menu`, a profile's window must still open
+//! on the selected target.
 //!
 //! Sway 1.10.1 records the focused workspace in a launch context for every `exec`, and
 //! exports an activation token naming that context to the started process. The first window
 //! that presents the token before mapping, or whose process descends from the started
 //! process, is placed by the context. When the recorded workspace was empty, Sway removed it
-//! as focus left it; it then recreates a workspace with the same name for the window. The
-//! context expires with its token 30 seconds after the `exec`.
+//! as focus left it; it would then recreate a workspace with the same name for the window.
+//! The context expires with its token 30 seconds after the `exec`. sway-stage therefore
+//! starts each application without the inherited variables and outside its own process
+//! ancestry.
 //!
-//! The cases leave Sway both paths, only the process ancestry, or only the token. Every
-//! case states its expected placement explicitly, so a production fix changes only
-//! `Case::expected_placement`.
+//! The cases leave Sway both paths, only the process ancestry, or only the token: either one
+//! alone misplaced the window before sway-stage was fixed.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -35,7 +36,7 @@ const LAUNCH_CONTEXT_EXPORTED: &str = "activation_token=present\nstartup_id=pres
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
     /// What a keybinding gives sway-stage: the activation token in its environment, and
-    /// Foot as a descendant of the process Sway started.
+    /// descent from the process Sway started.
     ContextInherited,
     /// The token is removed before sway-stage starts; only process ancestry remains.
     AncestryOnly,
@@ -52,24 +53,14 @@ impl Case {
         }
     }
 
-    /// Where the profile's only window is expected while the bug remains. A fix that keeps
-    /// every launch on its selected target changes each of these to `Placement::Target`.
-    pub fn expected_placement(self) -> Placement {
-        match self {
-            Self::ContextInherited | Self::AncestryOnly | Self::TokenOnly => {
-                Placement::RecreatedOrigin
-            }
-        }
-    }
-
     /// Which launch-context paths the case leaves open, for the scenario report.
     pub fn description(self) -> &'static str {
         match self {
             Self::ContextInherited => {
-                "sway-stage inherited the token, and Foot descended from the exec'd process"
+                "sway-stage inherited the token and descended from the exec'd process"
             }
             Self::AncestryOnly => {
-                "the token was removed before sway-stage started; Foot descended from the exec'd process"
+                "the token was removed before sway-stage, which descended from the exec'd process"
             }
             Self::TokenOnly => {
                 "sway-stage inherited the token but was orphaned from the exec'd process"
@@ -85,20 +76,6 @@ impl Case {
             Self::TokenOnly => "detached",
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Placement {
-    /// The known production bug: the window is on a workspace that Sway recreated with the
-    /// origin's name after removing the empty origin, and the selected target stays empty.
-    /// sway-stage refuses the misplaced window and stops.
-    RecreatedOrigin,
-    /// The intended behavior: the window is on the selected target, and the load succeeds.
-    #[allow(
-        dead_code,
-        reason = "no case expects the fixed behavior while the bug remains"
-    )]
-    Target,
 }
 
 /// `single-window` with recorded launches: one window is the smallest layout that shows
@@ -234,7 +211,7 @@ impl ExecOutcome {
         })
     }
 
-    /// Without a launch context, nothing here could reproduce the bug.
+    /// Without an exported launch context, the case would test nothing.
     pub fn require_launch_context(&self) -> Result<(), String> {
         if self.context != LAUNCH_CONTEXT_EXPORTED {
             return Err(format!(
@@ -245,7 +222,7 @@ impl ExecOutcome {
         Ok(())
     }
 
-    /// The intended outcome: a successful load with nothing on stdout.
+    /// A successful load, with nothing on stdout.
     pub fn require_success(&self) -> Result<(), String> {
         if self.exit_code != 0 || !self.stdout.trim().is_empty() {
             return Err(format!(
@@ -256,58 +233,22 @@ impl ExecOutcome {
         }
         Ok(())
     }
-
-    /// sway-stage's refusal of the misplaced window: exit 1, naming the window, where it was
-    /// found, and the selected target, with no completed workspace and no cleanup.
-    pub fn require_misplacement_refusal(
-        &self,
-        window_id: i64,
-        recreated_workspace_id: i64,
-        target_workspace_id: i64,
-    ) -> Result<(), String> {
-        let placement_failure = format!(
-            "placement failure: wrong workspace: matching window id={window_id} \
-             (workspace=Some({recreated_workspace_id}) "
-        );
-        let expected_target = format!("expected workspace={target_workspace_id};");
-        let refused = self.exit_code == 1
-            && self.stdout.trim().is_empty()
-            && self.stderr.contains(&placement_failure)
-            && self.stderr.contains(&expected_target)
-            && self.stderr.contains("completed 0 workspaces []")
-            && self.stderr.contains("stopped without cleanup or relaunch");
-        if !refused {
-            return Err(format!(
-                "expected sway-stage to refuse window id={window_id} on workspace \
-                 id={recreated_workspace_id} (exit 1), got exit {}: {}",
-                self.exit_code,
-                self.stderr.trim()
-            ));
-        }
-        Ok(())
-    }
 }
 
-/// The load's exact workspace events. Creating and selecting the target removes the empty
-/// origin; with the known bug, Sway then recreates a workspace with the origin's name for
-/// the window.
+/// The load's exact workspace events: creating and selecting the target removes the empty
+/// origin, and no workspace is recreated for the window.
 pub fn expected_workspace_events<'a>(
     origin: &'a WorkspaceIdentity,
     target: &'a WorkspaceIdentity,
-    recreated_origin: Option<&'a WorkspaceIdentity>,
-) -> Vec<ExpectedWorkspaceEvent<'a>> {
-    let mut expected = vec![
+) -> [ExpectedWorkspaceEvent<'a>; 3] {
+    [
         ExpectedWorkspaceEvent::Init(target),
         ExpectedWorkspaceEvent::Focus {
             from_id: origin.id,
             to: target,
         },
         ExpectedWorkspaceEvent::Empty(origin),
-    ];
-    if let Some(recreated_origin) = recreated_origin {
-        expected.push(ExpectedWorkspaceEvent::Init(recreated_origin));
-    }
-    expected
+    ]
 }
 
 #[cfg(test)]

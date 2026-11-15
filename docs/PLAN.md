@@ -4,12 +4,6 @@ Loading and capture support all four native group layouts, including active sele
 Behavior is defined in the [specification](SPECIFICATION.md); verification procedures are in
 [development](DEVELOPMENT.md). Remaining work:
 
-- **Exec launch-context placement.** When Sway's `exec` (a keybinding, including the menu's)
-  starts sway-stage, Sway places a profile's first window by that `exec`'s launch context
-  on the workspace focused at the `exec`, through either the inherited activation token or
-  process ancestry. sway-stage refuses the misplaced window safely, but the profile fails.
-  Fix this so every launch lands on its selected target. The harness's `profile-exec-*`
-  scenarios reproduce it and must then expect target placement.
 - **Native groups, visual verification.** Check tab/stack header order and singleton
   headers against the installed Sway version, following the developer guide's
   native-group visual check.

@@ -50,7 +50,7 @@ const PRIMARY_WORKSPACE: &str = "2";
 const PROFILE_WORKSPACE: &str = "3";
 
 /// Every scenario in suite order: the standard scenarios, the profile cases, the
-/// launch-context reproductions, then the two-output session's cross-output profile.
+/// launch-context regressions, then the two-output session's cross-output profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -542,8 +542,8 @@ impl Harness {
 
     /// Starts sway-stage through Sway's own `exec`, as a keybinding would, from the empty
     /// focused primary, to load a one-entry profile for the absent `PROFILE_WORKSPACE`. Each
-    /// case verifies its expected placement exactly, including the known production bug's
-    /// misplacement. Either way, the case ends on an empty, focused workspace with the
+    /// case requires the window on that target and a successful load, whichever launch
+    /// context paths Sway was left. The case ends on an empty, focused workspace with the
     /// primary's name, which becomes the primary.
     fn run_exec_launch_context(
         &mut self,
@@ -682,97 +682,32 @@ impl Harness {
 
         println!("      launch context: {}", case.description());
 
-        let placement = case.expected_placement();
-        let (window_workspace, ready_for_cleanup) = match placement {
-            launch_context::Placement::RecreatedOrigin => {
-                let recreated = profile::Target::record(&loaded, &origin.name)?
-                    .ok_or("no workspace was recreated with the origin's name")?;
-                if preexisting.contains(&recreated.workspace.id) {
-                    return Err("the origin workspace was not removed and recreated".into());
-                }
-                let expected_events = launch_context::expected_workspace_events(
-                    &origin,
-                    &target.workspace,
-                    Some(&recreated.workspace),
-                );
-                profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
-                verify_ownership(
-                    &loaded.tree,
-                    recreated.workspace.id,
-                    &layout.layout,
-                    &preexisting,
-                    &accepted,
-                )?;
-                require_empty(target.verify(&loaded)?)?;
-                outcome.require_misplacement_refusal(
-                    window_id,
-                    recreated.workspace.id,
-                    target.workspace.id,
-                )?;
-                println!(
-                    "      origin {} id={} was focused at exec and removed when target {target_name} \
-                     id={} was selected; window id={window_id} appeared on recreated {} id={}",
-                    origin.name,
-                    origin.id,
-                    target.workspace.id,
-                    recreated.workspace.name,
-                    recreated.workspace.id
-                );
-                println!(
-                    "      sway-stage exit {}: {}",
-                    outcome.exit_code,
-                    outcome.stderr.trim()
-                );
-
-                // The window is on an unfocused workspace. Select it before closing only
-                // that window there.
-                self.stage = format!("{name}: return to the recreated origin");
-                process::check_interruption()?;
-                self.sway.switch_workspace(&recreated.workspace.name)?;
-                let transition = ExpectedSwitch {
-                    from_id: target.workspace.id,
-                    destination_name: recreated.workspace.name.clone(),
-                };
-                let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
-                require_return_focus(&returned.window_events, &accepted)?;
-                if returned.focused_workspace_id != recreated.workspace.id {
-                    return Err("the recreated origin was not selected".into());
-                }
-                verify_fixture_state(&returned, fixture, fixture_signature)?;
-                (recreated.workspace, returned)
-            }
-            launch_context::Placement::Target => {
-                let expected_events =
-                    launch_context::expected_workspace_events(&origin, &target.workspace, None);
-                profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
-                outcome.require_success()?;
-                verify_ownership(
-                    &loaded.tree,
-                    target.workspace.id,
-                    &layout.layout,
-                    &preexisting,
-                    &accepted,
-                )?;
-                let measurements = verify_layout(target.verify(&loaded)?, &layout, &accepted)?;
-                for note in &measurements.sizing_notes {
-                    println!("      {note}");
-                }
-                (target.workspace.clone(), loaded)
-            }
-        };
-
-        // Only an independently verified expected outcome enters cleanup.
-        self.stage = format!("{name}: verified cleanup");
+        // The window is on the selected target, and nothing recreated the origin.
+        let expected_events = launch_context::expected_workspace_events(&origin, &target.workspace);
+        profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
+        outcome.require_success()?;
         verify_ownership(
-            &ready_for_cleanup.tree,
-            window_workspace.id,
+            &loaded.tree,
+            target.workspace.id,
             &layout.layout,
             &preexisting,
             &accepted,
         )?;
-        let foreign = ForeignWindows::record(&ready_for_cleanup, window_workspace.id)?;
+        let measurements = verify_layout(target.verify(&loaded)?, &layout, &accepted)?;
+        for note in &measurements.sizing_notes {
+            println!("      {note}");
+        }
+        println!(
+            "      origin {} id={} was focused at exec and removed when target {target_name} \
+             id={} was selected; window id={window_id} appeared on the target",
+            origin.name, origin.id, target.workspace.id
+        );
+
+        // Only an independently verified expected outcome enters cleanup.
+        self.stage = format!("{name}: verified cleanup");
+        let foreign = ForeignWindows::record(&loaded, target.workspace.id)?;
         let context = CleanupContext {
-            target: &window_workspace,
+            target: &target.workspace,
             layout: &layout.layout,
             preexisting_ids: &preexisting,
             foreign: &foreign,
@@ -782,34 +717,30 @@ impl Harness {
             &mut self.events,
             &context,
             &accepted,
-            signature(ready_for_cleanup.focused_workspace()),
+            signature(loaded.focused_workspace()),
         )?;
         let cleaned = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&cleaned.window_events, None)?;
         foreign.verify(&cleaned)?;
         require_empty(cleaned.focused_workspace())?;
 
-        // The recreated origin is already focused and empty. After a correct placement, the
-        // origin is gone, and selecting its name creates it again.
-        let new_primary = match placement {
-            launch_context::Placement::RecreatedOrigin => window_workspace,
-            launch_context::Placement::Target => {
-                self.stage = format!("{name}: return to the primary's name");
-                process::check_interruption()?;
-                self.sway.switch_workspace(&origin.name)?;
-                let transition = ExpectedSwitch {
-                    from_id: window_workspace.id,
-                    destination_name: origin.name.clone(),
-                };
-                let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
-                require_quiet(&returned.window_events, None)?;
-                require_empty(returned.focused_workspace())?;
-                WorkspaceIdentity {
-                    id: returned.focused_workspace_id,
-                    name: origin.name.clone(),
-                }
-            }
+        // Sway removed the origin when the target was selected; selecting its name creates
+        // the next primary.
+        self.stage = format!("{name}: return to the primary's name");
+        process::check_interruption()?;
+        self.sway.switch_workspace(&origin.name)?;
+        let transition = ExpectedSwitch {
+            from_id: target.workspace.id,
+            destination_name: origin.name.clone(),
         };
+        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_quiet(&returned.window_events, None)?;
+        require_empty(returned.focused_workspace())?;
+        let new_primary = WorkspaceIdentity {
+            id: returned.focused_workspace_id,
+            name: origin.name.clone(),
+        };
+
         let settled = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&settled.window_events, None)?;
         verify_fixture_state(&settled, fixture, fixture_signature)?;
@@ -824,15 +755,7 @@ impl Harness {
         self.primary = Some(new_primary);
 
         self.passed += 1;
-        match placement {
-            launch_context::Placement::RecreatedOrigin => println!(
-                "PASS  {name} (KNOWN PRODUCTION BUG reproduced: Sway's exec launch context placed \
-                 the window on a recreated origin, not the selected target; success-path cleanup only)"
-            ),
-            launch_context::Placement::Target => {
-                println!("PASS  {name} (independent verification; success-path cleanup only)")
-            }
-        }
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
         Ok(())
     }
 

@@ -106,7 +106,7 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
-| `3` | The second target of the successful and partial profile scenarios, and the only target of the launch-context reproductions. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
+| `3` | The second target of the successful and partial profile scenarios, and the only target of the launch-context regressions. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
 
 The suite runs twenty-one standard Foot scenarios, then nine profile scenarios, the last in
 the two-output compositor. The
@@ -289,14 +289,11 @@ The harness's guards against unexpected focus changes, foreign-window changes, a
 owned-window state changes are covered by its offline tests; nothing else connects to the
 private compositor during a run.
 
-### Known bug: exec launch context
+### Exec launch context
 
-The three `profile-exec-*` scenarios reproduce a **known production bug** that is not yet
-fixed. When Sway's own `exec` starts sway-stage, as any keybinding does, including one for
-`sway-stage menu`, the first window of a profile can appear on the workspace that was
-focused at that `exec` instead of on the selected target. These scenarios pass only when they
-observe that exact misplacement. A pass is printed as
-`PASS  NAME (KNOWN PRODUCTION BUG reproduced: …)`. It is not a successful profile load.
+The three `profile-exec-*` scenarios are regressions for a fixed production bug. When
+Sway's own `exec` starts sway-stage, as any keybinding does, including one for
+`sway-stage menu`, a profile's window must still open on the selected target.
 
 ```sh
 tools/integration/run.sh --filter profile-exec
@@ -306,8 +303,10 @@ Sway records the focused workspace in a launch context for every `exec`, and exp
 `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` naming it. The first window that presents
 the token before mapping, or whose process descends from the process Sway started, is
 placed by that context. If the recorded workspace was empty, Sway removed it when the
-profile selected its target, so Sway creates a new workspace with the same name for the
-window. The context expires with its token 30 seconds after the `exec`.
+profile selected its target, so Sway would create a new workspace with the same name for
+the window. The context expires with its token 30 seconds after the `exec`. Either path
+alone misplaced the window before the fix, which removes both variables from each
+application and starts it outside sway-stage's process ancestry.
 
 Each scenario runs after the other profile cases. From the empty, focused primary `2`, it
 sends `exec /bin/sh SCRIPT` through the private socket. Only an absolute path of plain
@@ -330,18 +329,14 @@ Each requires:
 - exported launch-context variables;
 - no window activity before the switch to `3`;
 - exactly one recorded launch and one new owned window;
-- exactly these workspace events: creation of `3`, the switch from `2`, Sway's removal of
-  that `2`, and creation of a new `2` with a fresh ID;
-- the window owned on that new `2`, with `3` focused and empty;
-- sway-stage's exit 1, naming the window, its workspace, and `3`'s ID as `placement failure:
-  wrong workspace`, with `completed 0 workspaces []` and `stopped without cleanup or
-  relaunch`;
+- exactly these workspace events: creation of `3`, the switch from `2`, and Sway's removal
+  of that `2`, with no workspace recreated for the window;
+- sway-stage's exit 0 with empty stdout;
+- the verified layout and ownership on `3`, which stays focused;
 - an unchanged foreign fixture.
 
-Verified cleanup then switches to the new `2`, closes only that window, and keeps the new
-`2` as the primary. Each case's expected placement is one constant in
-`tools/integration/launch_context.rs`. After a fix, each changes to the target placement,
-which instead requires a successful load and the verified layout on `3`.
+Verified cleanup then closes only that window, switches to a new `2`, and keeps it as the
+primary.
 
 ## Manual application acceptance
 
