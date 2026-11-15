@@ -46,13 +46,13 @@ only application the harness launches, and it cannot be replaced or configured. 
 repository root:
 
 ```sh
-tools/integration/run.sh                  # all 27 scenarios
+tools/integration/run.sh                  # all 30 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the six
+suite order: `--filter single-window` runs one scenario and `--filter profile` the nine
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
@@ -93,8 +93,8 @@ grep -l sway-stage-headless /proc/[0-9]*/environ 2>/dev/null
 ```
 
 The suite exercises sway-stage against a real Sway, but only with Foot, one virtual output,
-and no input devices or desktop services. Other applications, physical outputs, keybinding
-launch context, and visual rendering need the occasional user-run checks under
+and no input devices or desktop services. Other applications, physical outputs, real
+keybindings, and visual rendering need the occasional user-run checks under
 [manual application acceptance](#manual-application-acceptance).
 
 ### Scenarios
@@ -106,9 +106,9 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
-| `3` | The second target of the successful and partial profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
+| `3` | The second target of the successful and partial profile scenarios, and the only target of the launch-context reproductions. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
 
-The suite runs twenty-one standard Foot scenarios, then six profile scenarios, the last in
+The suite runs twenty-one standard Foot scenarios, then nine profile scenarios, the last in
 the two-output compositor. The
 original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
 siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested groups,
@@ -158,7 +158,7 @@ unexpected result or interruption stops the run without renaming the workspace b
 closing windows. It never renames an occupied workspace.
 
 The three success cases capture with inference disabled into additional private directories,
-using only the two explicit targets; the harness never runs `--all`. All six use private
+using only the two explicit targets; the harness never runs `--all`. All nine use private
 layout/profile directories, explicit directory overrides, and the pinned Sway socket.
 Private launch records cover commands that produce no windows; ordered window events on
 either side of the single expected transition independently establish launch bindings. The
@@ -288,6 +288,60 @@ can explain conservative failures.
 The harness's guards against unexpected focus changes, foreign-window changes, and
 owned-window state changes are covered by its offline tests; nothing else connects to the
 private compositor during a run.
+
+### Known bug: exec launch context
+
+The three `profile-exec-*` scenarios reproduce a **known production bug** that is not yet
+fixed. When Sway's own `exec` starts sway-stage, as any keybinding does, including one for
+`sway-stage menu`, the first window of a profile can appear on the workspace that was
+focused at that `exec` instead of on the selected target. These scenarios pass only when they
+observe that exact misplacement. A pass is printed as
+`PASS  NAME (KNOWN PRODUCTION BUG reproduced: …)`. It is not a successful profile load.
+
+```sh
+tools/integration/run.sh --filter profile-exec
+```
+
+Sway records the focused workspace in a launch context for every `exec`, and exports
+`XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` naming it. The first window that presents
+the token before mapping, or whose process descends from the process Sway started, is
+placed by that context. If the recorded workspace was empty, Sway removed it when the
+profile selected its target, so Sway creates a new workspace with the same name for the
+window. The context expires with its token 30 seconds after the `exec`.
+
+Each scenario runs after the other profile cases. From the empty, focused primary `2`, it
+sends `exec /bin/sh SCRIPT` through the private socket. Only an absolute path of plain
+characters is accepted. The generated script holds every argument as a single-quoted
+literal. It runs `sway-stage profile load` for a one-entry profile that puts one recorded
+Foot window on the absent `3`. Started by Sway, sway-stage inherits the private
+compositor's environment, which is built from nothing like every other session process. It
+is not a harness child and is never signalled. The script records sway-stage's stdout,
+stderr, and exit status. It also records whether Sway exported each launch-context variable,
+never its value. The harness waits for the status with a bounded deadline.
+
+| Scenario | Launch context left to Sway |
+| --- | --- |
+| `profile-exec-context` | Both the inherited token and process ancestry, as from a real keybinding. |
+| `profile-exec-ancestry-only` | Process ancestry only: the script removes both variables before starting sway-stage. |
+| `profile-exec-token-only` | The token only: the script starts sway-stage from a subshell that exits at once, so its ancestry no longer reaches the process Sway started. |
+
+Each requires:
+
+- exported launch-context variables;
+- no window activity before the switch to `3`;
+- exactly one recorded launch and one new owned window;
+- exactly these workspace events: creation of `3`, the switch from `2`, Sway's removal of
+  that `2`, and creation of a new `2` with a fresh ID;
+- the window owned on that new `2`, with `3` focused and empty;
+- sway-stage's exit 1, naming the window, its workspace, and `3`'s ID as `placement failure:
+  wrong workspace`, with `completed 0 workspaces []` and `stopped without cleanup or
+  relaunch`;
+- an unchanged foreign fixture.
+
+Verified cleanup then switches to the new `2`, closes only that window, and keeps the new
+`2` as the primary. Each case's expected placement is one constant in
+`tools/integration/launch_context.rs`. After a fix, each changes to the target placement,
+which instead requires a successful load and the verified layout on `3`.
 
 ## Manual application acceptance
 
