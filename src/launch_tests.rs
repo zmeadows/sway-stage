@@ -3806,6 +3806,14 @@ fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_laun
         "rejected-command",
     ] {
         let fixture = LaunchFixture::new();
+        let application_path = fixture.path.join("app");
+        let application_script = fs::read_to_string(&application_path).unwrap();
+        fs::write(
+            application_path,
+            format!("{application_script}printf 'complete\\n' >> completions\n"),
+        )
+        .unwrap();
+
         let config = layout_config(
             &fixture,
             &format!(
@@ -3923,6 +3931,24 @@ fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_laun
         };
         steps.extend([before, command, after]);
         let error = fixture.run(&config, steps).unwrap_err().detail;
+
+        // Launches are detached, and `launches` is written before `settings`. Both
+        // applications must finish their filesystem writes before fixture cleanup.
+        let deadline = ipc_deadline();
+        loop {
+            if let Ok(completions) = fs::read_to_string(fixture.path.join("completions"))
+                && completions.lines().count() >= 2
+            {
+                assert_eq!(completions.lines().count(), 2);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "scenario={scenario}: fixture applications did not finish writing"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         assert!(!log.contains("launch leaf=\\\"w2\\\""), "{log}");
