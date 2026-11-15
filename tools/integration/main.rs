@@ -14,6 +14,7 @@
 mod capture;
 mod floating_refusal;
 mod headless;
+mod interference;
 mod ipc;
 mod launch_context;
 mod launcher;

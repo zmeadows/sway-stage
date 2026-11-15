@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 45] = [
+const SUITE_ORDER: [&str; 48] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -73,6 +73,9 @@ const SUITE_ORDER: [&str; 45] = [
     "layout-missing-executable",
     "layout-floating-refusal",
     "profile-floating-refusal",
+    "interference-switch-away",
+    "interference-switch-and-return",
+    "interference-unexpected-window",
     "profile-success",
     "profile-occupied-refusal",
     "profile-partial-failure",
@@ -175,6 +178,14 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     assert_eq!(
         select_scenarios(Some("floating-refusal")).unwrap(),
         ["layout-floating-refusal", "profile-floating-refusal"]
+    );
+    assert_eq!(
+        select_scenarios(Some("interference")).unwrap(),
+        [
+            "interference-switch-away",
+            "interference-switch-and-return",
+            "interference-unexpected-window"
+        ]
     );
     assert_eq!(
         select_scenarios(Some("partial-failure")).unwrap(),

@@ -276,7 +276,8 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn switch_command(name: &str) -> Result<String, String> {
+/// Also the text an interference script sends, so it is validated the same way.
+pub fn switch_command(name: &str) -> Result<String, String> {
     validate_workspace_name(name)?;
     Ok(format!("workspace --no-auto-back-and-forth \"{name}\""))
 }
@@ -297,8 +298,9 @@ fn float_command(container_id: i64) -> Result<String, String> {
 
 /// Sway's command parser and the `sh -c` that `exec` runs would both interpret quotes,
 /// whitespace, `;`, `,`, and `$`, so only an absolute path made of plainly safe bytes is
-/// sent. Everything else the script needs is already written inside it.
-fn exec_command(script: &Path) -> Result<String, String> {
+/// sent. Everything else the script needs is already written inside it. Also the text an
+/// interference script sends.
+pub fn exec_command(script: &Path) -> Result<String, String> {
     let text = script
         .to_str()
         .filter(|text| text.starts_with('/'))

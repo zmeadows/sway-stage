@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 45 scenarios
+tools/integration/run.sh                  # all 48 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -127,7 +127,7 @@ first command, then establishes its workspaces explicitly:
 | Workspace | Role |
 | --- | --- |
 | `0` | The second target of `profile-workspace-zero`, created and removed like `3`. |
-| `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. |
+| `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. The injector of `interference-switch-away` and `interference-switch-and-return` selects it during a load. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` temporarily renames it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. The [floating refusals](#floating-occupancy-refusals) leave one floating window on it while focus is on `3`, so it keeps its identity. |
 | `3` | The second target of the successful, partial, and shared-layout profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. `profile-floating-refusal` selects `3` before its load as the empty, focused first target; Sway removes it again on the return to `2`. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
@@ -135,7 +135,8 @@ first command, then establishes its workspaces explicitly:
 
 The suite runs twenty-three standard Foot scenarios, the
 [failing standalone loads](#failing-standalone-loads), the
-[floating-occupancy refusals](#floating-occupancy-refusals), then the profile scenarios, the
+[floating-occupancy refusals](#floating-occupancy-refusals), the
+[interfered loads](#interference-during-construction), then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
 [four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
@@ -208,6 +209,66 @@ windows, so this close has its own guard: trusted focus on `2`, no window activi
 foreign windows, and a fresh check of the window's identity, launch arguments, and floating
 state, then a bounded wait for its close event and an empty `2`. The structural-only variant
 of occupancy, an empty container, is not covered.
+
+#### Interference during construction
+
+Three standalone loads on the empty, focused primary must stop because the harness
+deliberately interferes after sway-stage has accepted the first of three windows:
+
+```sh
+tools/integration/run.sh --filter interference
+```
+
+The second window's configured command is a private injector script, wrapped by the launch
+recorder like the other windows. sway-stage starts it only after accepting the first window,
+so the interference falls inside construction, during the second window's wait, without any
+timed sleep. The script sends one prepared Sway command request through the explicitly
+named private socket, records it only if `swaymsg` reports success, and exits without
+opening a window. Every request is built by the harness's own validated command
+constructors. No window can ever match the second leaf, so nothing races with the
+interference, and the third window must never launch.
+
+| Scenario | Injected request | Independent expectations |
+| --- | --- | --- |
+| `interference-switch-away` | Select the fixture's `1`. | Focus stays on `1`: sway-stage never selects `2` again. |
+| `interference-switch-and-return` | Select `1`, then `2`, as one command list. | Focus ends on `2` with its original ID, so only the event history shows the switch. |
+| `interference-unexpected-window` | Sway's `exec` of a script that replaces itself with Foot, under an app ID no layout window has. | Sway places the window on the focused `2` beside the first window and focuses it; it is neither adopted, moved, nor closed. |
+
+Each requires exit 1 and a failure in the second window's wait with the stop advice and no
+window timeout. A switch case requires a focus loss of `2`. The unexpected-window case
+requires the refusal of the injected window by its own container ID. Each also requires:
+
+- the injector's record holding its one request, and a launch record of exactly the first
+  window and the injector;
+- exactly the injected workspace focus events, matched by workspace identity;
+- the first window bound by its new-window event before any switch, with only focus on the
+  fixture's or the first window afterwards. In the unexpected-window case, ordered
+  new-window events bind the first window and then the injected window, which must be absent
+  from the baseline. Its app ID and `/proc/PID/cmdline` are checked, never its app ID alone;
+- the first window, and any injected window, owned, tiled, unmoved, and arranged on `2`;
+- an unchanged foreign fixture.
+
+The harness's event fence accepts the injected switches as its own expected switches, in
+order, so focus history stays trusted and any other focus change still fails. A command list
+is used for the return because Sway serves no other client between a request's commands:
+none of sway-stage's queries can see `1` focused, and the switch-and-return case would pass
+only by luck if sway-stage checked final focus alone.
+
+Only after that verification does the harness, not sway-stage, select `2` again after the
+switch-away case, with its own expected-switch fence. It then closes only the first window,
+and in the unexpected-window case the injected window, through the ordinary verified cleanup.
+
+Two negative checks, with the production loader's focus-event check temporarily disabled,
+showed that the scenarios discriminate (2026-11-15):
+
+- With separate requests for the switch-and-return case, sway-stage's snapshots still caught
+  the intermediate focus. Hence the single command list.
+- With the command list, that case ended in a window timeout, which the harness rejected.
+
+The first negative run also showed that a switch landing between the loader's workspace and
+tree queries was reported as inconsistent workspaces rather than a focus loss. That was fixed
+in production before these scenarios were committed. The headless scenarios complement, but
+do not replace, the manual loader interference checks below.
 
 Expected profile failures count as passes only after independent verification:
 
@@ -365,8 +426,8 @@ remaining windows to the compositor's shutdown. Gaps, minimum sizes, or version 
 can explain conservative failures.
 
 The harness's guards against unexpected focus changes, foreign-window changes, and
-owned-window state changes are covered by its offline tests; nothing else connects to the
-private compositor during a run.
+owned-window state changes are covered by its offline tests. Apart from the interfered loads'
+own injector, nothing else connects to the private compositor during a run.
 
 ### Sway exec entry points
 

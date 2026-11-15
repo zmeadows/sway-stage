@@ -42,7 +42,7 @@ use crate::scenarios::{
     foreign_fixture_scenario, session_roundtrip_layouts, standard_scenarios,
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
-use crate::{floating_refusal, launch_context, load_failure, process, profile};
+use crate::{floating_refusal, interference, launch_context, load_failure, process, profile};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -65,7 +65,7 @@ const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
 const ASSIGNED_WORKSPACE: &str = "4";
 
 /// Every scenario in suite order: the standard scenarios, the failing standalone loads, the
-/// floating-occupancy refusals, the profile cases, the sequentially verified profiles, the Sway exec entry points, the session
+/// floating-occupancy refusals, the interfered loads, the profile cases, the sequentially verified profiles, the Sway exec entry points, the session
 /// round-trip, the assigned-workspace refusal, then the two-output session's cross-output
 /// profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
@@ -75,6 +75,7 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = standard.iter().map(|scenario| scenario.name).collect();
     names.extend(load_failure::CASES.iter().map(|case| case.name()));
     names.extend(floating_refusal::CASES.iter().map(|case| case.name()));
+    names.extend(interference::CASES.iter().map(|case| case.name()));
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(profile::SEQUENTIAL_CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
@@ -381,6 +382,11 @@ impl Harness {
         for case in floating_refusal::CASES {
             if selected.contains(&case.name()) {
                 self.run_floating_refusal(case, &directory)?;
+            }
+        }
+        for case in interference::CASES {
+            if selected.contains(&case.name()) {
+                self.run_interference(case, &directory)?;
             }
         }
 
@@ -2125,6 +2131,263 @@ impl Harness {
         )?;
         verify_fixture_state(&floated, fixture, fixture_signature)?;
         Ok(window_id)
+    }
+
+    /// Loads a three-window layout on the empty, focused primary whose second window is the
+    /// injector, which interferes once sway-stage has accepted the first window. The failure
+    /// counts only after sway-stage's report, the injector's and launch records, and the
+    /// desktop, including the ordered events of each injected change, are verified
+    /// independently. Only then does the harness return to the primary if the injector left
+    /// it, and close the windows this run opened.
+    fn run_interference(
+        &mut self,
+        case: interference::Case,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = case.name();
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        let injector_script_path = files.path.join("inject.sh");
+        let injector_record_path = files.path.join("injected-commands");
+        let injected_window_script_path = files.path.join("injected-window.sh");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        fs::write(&injector_script_path, interference::INJECTOR_SCRIPT)
+            .map_err(|error| format!("write interference injector: {error}"))?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+
+        let sway_commands = interference::sway_commands(
+            case,
+            &fixture.workspace.name,
+            &primary.name,
+            &injected_window_script_path,
+        )?;
+        let injector = interference::injector_command(
+            utf8_path(&injector_script_path)?,
+            utf8_path(self.sway.executable())?,
+            utf8_path(self.sway.socket())?,
+            utf8_path(&injector_record_path)?,
+            &sway_commands,
+        );
+        let interfering = interference::interfering_load(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+            &injector,
+        );
+        if let Some(observed_target) = &interfering.observed_target {
+            let injected_window = observed_target.layout.leaves()[1];
+            fs::write(
+                &injected_window_script_path,
+                session_roundtrip::window_launch_script(&injected_window.command),
+            )
+            .map_err(|error| format!("write injected window launch script: {error}"))?;
+        }
+        directory.write(name, &configuration_yaml(&interfering.layout))?;
+        check_configuration(&self.binary, &directory.path, name, &self.stage)?;
+
+        self.stage = format!("{name}: fresh workspace baseline");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        if before.focused_workspace_id != primary.id {
+            return Err("the interfered load must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: load stopped by interference");
+        process::check_interruption()?;
+        let mut load = configured_command(&self.binary, &directory.path, "load", name);
+        self.sway.select_socket(&mut load);
+        let completed =
+            process::run_with_status(load, &self.stage, load_timeout(&interfering.layout))?;
+        process::check_interruption()?;
+        // The fence accepts the injected switches as the harness's own expected events, in
+        // order; any other focus change still fails it and distrusts focus history.
+        let destinations = case.switch_destinations(&fixture.workspace.name, &primary.name);
+        let (loaded, switch_window_indexes) = if destinations.is_empty() {
+            (snapshot(&self.sway, &mut self.events, None)?, Vec::new())
+        } else {
+            let expected_switches = ExpectedSwitches {
+                from_id: primary.id,
+                destination_names: destinations.iter().map(|&name| name.to_owned()).collect(),
+            };
+            snapshot_with_switches(&self.sway, &mut self.events, &expected_switches).map_err(
+                |error| {
+                    format!(
+                        "{error}; sway-stage {}: {}",
+                        completed.status,
+                        completed.stderr.trim()
+                    )
+                },
+            )?
+        };
+
+        self.stage = format!("{name}: independent verification");
+        let injector_record = match fs::read_to_string(&injector_record_path) {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read injector record: {error}")),
+        };
+        if injector_record != interference::expected_injector_record(&sway_commands) {
+            return Err(format!(
+                "Sway did not accept every injected command: {injector_record:?}"
+            ));
+        }
+        let observed_launch_record = fs::read_to_string(&launch_record_path)
+            .map_err(|error| format!("read launch record: {error}"))?;
+        if observed_launch_record != interfering.expected_launch_record {
+            return Err(format!(
+                "launch order/count differs: expected {:?}, observed {observed_launch_record:?}",
+                interfering.expected_launch_record
+            ));
+        }
+
+        // Exactly the injected selections, and nothing from sway-stage: in particular, it
+        // never selects the target again after the injector left it.
+        let expected_events = match case {
+            interference::Case::SwitchAway => vec![profile::ExpectedWorkspaceEvent::Focus {
+                from_id: primary.id,
+                to: &fixture.workspace,
+            }],
+            interference::Case::SwitchAndReturn => vec![
+                profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: primary.id,
+                    to: &fixture.workspace,
+                },
+                profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: fixture.workspace.id,
+                    to: &primary,
+                },
+            ],
+            interference::Case::UnexpectedWindow => Vec::new(),
+        };
+        profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
+        foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+
+        // Ordered new-window events bind this run's windows: the first window's launch must
+        // precede any switch, after which selecting a workspace may only focus the window it
+        // shows, and the injected window must open after the first window.
+        let (expected_target, owned) = match &interfering.observed_target {
+            Some(observed_target) => {
+                let owned =
+                    bind_launches(&loaded.window_events, &observed_target.layout, &preexisting)?;
+                (observed_target, owned)
+            }
+            None => {
+                let (before_switch, after_switch) =
+                    loaded.window_events.split_at(switch_window_indexes[0]);
+                let owned = bind_launches(
+                    before_switch,
+                    &interfering.accepted_part.layout,
+                    &preexisting,
+                )?;
+                let mut focusable = owned.clone();
+                focusable.extend(fixture.progress.accepted.clone());
+                require_return_focus(after_switch, &focusable)?;
+                (&interfering.accepted_part, owned)
+            }
+        };
+        verify_ownership(
+            &loaded.tree,
+            primary.id,
+            &expected_target.layout,
+            &preexisting,
+            &owned,
+        )?;
+        let primary_workspace = walk(&loaded.tree)
+            .into_iter()
+            .map(|placed| placed.node)
+            .find(|node| node.id == primary.id && node.name.as_deref() == Some(&primary.name))
+            .ok_or("the primary disappeared or changed identity")?;
+        if loaded.focused_workspace_id == primary.id {
+            verify_layout(primary_workspace, expected_target, &owned)?;
+        } else {
+            crate::layout::verify_inactive_layout(primary_workspace, expected_target, &owned)?;
+        }
+        let injected_window_id = owned
+            .iter()
+            .find(|(_, layout_id)| layout_id.as_str() == interference::INJECTED_LAYOUT_ID)
+            .map(|(&container_id, _)| container_id);
+        interference::verify_failure_report(case, &completed, primary.id, injected_window_id)?;
+        println!(
+            "      sway-stage stopped during window2's wait after {:?}; windows {:?} stayed on \
+             the primary; window3 never launched",
+            sway_commands,
+            owned.keys().collect::<Vec<_>>()
+        );
+
+        // Only an independently verified failure enters cleanup, which the harness performs.
+        let cleanup_baseline = if loaded.focused_workspace_id == primary.id {
+            signature(loaded.focused_workspace())
+        } else {
+            self.stage = format!("{name}: return to the primary");
+            process::check_interruption()?;
+            self.sway.switch_workspace(&primary.name)?;
+            let transition = ExpectedSwitch {
+                from_id: fixture.workspace.id,
+                destination_name: primary.name.clone(),
+            };
+            let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+            require_return_focus(&returned.window_events, &owned)?;
+            profile::verify_workspace_events(
+                &returned.workspace_events,
+                &[profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: fixture.workspace.id,
+                    to: &primary,
+                }],
+            )?;
+            verify_fixture_state(&returned, fixture, fixture_signature)?;
+            foreign.verify(&returned)?;
+            verify_ownership(
+                &returned.tree,
+                primary.id,
+                &expected_target.layout,
+                &preexisting,
+                &owned,
+            )?;
+            verify_layout(returned.focused_workspace(), expected_target, &owned)?;
+            signature(returned.focused_workspace())
+        };
+
+        self.stage = format!("{name}: verified cleanup");
+        let context = CleanupContext {
+            target: &primary,
+            layout: &expected_target.layout,
+            preexisting_ids: &preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &owned,
+            cleanup_baseline,
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
     }
 
     /// Loads a two-entry profile from the empty, focused primary and verifies it workspace by
