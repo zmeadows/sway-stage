@@ -21,6 +21,7 @@
 //! Linux 5.9's `close_range` or 5.3's pidfds, it exits at once and reports no status.
 
 use crate::diagnostics::Diagnostics;
+use crate::failure::{Cause, Failure};
 use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, ErrorKind, PipeReader, Read};
@@ -100,16 +101,16 @@ impl LaunchedApplication {
         mut command: Command,
         supervision_limit: Duration,
         diagnostics: &mut Diagnostics,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Failure> {
         let (mut status_reader, status_writer) =
             io::pipe().map_err(|error| format!("create launch status pipe: {error}"))?;
         let status_fd = status_writer.as_raw_fd();
         // Rust's runtime keeps descriptors 0 through 2 open, so a new pipe never uses
         // them, where the child's null stdio would replace it.
         if status_fd <= libc::STDERR_FILENO {
-            return Err(format!(
-                "launch status pipe received standard descriptor {status_fd}"
-            ));
+            return Err(
+                format!("launch status pipe received standard descriptor {status_fd}").into(),
+            );
         }
         let supervision_limit_ms =
             libc::c_int::try_from(supervision_limit.as_millis()).unwrap_or(libc::c_int::MAX);
@@ -125,7 +126,10 @@ impl LaunchedApplication {
         // spawn returns once the application has exec'd, or with the error that prevented
         // it, because the application holds std's error pipe until its exec.
         let mut intermediate = spawn_result.map_err(|error| {
-            format!("spawn application: {error}; check executable, child PATH and cwd")
+            Failure::new(
+                Cause::ApplicationStart,
+                format!("spawn application: {error}; check executable, child PATH and cwd"),
+            )
         })?;
 
         // The supervisor wrote the PID before closing its copy of std's error pipe, so it

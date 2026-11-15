@@ -157,7 +157,7 @@ pub(crate) fn snapshot(
     events: &mut UnixStream,
     workspaces: Value,
     tree: Value,
-) -> Result<Snapshot, String> {
+) -> Result<Snapshot, Failure> {
     let (client, mut server) = socket_pair();
     thread::scope(|scope| {
         let worker = scope.spawn(move || {

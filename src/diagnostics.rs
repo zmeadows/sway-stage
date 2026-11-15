@@ -4,13 +4,13 @@
 //! replaces it. Operations that never load a selected layout report through
 //! `notify_capture_failure` or `notify_menu_failure`, leaving the previous launch's log in place.
 
+use crate::failure::{Cause, Failure, launch_exit_context};
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,13 +22,30 @@ pub struct Diagnostics {
     /// never offers a log that stopped receiving its records.
     log_path: Option<PathBuf>,
     started_at: Instant,
+    /// Where the attempt is, for notifications and urgency; the stage adds log detail.
+    phase: Phase,
     current_stage: String,
     profile_context: Option<ProfileProgress>,
     /// Set only by `spawned`, after `Command::spawn` succeeded for this invocation.
     application_spawned: bool,
-    /// Set only when returning a window timeout, for its concise notification.
-    timeout_process_status: Option<ExitStatus>,
     sizing_summary: SizingSummary,
+}
+
+/// The part of an attempt that failed. Together with the failure's cause, it decides
+/// whether a failure is a safe refusal; it also selects validation and preflight wording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Reading and validating configuration files, before any IPC.
+    Validation,
+    /// The profile coordinator's read-only examination of every target.
+    ProfilePreflight,
+    /// The profile coordinator's selection of one target workspace.
+    ProfileSelection,
+    /// The ordinary loader, from its subscription through its prelaunch emptiness check,
+    /// launches, and arrangement.
+    Construction,
+    /// The profile coordinator's verification after one layout's construction.
+    ProfileCompletion,
 }
 
 /// One residual warning per split group, classified where geometry is observed.
@@ -135,10 +152,10 @@ impl Diagnostics {
             log_file: Some(log_file),
             log_path: Some(log_path),
             started_at: Instant::now(),
+            phase: Phase::Validation,
             current_stage: "test".into(),
             profile_context: None,
             application_spawned: false,
-            timeout_process_status: None,
             sizing_summary: SizingSummary::default(),
         }
     }
@@ -151,10 +168,10 @@ impl Diagnostics {
             log_file: None,
             log_path: None,
             started_at: Instant::now(),
+            phase: Phase::Validation,
             current_stage: "validation".into(),
             profile_context: None,
             application_spawned: false,
-            timeout_process_status: None,
             sizing_summary: SizingSummary::default(),
         };
 
@@ -199,6 +216,11 @@ impl Diagnostics {
             .completed
             .push((entry.target.clone(), workspace_id));
         self.record("profile progress");
+    }
+
+    /// Profile coordination keeps one session across phases; every load starts in validation.
+    pub fn enter_phase(&mut self, phase: Phase) {
+        self.phase = phase;
     }
 
     pub fn stage(&mut self, stage: impl Into<String>) {
@@ -249,21 +271,9 @@ impl Diagnostics {
         }
     }
 
-    /// Retains observed process status without another poll or changing the window deadline.
-    pub fn window_timeout(&mut self, detail: &str, process_status: Option<ExitStatus>) -> String {
-        self.timeout_process_status = process_status;
-        let mut error = format!("window timeout: {detail}");
-        if let Some(status) = process_status
-            && let Some(context) = launch_exit_context(status)
-        {
-            error.push_str(&format!(". {context}"));
-        }
-        error
-    }
-
     /// Logs and notifies a fatal error, returning the primary message for stderr.
-    pub fn report_failure(&mut self, error: String) -> String {
-        let mut message = format!("{}: {error}", self.current_stage);
+    pub fn report_failure(&mut self, failure: Failure) -> String {
+        let mut message = format!("{}: {}", self.current_stage, failure.detail);
         if self.operation == "profile load" {
             message = format!(
                 "profile load: {}; {message}",
@@ -290,19 +300,22 @@ impl Diagnostics {
         if let Some(log_path) = &self.log_path {
             message.push_str(&format!("; log: {}", log_path.display()));
         }
-        let notification = self.failure_notification(&error);
-        if let Err(error) =
-            send_failure_notification(self.operation, &notification, self.failure_urgency(&error))
-        {
+        let notification = self.failure_notification(&failure);
+        let urgency = self.failure_urgency(&failure);
+        if let Err(error) = send_failure_notification(self.operation, &notification, urgency) {
             self.record(&format!("secondary notification failure: {error}"));
         }
 
         message
     }
 
-    fn failure_notification(&mut self, error: &str) -> String {
-        let mut notification = failure_body(self.operation, error, &self.current_stage, false);
-        if let Some(status) = self.timeout_process_status.take()
+    /// Built only from the phase, typed cause, and progress counts. Failure details can
+    /// contain paths, names, commands, and parser text, so they never enter the body.
+    fn failure_notification(&self, failure: &Failure) -> String {
+        let mut notification = self.failure_summary(failure).to_owned();
+        if let Some(Cause::WindowTimeout {
+            launch_exit: Some(status),
+        }) = failure.cause
             && !status.success()
             && let Some(context) = launch_exit_context(status)
         {
@@ -317,40 +330,53 @@ impl Diagnostics {
         }
         if let Some(progress) = &self.profile_context {
             notification.push('\n');
-            notification
-                .push_str(&progress.notification(self.current_stage == "workspace preflight"));
+            notification.push_str(&progress.notification(self.phase == Phase::ProfilePreflight));
         }
         with_log_reference(notification, self.log_file.is_some())
     }
 
-    fn failure_urgency(&self, error: &str) -> &'static str {
+    /// Validation details contain paths and arbitrary parser text, so validation uses one
+    /// fixed summary. A runtime failure uses its cause's summary, or the generic one.
+    fn failure_summary(&self, failure: &Failure) -> &'static str {
+        if self.phase == Phase::Validation {
+            return if self.operation == "profile load" {
+                "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
+            } else {
+                "Unable to read or validate the selected layout. Run sway-stage check NAME."
+            };
+        }
+
+        match failure.cause {
+            Some(cause) => cause.summary(),
+            None => generic_failure_summary(self.operation),
+        }
+    }
+
+    /// Only refusals verified before anything changed are safe: invalid files, and occupied
+    /// or misplaced targets found by the initial read-only checks. IPC failures and
+    /// contradictory workspace history remain critical even before a launch, and every
+    /// failure after a launch is critical.
+    fn failure_urgency(&self, failure: &Failure) -> &'static str {
         if self.application_spawned {
             return "critical";
         }
 
-        if self.current_stage.ends_with(": validation") || self.current_stage == "validation" {
-            return "normal";
-        }
+        let safe_refusal = match self.phase {
+            Phase::Validation => true,
+            Phase::ProfilePreflight => matches!(
+                failure.cause,
+                Some(
+                    Cause::ProfileTargetOccupied
+                        | Cause::ProfileOutputMismatch
+                        | Cause::ProfileOutputUnavailable
+                )
+            ),
+            // The loader checks emptiness before its first launch.
+            Phase::Construction => failure.cause == Some(Cause::TargetOccupied),
+            Phase::ProfileSelection | Phase::ProfileCompletion => false,
+        };
 
-        // Only known refusals at the initial checks are safe. IPC failures and
-        // contradictory workspace history remain critical, even before a launch.
-        let cause = failure_cause(error);
-        let occupied_target = self.current_stage.starts_with("prelaunch workspace=")
-            && cause.starts_with("target workspace must be completely empty");
-        let profile_refusal = self.current_stage == "workspace preflight"
-            && [
-                "profile target occupied: ",
-                "profile output mismatch: ",
-                "profile output unavailable: ",
-            ]
-            .iter()
-            .any(|prefix| cause.starts_with(prefix));
-
-        if occupied_target || profile_refusal {
-            "normal"
-        } else {
-            "critical"
-        }
+        if safe_refusal { "normal" } else { "critical" }
     }
 
     pub fn report_sizing_warnings(&mut self, warnings: &[SizingWarning]) {
@@ -382,34 +408,35 @@ impl Diagnostics {
     }
 }
 
-/// Attempts a normal-urgency notification for any operation's fatal error without touching the
-/// last-run log. A notification failure is secondary: it is reported to stderr and
-/// returned, and the caller still reports `message` as the primary error.
-pub fn notify_failure(operation: &str, message: &str) -> Result<(), String> {
-    send_failure_notification(
-        operation,
-        &failure_body(operation, message, "", false),
-        "normal",
-    )
+/// A failure without a classified cause gets its operation's generic summary. Never
+/// inspect the failure's detail to find a more specific one.
+fn generic_failure_summary(operation: &str) -> &'static str {
+    match operation {
+        "load" => {
+            "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying."
+        }
+        "profile load" => {
+            "Unable to finish loading the profile. Inspect workspace state and diagnostics before retrying."
+        }
+        "capture" => "Unable to capture the workspace.",
+        "profile capture" => "Unable to capture the profile.",
+        _ => "Unable to complete the menu action.",
+    }
 }
 
-/// Capture summaries are selected where the arrangement or save failure is known.
-/// Detailed workspace names, paths, and recovered commands never enter the notification.
+/// Attempts a normal-urgency notification for a capture's fatal error without touching
+/// the last-run log. Capture summaries are selected where the arrangement, save, or Sway
+/// failure is known. Detailed workspace names, paths, and recovered commands never enter
+/// the notification. A notification failure is secondary: it is reported to stderr and
+/// returned, and the caller still reports the capture error as the primary error.
 pub fn notify_capture_failure(
     operation: &str,
     error: &crate::capture::Error,
 ) -> Result<(), String> {
-    match error.summary {
-        Some(summary) => send_failure_notification(operation, summary, "normal"),
-        None => notify_failure(operation, &error.detail),
-    }
-}
-
-fn capture_failure_body(operation: &str, summary: Option<&'static str>, detail: &str) -> String {
-    match summary {
-        Some(summary) => summary.to_owned(),
-        None => failure_body(operation, detail, "", false),
-    }
+    let summary = error
+        .summary
+        .unwrap_or_else(|| generic_failure_summary(operation));
+    send_failure_notification(operation, summary, "normal")
 }
 
 /// Menu preparation never creates a launch log, so these summaries never offer one.
@@ -426,7 +453,7 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
     use crate::menu::FailureKind;
 
     let summary = match &error.kind {
-        FailureKind::Snapshot => return failure_body("menu", &error.detail, "", false),
+        FailureKind::Snapshot(summary) => summary.unwrap_or(generic_failure_summary("menu")),
         FailureKind::LayoutDiscovery => {
             "Cannot list saved layouts. Check the layouts directory and filenames."
         }
@@ -448,11 +475,9 @@ fn menu_failure_body(error: &crate::menu::Error) -> String {
         FailureKind::InvalidLayout => {
             "The selected layout is invalid. Run sway-stage check NAME for details."
         }
-        FailureKind::Capture(summary) => {
-            return capture_failure_body("capture", *summary, &error.detail);
-        }
+        FailureKind::Capture(summary) => summary.unwrap_or(generic_failure_summary("capture")),
         FailureKind::ProfileCapture(summary) => {
-            return capture_failure_body("profile capture", *summary, &error.detail);
+            summary.unwrap_or(generic_failure_summary("profile capture"))
         }
         FailureKind::FuzzelStart => {
             "Cannot start Fuzzel. Check that Fuzzel 1.11+ is installed and executable."
@@ -488,202 +513,12 @@ fn send_failure_notification(operation: &str, message: &str, urgency: &str) -> R
     .inspect_err(|error| stderr(&format!("sway-stage: notification unavailable: {error}")))
 }
 
-/// Summarize only recognized error prefixes. Never copy arbitrary diagnostic text or
-/// user-controlled names into the desktop body; terminal and log output retain them.
-fn failure_body(operation: &str, error: &str, stage: &str, log_available: bool) -> String {
-    // Validation errors contain paths and arbitrary parser details, so never classify
-    // their contents as runtime errors.
-    if stage.ends_with(": validation") {
-        let summary = if operation == "profile load" {
-            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
-        } else {
-            "Unable to read or validate the selected layout. Run sway-stage check NAME."
-        };
-        return with_log_reference(summary.to_owned(), log_available);
-    }
-
-    let cause = failure_cause(error);
-    let summary = recognized_failure_summary(cause).unwrap_or(match operation {
-        "load" => "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
-        "profile load" => "Unable to finish loading the profile. Inspect workspace state and diagnostics before retrying.",
-        "capture" => "Unable to capture the workspace.",
-        "profile capture" => "Unable to capture the profile.",
-        _ => "Unable to complete the menu action.",
-    });
-
-    with_log_reference(summary.to_owned(), log_available)
-}
-
-/// Remove only internal wrappers, shared by summary and safe-refusal urgency checks.
-fn failure_cause(error: &str) -> &str {
-    let mut cause = error;
-    // Named load wrappers contain validated ASCII configuration names. Remove only
-    // known contexts; never search arbitrary error text for something recognizable.
-    for prefix in ["profile \"", "layout \""] {
-        if let Some(named_error) = cause.strip_prefix(prefix)
-            && let Some((name, inner)) = named_error.split_once("\": ")
-            && crate::discovery::valid_name(name)
-        {
-            cause = inner;
-        }
-    }
-    for context in [
-        "layout construction: ",
-        "workspace selection: ",
-        "pre-menu workspace snapshot: ",
-        "capture: ",
-        "snapshot: ",
-    ] {
-        if let Some(inner) = cause.strip_prefix(context) {
-            cause = inner;
-        }
-    }
-
-    cause
-}
-
-/// These prefixes belong to internal error producers, before any untrusted details.
-/// Capture arrangement errors instead carry a safe summary alongside their detail.
-fn recognized_failure_summary(cause: &str) -> Option<&'static str> {
-    let summary = if cause.starts_with("window timeout: ") {
-        "Window timed out. Check launch command, exact app ID/class, and single-instance behavior."
-    } else if cause.starts_with("placement failure: wrong workspace: ") {
-        "A window for this layout opened on another workspace. Check Sway's window assignment rules."
-    } else if cause.starts_with("matching window was in the scratchpad: ") {
-        "A window for this layout opened in the scratchpad instead of the target workspace. Check Sway's scratchpad rules."
-    } else if cause.starts_with("placement failure: unknown workspace: ") {
-        "A matching window's workspace could not be determined. Inspect workspace state before retrying."
-    } else if cause.starts_with("ambiguous new windows id=") {
-        "Multiple new windows match the expected application. Use a more specific app ID/class or a command that opens one window."
-    } else if cause.starts_with("matching window was floating/fullscreen: ")
-        || cause.starts_with("matching window has unusable tiled state: ")
-    {
-        "Loading requires tiled windows. A match is floating/fullscreen or has unknown fullscreen state; check app settings and Sway rules."
-    } else if cause.starts_with("unexpected target-workspace window id=")
-        || cause.starts_with("unexpected floating/fullscreen/scratchpad window id=")
-    {
-        "An unexpected window appeared in the target workspace. Check the layout's app ID/class and Sway rules."
-    } else if cause.starts_with("preexisting window id=") {
-        "A preexisting window entered the target workspace. Keep other windows off the target while loading."
-    } else if cause.starts_with("workspace focus changed from target id=")
-        || cause.starts_with("focus left target id=")
-        || cause.starts_with("focused workspace id=")
-    {
-        "The target workspace lost focus. Keep it focused while loading."
-    } else if cause.starts_with("focus did not stay on container id=") {
-        "Focus kept moving between windows on the target workspace. Avoid moving the pointer or focus there until loading finishes."
-    } else if cause.starts_with("target workspace id=") {
-        "The target workspace changed outputs. Keep it on its original output while loading."
-    } else if cause.starts_with("target workspace was destroyed")
-        || cause.starts_with("target workspace missing")
-    {
-        "The target workspace is no longer available. Check workspace state and retry."
-    } else if cause.starts_with("target workspace must be completely empty") {
-        "The target workspace is occupied. Use a workspace with no windows or empty containers."
-    } else if cause.starts_with("profile target occupied: ") {
-        "A profile target is occupied. All profile targets must be empty, including floating windows and empty containers."
-    } else if cause.starts_with("profile output mismatch: ") {
-        "A profile workspace is on a different output than configured. Check the profile's output expectations and Sway workspace placement rules."
-    } else if cause.starts_with("profile output unavailable: ") {
-        "An output required by the profile is not active. Connect or enable it, or update the profile's output expectation."
-    } else if cause.starts_with("profile target changed: ")
-        || cause.starts_with("unexpected focused workspace or containing output")
-        || cause.starts_with("workspace completion: focused workspace")
-        || cause.starts_with("unexpected workspace change ")
-        || cause.starts_with("selected workspace identity or output differs")
-    {
-        "Workspace identity, focus, or output changed during profile loading. Keep workspaces unchanged until loading finishes."
-    } else if cause.starts_with("workspace reload: ") {
-        "Sway's configuration reloaded during loading. Retry after the reload finishes."
-    } else if cause.starts_with("selected workspace number ")
-        || cause.starts_with("workspace selection: expected ")
-        || cause.starts_with("expected focus event was not observed")
-        || cause.starts_with("expected workspace creation event was not observed")
-    {
-        "Sway's workspace selection could not be verified. Check for workspace changes and retry."
-    } else if cause.starts_with("workspace snapshot: ")
-        || cause.starts_with("expected exactly one focused workspace")
-        || cause.starts_with("workspace/tree focus is inconsistent")
-        || cause.starts_with("invalid root or duplicate container identities")
-        || cause.starts_with("duplicate workspace identities")
-    {
-        "Sway reported inconsistent workspace identities or focus. Retry when workspace state is stable."
-    } else if cause.starts_with("spawn application: ") {
-        "Unable to start an application. Check its executable, command, working directory, and permissions."
-    } else if cause.starts_with("Sway command failed: ")
-        || cause.starts_with("workspace command rejected: ")
-        || cause.starts_with("workspace command: ")
-    {
-        "Sway rejected a command or returned an unexpected reply. Check Sway's configuration and compatibility."
-    } else if cause.starts_with("window activity ") || cause.starts_with("window move id=") {
-        "Window activity made loading unsafe. Keep windows unchanged until loading finishes."
-    } else if cause.starts_with("new/accepted window") {
-        "A newly observed window closed before its placement could be verified. Check application behavior and retry."
-    } else if cause.starts_with("matching window changed identity") {
-        "A window's app ID/class changed during loading. Use a stable, exact selector."
-    } else if cause.starts_with("accepted window") || cause.starts_with("matched window") {
-        "A layout window closed or changed identity, placement, or tiled state. Keep layout windows unchanged until loading finishes."
-    } else if cause.starts_with("unexpected hierarchy at ")
-        || cause.starts_with("invalid hierarchy state ")
-    {
-        "The workspace hierarchy differs from the expected layout. Check Sway rules and keep windows unchanged while loading."
-    } else if [
-        "connect: SWAYSOCK ",
-        "connect to SWAYSOCK: ",
-        "subscribe: ",
-        "subscribe to workspace/window/tick: ",
-        "get tree: ",
-        "get workspaces: ",
-        "clone event socket: ",
-        "clone query socket: ",
-        "clone command socket: ",
-        "configure event socket: ",
-        "start event reader: ",
-        "start snapshot reader: ",
-        "start capture reader: ",
-        "start command reader: ",
-        "read Sway event: ",
-        "command IPC",
-        "command deadline/channel failure: ",
-        "snapshot deadline/channel failure: ",
-        "tree deadline/channel failure: ",
-        "event reader ",
-        "event stream ended",
-        "event history ",
-        "snapshot event history ",
-        "new-window history ",
-        "event fence deadline ",
-        "send observation fence: ",
-        "Sway rejected observation fence",
-    ]
-    .iter()
-    .any(|prefix| cause.starts_with(prefix))
-    {
-        "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."
-    } else {
-        return None;
-    };
-    Some(summary)
-}
-
 fn with_log_reference(summary: String, log_available: bool) -> String {
     if log_available {
         format!("{summary}\n\nSee last-run.log for details.")
     } else {
         summary
     }
-}
-
-fn launch_exit_context(status: ExitStatus) -> Option<String> {
-    if let Some(code) = status.code() {
-        if code == 0 {
-            return Some("Launch process exited successfully (delegation is allowed).".into());
-        }
-        return Some(format!("Launch process exited with code {code}."));
-    }
-    status
-        .signal()
-        .map(|signal| format!("Launch process terminated by signal {signal}."))
 }
 
 /// Best-effort save confirmation, independent of launch diagnostics.
@@ -819,6 +654,45 @@ fn notify(urgency: &str, summary: &str, message: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::WorkspaceTarget;
+    use std::collections::HashSet;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    /// Every cause, so each one's notification is checked.
+    const ALL_CAUSES: [Cause; 28] = [
+        Cause::TargetOccupied,
+        Cause::ProfileTargetOccupied,
+        Cause::ProfileOutputMismatch,
+        Cause::ProfileOutputUnavailable,
+        Cause::WindowTimeout { launch_exit: None },
+        Cause::WindowOnOtherWorkspace,
+        Cause::WindowInScratchpad,
+        Cause::WindowWorkspaceUnknown,
+        Cause::AmbiguousWindows,
+        Cause::WindowNotTiled,
+        Cause::UnexpectedWindow,
+        Cause::PreexistingWindow,
+        Cause::NewWindowClosed,
+        Cause::WindowIdentityChanged,
+        Cause::LayoutWindowChanged,
+        Cause::WindowActivity,
+        Cause::HierarchyMismatch,
+        Cause::FocusLost,
+        Cause::FocusUnstable,
+        Cause::OutputChanged,
+        Cause::TargetUnavailable,
+        Cause::ProfileWorkspaceChanged,
+        Cause::ConfigurationReloaded,
+        Cause::SelectionUnverified,
+        Cause::InconsistentWorkspaces,
+        Cause::ApplicationStart,
+        Cause::CommandRejected,
+        Cause::SwayIpc,
+    ];
+
+    /// Detail text that names private things and imitates other failures' wording.
+    const UNTRUSTED_DETAIL: &str = "profile target occupied: window timeout: spawn application: /private/<b>secret</b> \"name\" --token=hidden";
 
     fn without_log(operation: &'static str) -> Diagnostics {
         Diagnostics {
@@ -826,11 +700,17 @@ mod tests {
             log_file: None,
             log_path: None,
             started_at: Instant::now(),
+            phase: Phase::Construction,
             current_stage: "runtime".into(),
             profile_context: None,
             application_spawned: false,
-            timeout_process_status: None,
             sizing_summary: SizingSummary::default(),
+        }
+    }
+
+    fn assert_no_details(body: &str) {
+        for private in ["private", "secret", "name", "token", "hidden", "<b>"] {
+            assert!(!body.contains(private), "{private}: {body}");
         }
     }
 
@@ -903,75 +783,224 @@ mod tests {
 
     #[test]
     fn failure_urgency_distinguishes_safe_refusals_from_uncertain_state() {
-        let occupied = "layout \"private\": target workspace must be completely empty";
         let mut diagnostics = without_log("load");
-        diagnostics.stage("load private: validation");
+        diagnostics.enter_phase(Phase::Validation);
         assert_eq!(
-            diagnostics.failure_urgency("untrusted parser text"),
+            diagnostics.failure_urgency(&"untrusted parser text".into()),
             "normal"
         );
 
-        diagnostics.stage("prelaunch workspace=7");
-        assert_eq!(diagnostics.failure_urgency(occupied), "normal");
+        // The loader's occupied target is refused before any launch.
+        diagnostics.enter_phase(Phase::Construction);
+        let occupied = Failure::new(Cause::TargetOccupied, "occupied");
+        assert_eq!(diagnostics.failure_urgency(&occupied), "normal");
         for cause in [
-            "workspace focus changed from target id=7",
-            "target workspace id=7 moved to another output",
-            "get tree: connection closed",
-            "unrecognized: target workspace must be completely empty",
+            Cause::FocusLost,
+            Cause::OutputChanged,
+            Cause::SwayIpc,
+            Cause::ProfileTargetOccupied,
         ] {
-            assert_eq!(diagnostics.failure_urgency(cause), "critical", "{cause}");
+            let failure = Failure::new(cause, "detail");
+            assert_eq!(
+                diagnostics.failure_urgency(&failure),
+                "critical",
+                "{cause:?}"
+            );
         }
 
         diagnostics.operation = "profile load";
         diagnostics.profile_started(2);
-        diagnostics.stage("workspace preflight");
-        for cause in [
-            "profile target occupied: workspace 3",
-            "profile output mismatch: workspace 3",
-            "profile output unavailable: workspace 3",
-        ] {
-            let wrapped = format!("profile \"private\": {cause}");
-            assert_eq!(diagnostics.failure_urgency(&wrapped), "normal");
+        let profile_refusals = [
+            Cause::ProfileTargetOccupied,
+            Cause::ProfileOutputMismatch,
+            Cause::ProfileOutputUnavailable,
+        ];
+        for cause in profile_refusals {
+            let refusal = Failure::new(cause, "detail").context("profile \"private\"");
+            diagnostics.enter_phase(Phase::ProfilePreflight);
+            assert_eq!(diagnostics.failure_urgency(&refusal), "normal", "{cause:?}");
 
-            diagnostics.stage("workspace selection");
-            assert_eq!(diagnostics.failure_urgency(&wrapped), "critical");
-            diagnostics.stage("workspace preflight");
-        }
-        for cause in [
-            "get tree: connection closed",
-            "workspace snapshot: inconsistent identities",
-            "unexpected workspace change Focus",
-            "profile target changed: workspace 3",
-            "window activity id=20 during prelaunch fence",
-            "unrecognized error",
-        ] {
-            assert_eq!(diagnostics.failure_urgency(cause), "critical", "{cause}");
+            // The same finding after preflight follows a workspace switch.
+            for phase in [
+                Phase::ProfileSelection,
+                Phase::Construction,
+                Phase::ProfileCompletion,
+            ] {
+                diagnostics.enter_phase(phase);
+                assert_eq!(
+                    diagnostics.failure_urgency(&refusal),
+                    "critical",
+                    "{phase:?}"
+                );
+            }
         }
 
+        diagnostics.enter_phase(Phase::ProfilePreflight);
+        for cause in [
+            Some(Cause::SwayIpc),
+            Some(Cause::InconsistentWorkspaces),
+            Some(Cause::ProfileWorkspaceChanged),
+            Some(Cause::WindowActivity),
+            Some(Cause::TargetOccupied),
+            None,
+        ] {
+            let failure = Failure {
+                cause,
+                detail: "detail".into(),
+            };
+            assert_eq!(
+                diagnostics.failure_urgency(&failure),
+                "critical",
+                "{cause:?}"
+            );
+        }
+
+        // Anything may remain once an application started.
         diagnostics.spawned(Some(42));
+        let refusal = Failure::new(Cause::ProfileTargetOccupied, "detail");
+        assert_eq!(diagnostics.failure_urgency(&refusal), "critical");
+        diagnostics.enter_phase(Phase::Construction);
+        assert_eq!(diagnostics.failure_urgency(&occupied), "critical");
+    }
+
+    #[test]
+    fn text_resembling_a_known_failure_is_never_classified() {
+        // Before typed causes, these prefixes selected summaries and safe-refusal urgency.
+        for (phase, imitation) in [
+            (
+                Phase::ProfilePreflight,
+                "profile target occupied: workspace 3",
+            ),
+            (
+                Phase::ProfilePreflight,
+                "profile output mismatch: workspace 3",
+            ),
+            (
+                Phase::ProfilePreflight,
+                "profile output unavailable: workspace 3",
+            ),
+            (
+                Phase::Construction,
+                "target workspace must be completely empty",
+            ),
+            (Phase::Construction, "window timeout: elapsed=10000ms"),
+            (Phase::Construction, "spawn application: missing"),
+            (Phase::ProfileSelection, "get tree: connection closed"),
+        ] {
+            for operation in ["load", "profile load"] {
+                let mut diagnostics = without_log(operation);
+                diagnostics.profile_started(1);
+                diagnostics.enter_phase(phase);
+                let failure = Failure::from(imitation).context("layout construction");
+
+                assert_eq!(
+                    diagnostics.failure_urgency(&failure),
+                    "critical",
+                    "{imitation}"
+                );
+                assert_eq!(
+                    diagnostics.failure_summary(&failure),
+                    generic_failure_summary(operation),
+                    "{imitation}"
+                );
+            }
+        }
+
+        // An uncertain-state cause keeps its own summary and urgency whatever its text says.
+        let mut diagnostics = without_log("profile load");
+        diagnostics.profile_started(1);
+        diagnostics.enter_phase(Phase::ProfilePreflight);
+        let failure = Failure::new(Cause::SwayIpc, "profile target occupied: workspace 3");
+        assert_eq!(diagnostics.failure_urgency(&failure), "critical");
         assert_eq!(
-            diagnostics.failure_urgency("profile target occupied: workspace 3"),
-            "critical"
+            diagnostics.failure_summary(&failure),
+            Cause::SwayIpc.summary()
         );
-        diagnostics.stage("prelaunch workspace=7");
-        assert_eq!(diagnostics.failure_urgency(occupied), "critical");
+    }
+
+    #[test]
+    fn notification_categories_depend_only_on_the_cause() {
+        let mut summaries = HashSet::new();
+        for cause in ALL_CAUSES {
+            let summary = cause.summary();
+            assert!(summaries.insert(summary), "duplicate summary: {summary}");
+            assert!(summary.len() < 160, "{summary}");
+            assert_no_details(summary);
+
+            for operation in ["load", "profile load"] {
+                let mut bodies = HashSet::new();
+                for detail in ["", "short wording", UNTRUSTED_DETAIL] {
+                    // Wrapping adds context to the detail and never changes the cause.
+                    for failure in [
+                        Failure::new(cause, detail),
+                        Failure::new(cause, detail).context("layout \"work\""),
+                        Failure::new(cause, detail)
+                            .context("layout construction")
+                            .context("profile \"work\""),
+                        Failure::new(cause, detail)
+                            .context("workspace selection")
+                            .context("profile \"work\""),
+                    ] {
+                        assert_eq!(failure.cause, Some(cause));
+                        let diagnostics = without_log(operation);
+                        let body = diagnostics.failure_notification(&failure);
+                        assert!(body.starts_with(summary), "{body}");
+                        assert_no_details(&body);
+                        bodies.insert(body);
+                    }
+                }
+                assert_eq!(bodies.len(), 1, "{cause:?}: {bodies:?}");
+            }
+        }
+        for operation in ["load", "profile load", "capture", "profile capture", "menu"] {
+            assert!(!summaries.contains(generic_failure_summary(operation)));
+        }
+    }
+
+    #[test]
+    fn unclassified_and_validation_failures_use_fixed_summaries() {
+        for operation in ["load", "profile load"] {
+            let mut diagnostics = without_log(operation);
+            let unclassified = Failure::from(UNTRUSTED_DETAIL);
+            assert_eq!(
+                diagnostics.failure_notification(&unclassified),
+                generic_failure_summary(operation)
+            );
+
+            // Validation details are parser text and paths, whatever their cause.
+            diagnostics.enter_phase(Phase::Validation);
+            let expected = if operation == "profile load" {
+                "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
+            } else {
+                "Unable to read or validate the selected layout. Run sway-stage check NAME."
+            };
+            for failure in [
+                unclassified.clone(),
+                Failure::new(Cause::ApplicationStart, UNTRUSTED_DETAIL),
+            ] {
+                assert_eq!(diagnostics.failure_notification(&failure), expected);
+                assert_eq!(diagnostics.failure_urgency(&failure), "normal");
+            }
+        }
+        for operation in ["capture", "profile capture", "menu"] {
+            let summary = generic_failure_summary(operation);
+            assert!(summary.starts_with("Unable to"), "{summary}");
+        }
     }
 
     #[test]
     fn combined_profile_failures_keep_cause_progress_windows_and_log_concise() {
-        use crate::profile::WorkspaceTarget;
-
         for target in [
             WorkspaceTarget::Number(999_999_999),
             WorkspaceTarget::Name("private name".into()),
         ] {
             for log_available in [false, true] {
-                for cause in [
-                    "window timeout: private",
-                    "placement failure: unknown workspace: private",
-                    "matching window has unusable tiled state: private",
-                    "ambiguous new windows id=20 private",
-                    "spawn application: private",
+                for failure in [
+                    Failure::window_timeout("private", Some(ExitStatus::from_raw(11))),
+                    Failure::new(Cause::WindowWorkspaceUnknown, "private"),
+                    Failure::new(Cause::WindowNotTiled, "private"),
+                    Failure::new(Cause::AmbiguousWindows, "id=20 private"),
+                    Failure::new(Cause::ApplicationStart, "private"),
                 ] {
                     let mut diagnostics = without_log("profile load");
                     diagnostics.profile_started(256);
@@ -979,13 +1008,12 @@ mod tests {
                     diagnostics.spawned(Some(42));
                     diagnostics.profile_workspace_completed(101);
                     diagnostics.profile_workspace(&target, "private", 256);
-                    if cause.starts_with("window timeout: ") {
-                        diagnostics.window_timeout("private", Some(ExitStatus::from_raw(11)));
-                    }
 
                     diagnostics.log_file = log_available.then(|| File::open("/dev/null").unwrap());
-                    let body = diagnostics.failure_notification(cause);
-                    assert!(body.starts_with(recognized_failure_summary(cause).unwrap()));
+                    let failure = failure.context("layout construction");
+                    let body = diagnostics.failure_notification(&failure);
+                    let cause = failure.cause.unwrap();
+                    assert!(body.starts_with(cause.summary()));
                     assert!(body.contains("Windows may remain across profile workspaces."));
                     assert!(body.contains("Inspect before retrying."));
                     assert!(body.contains("1/256 completed"));
@@ -996,7 +1024,7 @@ mod tests {
                     assert_eq!(body.contains("last-run.log"), log_available);
                     assert_eq!(
                         body.contains("signal 11"),
-                        cause.starts_with("window timeout: ")
+                        matches!(cause, Cause::WindowTimeout { .. })
                     );
                     assert!(!body.contains("private"));
                     assert!(body.len() < 300, "{} characters: {body}", body.len());
@@ -1022,13 +1050,17 @@ mod tests {
     #[test]
     fn partial_layout_advice_requires_a_successful_spawn_and_no_log() {
         let mut diagnostics = without_log("load");
-        let failed_spawn = diagnostics.failure_notification("spawn application: private command");
+        let failed_spawn = diagnostics.failure_notification(&Failure::new(
+            Cause::ApplicationStart,
+            "spawn application: private command",
+        ));
         assert!(failed_spawn.contains("Check its executable"));
         assert!(!failed_spawn.contains("Windows may remain"));
         assert!(!failed_spawn.contains("nothing changed"));
 
         diagnostics.spawned(Some(42));
-        let body = diagnostics.failure_notification("window timeout: private selector");
+        let body =
+            diagnostics.failure_notification(&Failure::window_timeout("private selector", None));
         assert!(body.contains("Windows may remain. Inspect before retrying."));
         assert!(!body.contains("last-run.log"));
         assert!(!body.contains("private"));
@@ -1036,44 +1068,61 @@ mod tests {
 
     #[test]
     fn profile_progress_keeps_names_private_and_survives_loader_stages() {
-        use crate::profile::WorkspaceTarget;
-
         let mut diagnostics = without_log("profile load");
+        diagnostics.enter_phase(Phase::Validation);
         diagnostics.stage("profile: validation");
-        let validation = diagnostics.failure_notification("private YAML");
+        let validation = diagnostics.failure_notification(&"private YAML".into());
         assert!(!validation.contains("Profile stopped"));
         assert!(!validation.contains("completed"));
 
         diagnostics.profile_started(3);
+        diagnostics.enter_phase(Phase::ProfilePreflight);
         diagnostics.stage("workspace preflight");
-        let initial = diagnostics.failure_notification("get tree: failed");
+        let ipc_failure = Failure::new(Cause::SwayIpc, "get tree: failed");
+        let initial = diagnostics.failure_notification(&ipc_failure);
         assert!(initial.contains("Profile preflight stopped (0/3 completed)."));
         diagnostics.profile_workspace(
             &WorkspaceTarget::Name("<b>private</b>\n".into()),
             "secret",
             3,
         );
-        let preflight = diagnostics.failure_notification("profile target occupied: private");
+        let occupied = Failure::new(Cause::ProfileTargetOccupied, "private");
+        let preflight = diagnostics.failure_notification(&occupied);
         assert!(preflight.contains("Profile preflight stopped at entry 3 (0/3 completed)."));
         assert!(!preflight.contains("Windows may remain"));
         assert!(!preflight.contains("private"));
         assert!(!preflight.contains("secret"));
 
         diagnostics.profile_workspace(&WorkspaceTarget::Number(4), "secret", 1);
+        diagnostics.enter_phase(Phase::ProfileSelection);
         diagnostics.stage("workspace selection");
-        let selection = diagnostics.failure_notification("workspace command rejected: private");
+        let rejected = Failure::new(Cause::CommandRejected, "private");
+        let selection = diagnostics.failure_notification(&rejected);
         assert!(selection.contains("Profile stopped at workspace 4 (0/3 completed)."));
         assert!(!selection.contains("Windows may remain"));
         assert!(!selection.contains("nothing changed"));
+        let terminal = diagnostics.report_failure(rejected.context("profile \"work\""));
+        assert!(terminal.contains("completed 0 workspaces []"), "{terminal}");
+        assert!(
+            terminal.ends_with("; no applications launched"),
+            "{terminal}"
+        );
 
+        // The loader's own stages and phase never reset profile progress.
+        diagnostics.enter_phase(Phase::Construction);
+        diagnostics.stage("launch leaf=private workspace=104");
         diagnostics.spawned(Some(42));
+        diagnostics.enter_phase(Phase::ProfileCompletion);
         diagnostics.stage("workspace completion verification");
-        let unverified = diagnostics.failure_notification("unexpected workspace change Focus");
-        assert!(unverified.contains("0/3 completed"));
+        let changed = Failure::new(Cause::ProfileWorkspaceChanged, "private");
+        let unverified = diagnostics.failure_notification(&changed);
+        assert!(unverified.contains("Profile stopped at workspace 4 (0/3 completed)."));
         diagnostics.profile_workspace_completed(104);
         diagnostics.profile_workspace(&WorkspaceTarget::Name("sensitive name".into()), "secret", 2);
+        diagnostics.enter_phase(Phase::Construction);
         diagnostics.stage("launch leaf=private workspace=105");
-        let partial = diagnostics.failure_notification("spawn application: private");
+        let spawn_failure = Failure::new(Cause::ApplicationStart, "private");
+        let partial = diagnostics.failure_notification(&spawn_failure);
         assert!(partial.contains("Profile stopped at entry 2 (1/3 completed)."));
         assert!(
             partial
@@ -1084,6 +1133,21 @@ mod tests {
         assert!(!partial.contains("secret"));
         assert!(!partial.contains("last-run.log"));
         assert!(partial.len() < 400, "{partial}");
+
+        let terminal = diagnostics.report_failure(spawn_failure.context("profile \"work\""));
+        assert!(
+            terminal.contains("completed 1 workspaces [(4, 104)]"),
+            "{terminal}"
+        );
+        assert!(
+            terminal.contains("application launches may have left partial layouts"),
+            "{terminal}"
+        );
+        assert!(
+            terminal.contains("inspect windows before retrying"),
+            "{terminal}"
+        );
+        assert!(!terminal.contains("no applications launched"), "{terminal}");
     }
 
     #[test]
@@ -1108,30 +1172,28 @@ mod tests {
             (Some(ExitStatus::from_raw(0x7f)), None, false), // No exit code or signal available.
         ] {
             for log_available in [false, true] {
-                let mut diagnostics = Diagnostics {
-                    operation: "load",
-                    log_file: log_available.then(|| File::open("/dev/null").unwrap()),
-                    log_path: None,
-                    started_at: Instant::now(),
-                    current_stage: "wait".into(),
-                    profile_context: None,
-                    application_spawned: true,
-                    timeout_process_status: None,
-                    sizing_summary: SizingSummary::default(),
-                };
-                let detail = format!("no new windows observed; leaf={}", "x".repeat(10000));
-                let error = diagnostics.window_timeout(&detail, status);
-                assert!(error.starts_with(&format!("window timeout: {detail}")));
+                let mut diagnostics = without_log("load");
+                diagnostics.log_file = log_available.then(|| File::open("/dev/null").unwrap());
+                diagnostics.application_spawned = true;
+                let wait_detail = format!("no new windows observed; leaf={}", "x".repeat(10000));
+                let failure = Failure::window_timeout(&wait_detail, status);
+                assert_eq!(
+                    failure.cause,
+                    Some(Cause::WindowTimeout {
+                        launch_exit: status
+                    })
+                );
+                let detail = &failure.detail;
+                assert!(detail.starts_with(&format!("window timeout: {wait_detail}")));
                 if let Some(context) = expected_detail {
-                    assert!(error.ends_with(context), "{error}");
+                    assert!(detail.ends_with(context), "{detail}");
                 } else {
-                    assert_eq!(error, format!("window timeout: {detail}"));
+                    assert_eq!(*detail, format!("window timeout: {wait_detail}"));
                 }
 
-                // Exercise the same structured context and body path as report_failure,
-                // including the layout wrapper applied by its caller.
+                // The same path as report_failure, including the caller's layout context.
                 let body =
-                    diagnostics.failure_notification(&format!("layout \"development\": {error}"));
+                    diagnostics.failure_notification(&failure.context("layout \"development\""));
                 assert!(body.starts_with("Window timed out."));
                 assert_eq!(
                     body.contains("Launch process"),
@@ -1152,159 +1214,38 @@ mod tests {
     }
 
     #[test]
-    fn failure_notifications_summarize_recognized_causes() {
-        for (error, expected) in [
+    fn capture_and_menu_notifications_use_only_classified_summaries() {
+        use crate::menu::{Error, FailureKind};
+
+        let classified =
+            crate::capture::Error::from(Failure::new(Cause::SwayIpc, UNTRUSTED_DETAIL));
+        assert_eq!(classified.summary, Some(Cause::SwayIpc.summary()));
+        assert_eq!(classified.detail, UNTRUSTED_DETAIL);
+        let unclassified = crate::capture::Error::from(Failure::from(UNTRUSTED_DETAIL));
+        assert_eq!(unclassified.summary, None);
+
+        let untrusted_detail = format!("/private/{}<b>secret</b>", "x".repeat(10000));
+        for (kind, expected) in [
             (
-                "layout \"development\": window timeout: elapsed=10000ms observed=[]",
-                "Window timed out. Check launch command, exact app ID/class, and single-instance behavior.",
+                FailureKind::Snapshot(None),
+                "Unable to complete the menu action.",
             ),
             (
-                "layout \"development\": workspace focus changed from target id=7",
-                "The target workspace lost focus. Keep it focused while loading.",
+                FailureKind::Snapshot(Some(Cause::SwayIpc.summary())),
+                Cause::SwayIpc.summary(),
             ),
             (
-                "snapshot: focus left target id=7",
-                "The target workspace lost focus. Keep it focused while loading.",
+                FailureKind::Capture(None),
+                "Unable to capture the workspace.",
             ),
             (
-                "connect to SWAYSOCK: connection refused",
-                "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.",
-            ),
-            (
-                "pre-menu workspace snapshot: get tree: connection closed",
-                "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available.",
-            ),
-            (
-                "spawn application: executable missing; child PATH and cwd",
-                "Unable to start an application. Check its executable, command, working directory, and permissions.",
-            ),
-            (
-                "target workspace must be completely empty, including tiled/floating containers",
-                "The target workspace is occupied. Use a workspace with no windows or empty containers.",
-            ),
-            (
-                "unexpected failure: window timeout: untrusted text",
-                "Unable to finish loading the layout. Inspect workspace state and diagnostics before retrying.",
+                FailureKind::ProfileCapture(None),
+                "Unable to capture the profile.",
             ),
         ] {
-            assert_eq!(failure_body("load", error, "wait", false), expected);
-            assert_eq!(
-                failure_body("load", error, "wait", true),
-                format!("{expected}\n\nSee last-run.log for details.")
-            );
+            let error = Error::new(kind, untrusted_detail.clone());
+            assert_eq!(menu_failure_body(&error), expected);
         }
-    }
-
-    #[test]
-    fn runtime_causes_survive_layout_and_profile_context_without_copying_details() {
-        #[rustfmt::skip]
-        let cases = [
-            ("placement failure: wrong workspace: matching window id=20", "opened on another workspace"),
-            ("placement failure: unknown workspace: matching window id=20", "workspace could not be determined"),
-            ("matching window was in the scratchpad: id=20", "opened in the scratchpad instead"),
-            ("ambiguous new windows id=20 and id=21", "Multiple new windows match"),
-            ("matching window was floating/fullscreen: id=20", "Loading requires tiled windows"),
-            ("matching window has unusable tiled state: id=20", "unknown fullscreen state"),
-            ("unexpected target-workspace window id=20", "An unexpected window appeared"),
-            ("unexpected floating/fullscreen/scratchpad window id=20", "An unexpected window appeared"),
-            ("preexisting window id=20 entered target workspace", "A preexisting window entered"),
-            ("snapshot: focused workspace id=11 differs from pre-menu workspace id=10", "target workspace lost focus"),
-            ("focus did not stay on container id=21 after 3 restorations within the target workspace", "Focus kept moving between windows"),
-            ("target workspace id=10 moved to another output", "target workspace changed outputs"),
-            ("snapshot: target workspace id=10 changed output from id=2 to id=3", "target workspace changed outputs"),
-            ("target workspace was destroyed", "target workspace is no longer available"),
-            ("profile target occupied: workspace 3", "All profile targets must be empty"),
-            ("profile output mismatch: workspace 3", "different output than configured"),
-            ("profile output unavailable: workspace 3", "output required by the profile is not active"),
-            ("profile target changed: workspace 3", "Workspace identity, focus, or output changed"),
-            ("unexpected workspace change Focus id=10", "Workspace identity, focus, or output changed"),
-            ("workspace reload: revalidation required", "configuration reloaded"),
-            ("workspace snapshot: ambiguous workspace identities or numbers", "inconsistent workspace identities or focus"),
-            ("workspace selection: expected focus event was not observed", "workspace selection could not be verified"),
-            ("spawn application: missing executable", "Unable to start an application"),
-            ("workspace command rejected: denied", "Sway rejected a command"),
-            ("Sway command failed: rejected", "Sway rejected a command"),
-            ("window activity id=20 during prelaunch fence", "Window activity made loading unsafe"),
-            ("accepted window id=20 disappeared", "A layout window closed or changed"),
-            ("new/accepted window id=20 closed", "A newly observed window closed"),
-            ("matching window changed identity after a nonmatching identity: id=20", "app ID/class changed during loading"),
-            ("unexpected hierarchy at id=10", "hierarchy differs from the expected layout"),
-            ("command deadline/channel failure: timeout", "Unable to communicate with Sway"),
-            ("snapshot: event fence deadline expired", "Unable to communicate with Sway"),
-            ("event reader disconnected; history cannot be trusted", "Unable to communicate with Sway"),
-        ];
-        for (cause, expected) in cases {
-            let detail = format!("{cause}: /private/<b>secret</b>");
-            for (operation, error) in [
-                ("load", format!("layout \"work\": {detail}")),
-                (
-                    "profile load",
-                    format!("profile \"work\": layout construction: {detail}"),
-                ),
-                (
-                    "profile load",
-                    format!("profile \"work\": workspace selection: {detail}"),
-                ),
-            ] {
-                let body = failure_body(operation, &error, "runtime", false);
-                assert!(body.contains(expected), "{error}: {body}");
-                assert!(!body.contains("secret"), "{body}");
-                assert!(!body.contains("/private"), "{body}");
-            }
-        }
-    }
-
-    #[test]
-    fn validation_and_unknown_errors_do_not_guess_at_runtime_causes() {
-        assert_eq!(
-            failure_body(
-                "profile load",
-                "spawn application: untrusted parser text",
-                "profile: validation",
-                false
-            ),
-            "Unable to read or validate the profile and its layouts. Run sway-stage profile check NAME."
-        );
-        for operation in ["load", "profile load", "capture", "profile capture", "menu"] {
-            let body = failure_body(
-                operation,
-                "unrecognized: spawn application: /private",
-                "runtime",
-                false,
-            );
-            assert!(!body.contains("start an application"));
-            assert!(!body.contains("/private"));
-        }
-    }
-
-    #[test]
-    fn notifications_omit_long_names_paths_and_untrusted_markup() {
-        let long_name = "a".repeat(10000);
-        let timeout = format!("layout \"{long_name}\": window timeout: leaf=<b>private</b>");
-        let body = failure_body("load", &timeout, "wait", true);
-        assert!(body.starts_with("Window timed out."));
-        assert!(!body.contains(&long_name));
-        assert!(!body.contains("private"));
-
-        let stage = format!("load {long_name:?}: validation");
-        assert_eq!(
-            failure_body(
-                "load",
-                "/very/long/private/path: YAML details",
-                &stage,
-                false
-            ),
-            "Unable to read or validate the selected layout. Run sway-stage check NAME."
-        );
-        assert_eq!(
-            failure_body(
-                "capture",
-                "workspace <b>private</b>: unsupported tree",
-                "",
-                false
-            ),
-            "Unable to capture the workspace."
-        );
     }
 
     #[test]
@@ -1315,7 +1256,7 @@ mod tests {
         for kind in [
             FailureKind::InvalidLayout,
             FailureKind::InvalidProfile,
-            FailureKind::Snapshot,
+            FailureKind::Snapshot(None),
             FailureKind::LayoutDiscovery,
             FailureKind::ProfileDiscovery,
             FailureKind::NoActions,
@@ -1340,26 +1281,20 @@ mod tests {
 
     #[test]
     fn failed_log_writes_do_not_offer_the_log_as_details() {
-        let mut diagnostics = Diagnostics {
-            operation: "load",
-            log_file: Some(OpenOptions::new().write(true).open("/dev/full").unwrap()),
-            log_path: Some(PathBuf::from("/dev/full")),
-            started_at: Instant::now(),
-            current_stage: "wait".into(),
-            profile_context: None,
-            application_spawned: true,
-            timeout_process_status: None,
-            sizing_summary: SizingSummary::default(),
-        };
-        let error = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
-        let terminal = diagnostics.report_failure(error.into());
-        assert!(terminal.contains(error));
+        let mut diagnostics = without_log("load");
+        diagnostics.log_file = Some(OpenOptions::new().write(true).open("/dev/full").unwrap());
+        diagnostics.log_path = Some(PathBuf::from("/dev/full"));
+        diagnostics.application_spawned = true;
+        let detail = "elapsed=10000ms observed=[id=42 app_id=wrong]";
+        let failure = Failure::window_timeout(detail, None);
+        let terminal = diagnostics.report_failure(failure.clone());
+        assert!(terminal.contains(detail));
         assert!(terminal.contains("inspect windows before retrying"));
         assert!(!terminal.contains("; log:"), "{terminal}");
         assert!(!terminal.contains("/dev/full"), "{terminal}");
         assert!(diagnostics.log_file.is_none());
         assert!(diagnostics.log_path.is_none());
-        let notification = diagnostics.failure_notification(error);
+        let notification = diagnostics.failure_notification(&failure);
         assert!(!notification.contains("last-run.log"));
         assert!(notification.contains("Windows may remain"));
     }
@@ -1371,6 +1306,7 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let path = directory.join("last-run.log");
         let mut diagnostics = Diagnostics::for_test(path.clone());
+        diagnostics.enter_phase(Phase::Construction);
         diagnostics.stage("launch");
         diagnostics.spawned(Some(42));
 
@@ -1378,12 +1314,16 @@ mod tests {
         assert!(launch_log.contains("spawned pid=42"), "{launch_log}");
 
         // Capture, or menu before layout selection, reports without any log access.
-        notify_failure("capture", "capture: get tree: connection closed").unwrap();
+        let capture_error = crate::capture::Error::from(Failure::new(
+            Cause::SwayIpc,
+            "get tree: connection closed",
+        ));
+        notify_capture_failure("capture", &capture_error).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), launch_log);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
 
-        let detail = "window timeout: elapsed=10000ms observed=[id=42 app_id=wrong]";
-        let terminal = diagnostics.report_failure(detail.into());
+        let detail = "elapsed=10000ms observed=[id=42 app_id=wrong]";
+        let terminal = diagnostics.report_failure(Failure::window_timeout(detail, None));
         assert!(terminal.contains(detail));
         assert!(terminal.contains("launch:"));
         assert!(terminal.contains("inspect windows before retrying"));

@@ -1,3 +1,9 @@
+#[path = "../src/failure.rs"]
+#[allow(
+    dead_code,
+    reason = "the example only reports failures; it never classifies notifications"
+)]
+mod failure;
 #[path = "../src/observation.rs"]
 #[allow(
     dead_code,
@@ -21,7 +27,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn observe() -> Result<(), String> {
+fn observe() -> Result<(), failure::Failure> {
     let socket = observation::sway_socket()?;
     let connect = || observation::connect(&socket);
 

@@ -36,7 +36,7 @@ impl LaunchFixture {
         crate::config::read(&path).unwrap()
     }
 
-    fn run(&self, config: &Config, steps: Vec<IpcStep>) -> Result<(), String> {
+    fn run(&self, config: &Config, steps: Vec<IpcStep>) -> Result<(), Failure> {
         self.serve_transcript(steps, |connect, diagnostics| {
             load_with(config, None, connect, diagnostics).map(|_| ())
         })
@@ -46,7 +46,7 @@ impl LaunchFixture {
         &self,
         config: &Config,
         mut steps: Vec<IpcStep>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let tree = steps.last().unwrap().tree.clone();
         fn append_sizing_snapshots(steps: &mut Vec<IpcStep>, tree: &Value, node: &LayoutNode) {
             if let NodeKind::Group {
@@ -92,10 +92,10 @@ impl LaunchFixture {
         &self,
         steps: Vec<IpcStep>,
         action: impl FnOnce(
-            &mut dyn FnMut() -> Result<UnixStream, String>,
+            &mut dyn FnMut() -> Result<UnixStream, Failure>,
             &mut Diagnostics,
-        ) -> Result<(), String>,
-    ) -> Result<(), String> {
+        ) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
         let (event_client, mut events) = socket_pair();
         let (request_sender, request_sockets) = mpsc::channel();
         let expected_step_count = steps.len();
@@ -308,9 +308,19 @@ fn successful_steps() -> Vec<IpcStep> {
     ]
 }
 
-fn assert_load_fails(fixture: &LaunchFixture, steps: Vec<IpcStep>, expected: &str) {
-    let error = fixture.run(&fixture.config(), steps).unwrap_err();
-    assert!(error.contains(expected), "expected {expected:?}: {error}");
+/// The cause, not the detail's wording, selects the notification; check both.
+fn assert_load_fails(
+    fixture: &LaunchFixture,
+    steps: Vec<IpcStep>,
+    expected_detail: &str,
+    expected_cause: Cause,
+) {
+    let failure = fixture.run(&fixture.config(), steps).unwrap_err();
+    assert!(
+        failure.detail.contains(expected_detail),
+        "expected {expected_detail:?}: {failure}"
+    );
+    assert_eq!(failure.cause, Some(expected_cause), "{failure}");
     assert_eq!(fixture.wait_for_launch_count(), 1);
 }
 
@@ -366,14 +376,14 @@ fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards
     ] {
         let fixture = LaunchFixture::new();
         let mut steps = foreign_close_command_steps();
-        let expected = match scenario {
+        let (expected, expected_cause) = match scenario {
             "accepted-window-close" => {
                 steps[5].events[0].1["container"] = wayland_window(20, Some("expected"));
-                "accepted window/group"
+                ("accepted window/group", Cause::LayoutWindowChanged)
             }
             "unknown-window-close" => {
                 steps[5].events[0].1["container"] = wayland_window(99, Some("unrelated"));
-                "ownership is uncertain"
+                ("ownership is uncertain", Cause::WindowActivity)
             }
             "later-baseline-close" => {
                 // First seen during this launch, then added to preexisting_ids by the
@@ -384,11 +394,11 @@ fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards
                 for step in steps.iter_mut().take(5).skip(2) {
                     step.tree["nodes"][0]["nodes"][1]["nodes"][0]["app_id"] = json!("unrelated");
                 }
-                "ownership is uncertain"
+                ("ownership is uncertain", Cause::WindowActivity)
             }
             "move-instead-of-close" => {
                 steps[5].events[0].1["change"] = json!("move");
-                "ownership is uncertain"
+                ("ownership is uncertain", Cause::WindowActivity)
             }
             "changed-hierarchy" => {
                 steps[6].tree = arranged_tree(
@@ -400,7 +410,7 @@ fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards
                     )],
                     20,
                 );
-                "unexpected hierarchy"
+                ("unexpected hierarchy", Cause::HierarchyMismatch)
             }
             "focus-away-and-back" => {
                 steps[5]
@@ -409,24 +419,24 @@ fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards
                 steps[5]
                     .events
                     .push((WORKSPACE_EVENT, workspace_focus_event(10, 11)));
-                "focus changed"
+                ("focus changed", Cause::FocusLost)
             }
             "workspace-migration" => {
                 steps[5]
                     .events
                     .push((WORKSPACE_EVENT, workspace_move_event(10)));
-                "moved to another output"
+                ("moved to another output", Cause::OutputChanged)
             }
             "changed-output" => {
                 steps[6].tree["nodes"][0]["id"] = json!(3);
-                "changed output"
+                ("changed output", Cause::OutputChanged)
             }
             "foreign-window-move" => {
                 steps[5].events.push((
                     WINDOW_EVENT,
                     json!({"change": "move", "container": wayland_window(90, Some("expected"))}),
                 ));
-                "ownership is uncertain"
+                ("ownership is uncertain", Cause::WindowActivity)
             }
             "preexisting-new" | "preexisting-floating" | "preexisting-fullscreen" => {
                 // These preexisting-window events retain their existing launch-wait
@@ -441,11 +451,11 @@ fn foreign_close_does_not_bypass_ownership_history_hierarchy_or_workspace_guards
                     WINDOW_EVENT,
                     json!({"change": change, "container": wayland_window(90, Some("expected"))}),
                 ));
-                "ownership is uncertain"
+                ("ownership is uncertain", Cause::WindowActivity)
             }
             _ => unreachable!(),
         };
-        assert_load_fails(&fixture, steps, expected);
+        assert_load_fails(&fixture, steps, expected, expected_cause);
     }
 }
 
@@ -455,7 +465,7 @@ fn foreign_close_requires_the_following_quiet_snapshot_to_verify_too() {
     let mut steps = foreign_close_command_steps();
     steps[7].tree = empty_workspace_tree();
 
-    assert_load_fails(&fixture, steps, "disappeared");
+    assert_load_fails(&fixture, steps, "disappeared", Cause::LayoutWindowChanged);
 }
 
 #[test]
@@ -489,7 +499,7 @@ fn launch_wait_still_tolerates_preexisting_close_and_refuses_provisional_or_unkn
                 .run_with_finalization(&fixture.config(), steps)
                 .unwrap();
         } else {
-            assert_load_fails(&fixture, steps, "closed");
+            assert_load_fails(&fixture, steps, "closed", Cause::NewWindowClosed);
         }
     }
 }
@@ -676,7 +686,8 @@ fn mismatched_menu_target_refuses_before_any_launch_or_command() {
             vec![snapshot_step(with_second_output(empty_workspace_tree()))],
             |connect, diagnostics| load_with(&config, Some(88), connect, diagnostics).map(|_| ()),
         )
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
 
     assert!(
         error.contains("differs from pre-menu workspace id=88"),
@@ -746,7 +757,8 @@ fn workspace_migration_stops_before_launch_or_any_further_construction() {
                     assert_eq!(connections, expected_connections);
                     result.map(|_| ())
                 })
-                .unwrap_err();
+                .unwrap_err()
+                .detail;
             assert!(error.contains(expected_error), "{error}");
             if during_construction {
                 assert_eq!(fixture.wait_for_launch_count(), 1);
@@ -772,10 +784,12 @@ fn empty_wrappers_tiled_and_floating_occupancy_refuse_before_spawn() {
         workspace["focused"] = json!(false);
         workspace[if floating { "floating_nodes" } else { "nodes" }] =
             json!([node(20, "con", true)]);
-        let error = fixture
+        let failure = fixture
             .run(&fixture.config(), vec![snapshot_step(occupied)])
             .unwrap_err();
-        assert!(error.contains("completely empty"), "{error}");
+        assert!(failure.detail.contains("completely empty"), "{failure}");
+        // Only this typed cause, found before a launch, makes the refusal a safe one.
+        assert_eq!(failure.cause, Some(Cause::TargetOccupied));
         assert!(!fixture.path.join("launches").exists());
     }
 }
@@ -824,13 +838,14 @@ fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail(
             snapshot_step(empty_workspace_tree()),
             snapshot_step(empty_workspace_tree()),
         ];
-        let (bad, expected) = match scenario {
+        let (bad, expected, expected_cause) = match scenario {
             "wrong-workspace" => (
                 with_window_on_other_workspace(
                     empty_workspace_tree(),
                     wayland_window(20, Some("expected")),
                 ),
                 "placement failure: wrong workspace:",
+                Cause::WindowOnOtherWorkspace,
             ),
             "scratchpad" | "floating-scratchpad" => {
                 let mut bad = with_window_on_other_workspace(
@@ -841,14 +856,22 @@ fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail(
                 if scenario == "floating-scratchpad" {
                     bad["nodes"][0]["nodes"][1]["nodes"][0]["floating"] = json!("user_on");
                 }
-                (bad, "matching window was in the scratchpad:")
+                (
+                    bad,
+                    "matching window was in the scratchpad:",
+                    Cause::WindowInScratchpad,
+                )
             }
             "unknown-workspace" => {
                 let mut bad = empty_workspace_tree();
                 let mut unlocated = wayland_window(20, Some("expected"));
                 unlocated["focused"] = json!(false);
                 bad["nodes"].as_array_mut().unwrap().push(unlocated);
-                (bad, "placement failure: unknown workspace:")
+                (
+                    bad,
+                    "placement failure: unknown workspace:",
+                    Cause::WindowWorkspaceUnknown,
+                )
             }
             "ambiguous-match" => {
                 let mut other = wayland_window(21, Some("expected"));
@@ -856,11 +879,13 @@ fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail(
                 (
                     tree_with_target_windows(vec![wayland_window(20, Some("expected")), other]),
                     "ambiguous",
+                    Cause::AmbiguousWindows,
                 )
             }
             "unexpected-window" => (
                 tree_with_target_windows(vec![wayland_window(20, Some("unrelated"))]),
                 "unexpected target-workspace",
+                Cause::UnexpectedWindow,
             ),
             _ => {
                 steps = vec![
@@ -876,11 +901,12 @@ fn wrong_workspace_scratchpad_ambiguity_unexpected_and_preexisting_entries_fail(
                 (
                     tree_with_target_windows(vec![wayland_window(20, Some("expected"))]),
                     "preexisting",
+                    Cause::PreexistingWindow,
                 )
             }
         };
         steps.push(snapshot_step(bad));
-        assert_load_fails(&fixture, steps, expected);
+        assert_load_fails(&fixture, steps, expected, expected_cause);
     }
 }
 
@@ -903,6 +929,7 @@ fn floating_fullscreen_and_unknown_fullscreen_are_not_accepted() {
                 snapshot_step(bad),
             ],
             "floating/fullscreen",
+            Cause::WindowNotTiled,
         );
     }
 }
@@ -924,6 +951,7 @@ fn focus_switch_away_and_back_and_ipc_disconnect_abort_without_relaunch() {
             switched,
         ],
         "focus changed",
+        Cause::FocusLost,
     );
     let fixture = LaunchFixture::new();
     let mut disconnected = snapshot_step(empty_workspace_tree());
@@ -936,15 +964,16 @@ fn focus_switch_away_and_back_and_ipc_disconnect_abort_without_relaunch() {
             disconnected,
         ],
         "get workspaces",
+        Cause::SwayIpc,
     );
 }
 
 #[test]
 fn stale_tree_cannot_hide_later_close_move_or_second_match() {
-    for (change, expected) in [
-        ("close", "closed"),
-        ("move", "uncertain"),
-        ("new", "ambiguous"),
+    for (change, expected, expected_cause) in [
+        ("close", "closed", Cause::NewWindowClosed),
+        ("move", "uncertain", Cause::WindowActivity),
+        ("new", "ambiguous", Cause::AmbiguousWindows),
     ] {
         let fixture = LaunchFixture::new();
         let mut final_step = successful_steps().pop().unwrap();
@@ -956,7 +985,7 @@ fn stale_tree_cannot_hide_later_close_move_or_second_match() {
         let mut steps = successful_steps();
         steps.pop();
         steps.push(final_step);
-        assert_load_fails(&fixture, steps, expected);
+        assert_load_fails(&fixture, steps, expected, expected_cause);
     }
 }
 
@@ -975,7 +1004,7 @@ fn event_newer_than_tree_requires_another_snapshot_and_final_window_must_remain(
     let mut steps = successful_steps();
     *steps.last_mut().unwrap() = snapshot_step(empty_workspace_tree());
 
-    assert_load_fails(&fixture, steps, "disappeared");
+    assert_load_fails(&fixture, steps, "disappeared", Cause::LayoutWindowChanged);
 }
 
 #[test]
@@ -998,7 +1027,8 @@ fn timeout_distinguishes_no_new_windows_and_unresolved_identity() {
                     snapshot_step(waiting),
                 ],
             )
-            .unwrap_err();
+            .unwrap_err()
+            .detail;
         assert!(
             error.contains(if unresolved {
                 "new windows observed"
@@ -1044,7 +1074,7 @@ fn possibly_matching_new_window_events_prompt_a_fresh_observation_before_the_pol
                 empty_workspace_tree(),
                 reported_window,
             )));
-            let error = fixture.run(&config, steps).unwrap_err();
+            let error = fixture.run(&config, steps).unwrap_err().detail;
             assert!(error.contains("window timeout"), "{error}");
             assert!(
                 error.contains(
@@ -1087,7 +1117,7 @@ fn launcher_exit_is_timeout_context_and_never_shortens_the_wait() {
         let mut config = fixture.config();
         config.window_timeout_ms = 260;
         let started_at = Instant::now();
-        let error = fixture
+        let failure = fixture
             .run(
                 &config,
                 vec![
@@ -1097,6 +1127,12 @@ fn launcher_exit_is_timeout_context_and_never_shortens_the_wait() {
                 ],
             )
             .unwrap_err();
+        let Some(Cause::WindowTimeout { launch_exit }) = failure.cause else {
+            panic!("expected a window timeout: {failure:?}");
+        };
+        // The notification reports the same status the detail describes.
+        assert_eq!(launch_exit.is_some(), expected_context.is_some());
+        let error = failure.detail;
 
         assert!(started_at.elapsed() >= Duration::from_millis(config.window_timeout_ms));
         assert!(error.starts_with("window timeout:"), "{error}");
@@ -1139,7 +1175,7 @@ fn spawn_failure_does_not_retry_and_child_path_lookup_is_used() {
         unreachable!()
     };
     command[0] = "missing-fixture-executable".into();
-    let error = fixture
+    let failure = fixture
         .run(
             &config,
             vec![
@@ -1149,7 +1185,8 @@ fn spawn_failure_does_not_retry_and_child_path_lookup_is_used() {
         )
         .unwrap_err();
 
-    assert!(error.contains("spawn application"), "{error}");
+    assert!(failure.detail.contains("spawn application"), "{failure}");
+    assert_eq!(failure.cause, Some(Cause::ApplicationStart));
     assert!(!fixture.path.join("launches").exists());
 
     let mut config = fixture.config();
@@ -1180,6 +1217,7 @@ fn failure_leaves_application_running_and_never_relaunches() {
             )])),
         ],
         "unexpected target-workspace",
+        Cause::UnexpectedWindow,
     );
     let limit = ipc_deadline();
     while !fixture.path.join("survived").exists() {
@@ -1200,9 +1238,10 @@ fn failure_reports_mention_partial_layouts_only_after_a_successful_spawn() {
         let error = fixture
             .serve_transcript(steps, |connect, diagnostics| {
                 let result = load_with(config, None, connect, diagnostics).map(|_| ());
-                result.map_err(|error| diagnostics.report_failure(error))
+                result.map_err(|failure| Failure::from(diagnostics.report_failure(failure)))
             })
-            .unwrap_err();
+            .unwrap_err()
+            .detail;
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         (error, log)
     }
@@ -1313,6 +1352,7 @@ fn exact_xwayland_class_matching_and_global_floating_ancestry() {
             snapshot_step(target),
         ],
         "floating/fullscreen",
+        Cause::WindowNotTiled,
     );
 }
 
@@ -1341,6 +1381,11 @@ fn later_events_cannot_hide_identity_or_fullscreen_changes() {
                 "changed identity"
             } else {
                 "floating/fullscreen"
+            },
+            if change == "title" {
+                Cause::LayoutWindowChanged
+            } else {
+                Cause::WindowNotTiled
             },
         );
     }
@@ -1905,7 +1950,7 @@ fn construction_failures_stop_before_another_launch() {
             }
         };
         steps.extend([before, command, after]);
-        let error = fixture.run(&config, steps).unwrap_err();
+        let error = fixture.run(&config, steps).unwrap_err().detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         assert_eq!(fixture.wait_for_launch_count(), 1);
     }
@@ -1986,7 +2031,7 @@ fn accepted_windows_are_revalidated_during_the_next_window_wait() {
             }
         };
         steps.push(bad);
-        let error = fixture.run(&config, steps).unwrap_err();
+        let error = fixture.run(&config, steps).unwrap_err().detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         let limit = ipc_deadline();
         while fixture.wait_for_launch_count() != 2 {
@@ -2016,7 +2061,8 @@ fn command_deadline_and_truncated_reply_are_fatal_without_retry() {
             "[con_id=20] splitv".into(),
             started + Duration::from_millis(40),
         )
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(
             error.contains(if truncated { "command IPC" } else { "deadline" }),
             "{error}"
@@ -2320,7 +2366,7 @@ fn insertion_focus_moved_before_spawning_is_restored_within_a_bounded_budget() {
                 append_undone_focus_restoration(&mut steps, &moved, 21);
                 steps.extend([snapshot_step(moved.clone()), snapshot_step(moved.clone())]);
             }
-            let error = fixture.run(&config, steps).unwrap_err();
+            let error = fixture.run(&config, steps).unwrap_err().detail;
 
             assert!(
                 error.contains("focus did not stay on container id=21 after 3 restorations"),
@@ -2369,7 +2415,7 @@ fn insertion_focus_request_and_prelaunch_fence_share_one_restoration_budget() {
     // The same launch's prelaunch fence then has no restorations left.
     let moved_again = append_pointer_focus(&mut steps, &restored, 20);
     steps.push(snapshot_step(moved_again));
-    let error = fixture.run(&config, steps).unwrap_err();
+    let error = fixture.run(&config, steps).unwrap_err().detail;
 
     assert!(
         error.contains("focus did not stay on container id=21 after 3 restorations"),
@@ -2451,7 +2497,7 @@ fn insertion_focus_moved_during_the_window_wait_is_restored_only_while_safe() {
                 "restoration rejected"
             }
         };
-        let error = fixture.run(&config, steps).unwrap_err();
+        let error = fixture.run(&config, steps).unwrap_err().detail;
 
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         wait_for_launch_total(&fixture, 3);
@@ -2484,7 +2530,7 @@ fn focus_restoration_during_the_window_wait_never_outlasts_the_window_deadline()
     steps.last_mut().unwrap().withhold_reply = true;
 
     let started = Instant::now();
-    let error = fixture.run(&config, steps).unwrap_err();
+    let error = fixture.run(&config, steps).unwrap_err().detail;
 
     assert!(error.contains("command deadline"), "{error}");
     assert!(
@@ -2656,8 +2702,8 @@ fn with_completed_session(
     fixture: &LaunchFixture,
     config: &Config,
     steps: Vec<IpcStep>,
-    action: impl FnOnce(&mut Construction<'_>) -> Result<(), String>,
-) -> Result<(), String> {
+    action: impl FnOnce(&mut Construction<'_>) -> Result<(), Failure>,
+) -> Result<(), Failure> {
     fixture.serve_transcript(steps, |connect, diagnostics| {
         let mut observer = Observer::subscribe(connect()?, ipc_deadline())?;
         let initial = observer.snapshot(connect()?, ipc_deadline())?;
@@ -3235,7 +3281,8 @@ fn sizing_interference_and_ipc_errors_are_fatal_even_when_sizes_are_nonfatal() {
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.apply_sizing(&config.layout.value, &[], &mut Vec::new())
         })
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
 }
@@ -3296,7 +3343,8 @@ fn resettled_fences_still_detect_unsafe_activity_and_lost_observation() {
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.focus_container(&[0], &mut 0).map(|_| ())
         })
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         assert!(log.contains("Title id=21; observing again"), "{log}");
@@ -3428,7 +3476,8 @@ fn final_focus_rejects_missing_foreign_relocated_and_incorrect_focus() {
         let error = with_completed_session(&fixture, &config, steps, |session| {
             session.focus_container(&[0], &mut 0).map(|_| ())
         })
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
 }
@@ -3873,7 +3922,7 @@ fn tab_conversion_rejects_interference_and_unexpected_structure_before_next_laun
             }
         };
         steps.extend([before, command, after]);
-        let error = fixture.run(&config, steps).unwrap_err();
+        let error = fixture.run(&config, steps).unwrap_err().detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
         assert!(!log.contains("launch leaf=\\\"w2\\\""), "{log}");
@@ -3959,7 +4008,7 @@ fn workspace_layout_request_still_verifies_target_replies_and_result() {
         if scenario != "target-moved" {
             steps.extend([command, after]);
         }
-        let error = fixture.run(&config, steps).unwrap_err();
+        let error = fixture.run(&config, steps).unwrap_err().detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
         assert_eq!(fixture.wait_for_launch_count(), 1);
         let log = fs::read_to_string(fixture.path.join("last-run.log")).unwrap();
@@ -4325,7 +4374,8 @@ fn group_selection_failure_stops_before_later_groups_and_global_focus() {
             session.initialize_group_selection(&config.layout.value, &[])?;
             session.focus_container(&[0, 0], &mut 0).map(|_| ())
         })
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(error.contains(expected), "scenario={scenario}: {error}");
     }
 }
@@ -4577,7 +4627,8 @@ fn final_selection_verification_rejects_changed_inactive_and_ancestor_history() 
             session.initialize_group_selection(&config.layout.value, &[])?;
             session.apply_final_focus(&config.layout.value, config.focus.as_deref(), &[])
         })
-        .unwrap_err();
+        .unwrap_err()
+        .detail;
         assert!(
             error.contains(&format!("group selection id={changed_group}:")),
             "{error}"
@@ -4800,7 +4851,7 @@ fn focus_restoration_keeps_tab_selections_but_never_repairs_another_groups_selec
             "{log}"
         );
         if click_other_group {
-            let error = result.unwrap_err();
+            let error = result.unwrap_err().detail;
             assert!(
                 error.contains("group selection id=101: expected child 1 id=22"),
                 "{error}"

@@ -1,5 +1,6 @@
-use crate::diagnostics::Diagnostics;
+use crate::diagnostics::{Diagnostics, Phase};
 use crate::discovery::{self, ConfigDirectory};
+use crate::failure::{Cause, Failure};
 use crate::observation::{self, Observer, WorkspaceSnapshot};
 use crate::{config, launch};
 use serde::{Deserialize, Serialize};
@@ -203,8 +204,9 @@ pub fn read_named(
 
 /// All files have already been validated. Only this coordinator selects workspaces;
 /// each construction gets the ordinary loader's fresh, frozen observer.
-pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result<(), String> {
+pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result<(), Failure> {
     diagnostics.profile_started(prepared.workspaces.len());
+    diagnostics.enter_phase(Phase::ProfilePreflight);
     diagnostics.stage("workspace preflight");
     let socket_path = observation::sway_socket()?;
     let mut observer = Observer::subscribe(
@@ -230,6 +232,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
     let mut previous_snapshot = initial;
     for (entry_index, entry) in prepared.workspaces.iter().enumerate() {
         diagnostics.profile_workspace(&entry.workspace, &entry.layout_name, entry_index + 1);
+        diagnostics.enter_phase(Phase::ProfileSelection);
         diagnostics.stage("workspace selection");
         let selected = select_workspace(
             &mut observer,
@@ -239,7 +242,7 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
             &previous_snapshot,
             diagnostics,
         )
-        .map_err(|error| format!("workspace selection: {error}"))?;
+        .map_err(|failure| failure.context("workspace selection"))?;
 
         diagnostics.record(&format!(
             "using validated layout {:?} from {} on workspace {} id={}",
@@ -253,10 +256,11 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         // each event on arrival, including the gap before the loader subscribes.
         observer.check_events_until_next_snapshot(check_event_during_construction)?;
         launch::load(&entry.config, Some(selected.id), diagnostics)
-            .map_err(|error| format!("layout construction: {error}"))?;
+            .map_err(|failure| failure.context("layout construction"))?;
 
         // Construction's events were checked as they arrived; this snapshot resumes the
         // queued history and checks everything since, before another switch.
+        diagnostics.enter_phase(Phase::ProfileCompletion);
         diagnostics.stage("workspace completion verification");
         let finished = observer.workspace_snapshot(
             observation::connect(&socket_path)?,
@@ -265,9 +269,10 @@ pub fn load(prepared: &PreparedProfile, diagnostics: &mut Diagnostics) -> Result
         let observed_focus = validate_workspace_snapshot(&finished)?;
         validate_workspace_history(&finished, &selected, None)?;
         if observed_focus != selected {
-            return Err(
-                "workspace completion: focused workspace identity or output changed".into(),
-            );
+            return Err(Failure::new(
+                Cause::ProfileWorkspaceChanged,
+                "workspace completion: focused workspace identity or output changed",
+            ));
         }
 
         diagnostics.profile_workspace_completed(selected.id);
@@ -287,7 +292,7 @@ fn select_workspace(
     expected_output: Option<&str>,
     previous_snapshot: &WorkspaceSnapshot,
     diagnostics: &mut Diagnostics,
-) -> Result<WorkspaceIdentity, String> {
+) -> Result<WorkspaceIdentity, Failure> {
     let expected_focus = validate_workspace_snapshot(previous_snapshot)?;
     let expected_target = empty_target(previous_snapshot, target)?;
     let before = observer.workspace_snapshot(
@@ -298,14 +303,20 @@ fn select_workspace(
     validate_workspace_history(&before, &expected_focus, None)?;
     require_quiet_windows(&before)?;
     if observed_focus != expected_focus {
-        return Err("unexpected focused workspace or containing output before selection".into());
+        return Err(Failure::new(
+            Cause::ProfileWorkspaceChanged,
+            "unexpected focused workspace or containing output before selection",
+        ));
     }
 
     verify_output(&before, target, expected_output)?;
     let target_before = empty_target(&before, target)?;
     if target_before != expected_target {
-        return Err(format!(
-            "profile target changed: workspace {target} identity or output changed since previous observation"
+        return Err(Failure::new(
+            Cause::ProfileWorkspaceChanged,
+            format!(
+                "profile target changed: workspace {target} identity or output changed since previous observation"
+            ),
         ));
     }
 
@@ -324,8 +335,18 @@ fn select_workspace(
     )?;
     match replies.as_slice() {
         [Ok(())] => {}
-        [Err(error)] => return Err(format!("workspace command rejected: {error}")),
-        _ => return Err("workspace command: expected exactly one successful reply".into()),
+        [Err(error)] => {
+            return Err(Failure::new(
+                Cause::CommandRejected,
+                format!("workspace command rejected: {error}"),
+            ));
+        }
+        _ => {
+            return Err(Failure::new(
+                Cause::CommandRejected,
+                "workspace command: expected exactly one successful reply",
+            ));
+        }
     }
 
     let after = observer.workspace_snapshot(
@@ -334,9 +355,12 @@ fn select_workspace(
     )?;
     let selected = validate_workspace_snapshot(&after)?;
     if !target.matches(selected.number, &selected.name) {
-        return Err(format!(
-            "selected workspace number {} name {:?} instead of {}",
-            selected.number, selected.name, target
+        return Err(Failure::new(
+            Cause::SelectionUnverified,
+            format!(
+                "selected workspace number {} name {:?} instead of {}",
+                selected.number, selected.name, target
+            ),
         ));
     }
     verify_output(&after, target, expected_output)?;
@@ -345,9 +369,10 @@ fn select_workspace(
             .as_ref()
             .is_some_and(|target| target != &selected)
     {
-        return Err(
-            "selected workspace identity or output differs from the verified target".into(),
-        );
+        return Err(Failure::new(
+            Cause::ProfileWorkspaceChanged,
+            "selected workspace identity or output differs from the verified target",
+        ));
     }
     let hidden_empty_workspace = hideable_empty_workspaces
         .iter()
@@ -370,13 +395,22 @@ struct WorkspaceIdentity {
     output_id: i64,
 }
 
+fn inconsistent_snapshot(detail: &str) -> Failure {
+    Failure::new(
+        Cause::InconsistentWorkspaces,
+        format!("workspace snapshot: {detail}"),
+    )
+}
+
 /// GET_WORKSPACES and GET_TREE are separate queries: disagreement is an error,
 /// never a reason to infer a missing workspace or choose one by its display name.
-fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<WorkspaceIdentity, String> {
+fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<WorkspaceIdentity, Failure> {
     let tree = &snapshot.tree;
     let mut container_ids = HashSet::new();
     if tree.node_type != NodeType::Root || tree.iter().any(|node| !container_ids.insert(node.id)) {
-        return Err("workspace snapshot: invalid root or duplicate container identities".into());
+        return Err(inconsistent_snapshot(
+            "invalid root or duplicate container identities",
+        ));
     }
 
     let mut workspace_ids = HashSet::new();
@@ -390,13 +424,13 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
             || workspace.num < -1
             || (workspace.num >= 0 && !workspace_numbers.insert(workspace.num))
         {
-            return Err(
-                "workspace snapshot: ambiguous workspace identities or numbers/names".into(),
-            );
+            return Err(inconsistent_snapshot(
+                "ambiguous workspace identities or numbers/names",
+            ));
         }
         let node = tree
             .find_as_ref(|node| node.id == workspace.id)
-            .ok_or("workspace snapshot: listed workspace missing from tree")?;
+            .ok_or_else(|| inconsistent_snapshot("listed workspace missing from tree"))?;
         let output = tree
             .nodes
             .iter()
@@ -404,27 +438,28 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
                 output.node_type == NodeType::Output
                     && output.find_as_ref(|node| node.id == workspace.id).is_some()
             })
-            .ok_or("workspace snapshot: workspace has no containing output")?;
+            .ok_or_else(|| inconsistent_snapshot("workspace has no containing output"))?;
         if node.node_type != NodeType::Workspace
             || node.num != Some(workspace.num)
             || node.name.as_deref() != Some(workspace.name.as_str())
             || output.name.as_deref() != Some(workspace.output.as_str())
             || (node.iter().filter(|node| node.focused).count() == 1) != workspace.focused
         {
-            return Err(
-                "workspace snapshot: workspace/tree identity, output, or focus is inconsistent"
-                    .into(),
-            );
+            return Err(inconsistent_snapshot(
+                "workspace/tree identity, output, or focus is inconsistent",
+            ));
         }
         // Selection relies on visibility to know which workspace Sway may remove.
         if (workspace.focused && !workspace.visible)
             || (workspace.visible && !outputs_with_visible_workspace.insert(output.id))
         {
-            return Err("workspace snapshot: inconsistent workspace visibility".into());
+            return Err(inconsistent_snapshot("inconsistent workspace visibility"));
         }
         if workspace.focused {
             if focused.is_some() {
-                return Err("workspace snapshot: expected exactly one focused workspace".into());
+                return Err(inconsistent_snapshot(
+                    "expected exactly one focused workspace",
+                ));
             }
             focused = Some(WorkspaceIdentity {
                 id: workspace.id,
@@ -440,15 +475,17 @@ fn validate_workspace_snapshot(snapshot: &WorkspaceSnapshot) -> Result<Workspace
             && !workspace_ids.contains(&node.id)
     }) || tree.iter().filter(|node| node.focused).count() != 1
     {
-        return Err("workspace snapshot: unlisted workspace or inconsistent tree focus".into());
+        return Err(inconsistent_snapshot(
+            "unlisted workspace or inconsistent tree focus",
+        ));
     }
-    focused.ok_or_else(|| "workspace snapshot: expected exactly one focused workspace".into())
+    focused.ok_or_else(|| inconsistent_snapshot("expected exactly one focused workspace"))
 }
 
 fn empty_target(
     snapshot: &WorkspaceSnapshot,
     target: &WorkspaceTarget,
-) -> Result<Option<WorkspaceIdentity>, String> {
+) -> Result<Option<WorkspaceIdentity>, Failure> {
     let Some(workspace) = snapshot.workspaces.iter().find(|workspace| match target {
         WorkspaceTarget::Number(number) => u64::try_from(workspace.num) == Ok(*number),
         WorkspaceTarget::Name(name) => workspace.name == *name,
@@ -456,18 +493,24 @@ fn empty_target(
         return Ok(None);
     };
     if !target.matches(workspace.num, &workspace.name) {
-        return Err(format!(
-            "workspace {target} has an inconsistent number/name identity"
-        ));
+        return Err(format!("workspace {target} has an inconsistent number/name identity").into());
     }
     let node = snapshot
         .tree
         .find_as_ref(|node| node.id == workspace.id)
-        .ok_or("target workspace missing from tree")?;
+        .ok_or_else(|| {
+            Failure::new(
+                Cause::TargetUnavailable,
+                "target workspace missing from tree",
+            )
+        })?;
     if !node.nodes.is_empty() || !node.floating_nodes.is_empty() {
-        return Err(format!(
-            "profile target occupied: workspace {target} id={} must be completely empty, including tiled/floating containers",
-            node.id
+        return Err(Failure::new(
+            Cause::ProfileTargetOccupied,
+            format!(
+                "profile target occupied: workspace {target} id={} must be completely empty, including tiled/floating containers",
+                node.id
+            ),
         ));
     }
     let output = snapshot
@@ -525,7 +568,7 @@ fn verify_output(
     snapshot: &WorkspaceSnapshot,
     target: &WorkspaceTarget,
     expected_output: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let Some(expected_output) = expected_output else {
         return Ok(());
     };
@@ -537,9 +580,12 @@ fn verify_output(
         .find(|workspace| target.matches(workspace.num, &workspace.name))
     {
         if workspace.output != expected_output {
-            return Err(format!(
-                "profile output mismatch: workspace {target}: expected output {expected_output:?}, observed output {:?}; {placement_help}",
-                workspace.output
+            return Err(Failure::new(
+                Cause::ProfileOutputMismatch,
+                format!(
+                    "profile output mismatch: workspace {target}: expected output {expected_output:?}, observed output {:?}; {placement_help}",
+                    workspace.output
+                ),
             ));
         }
     } else {
@@ -549,8 +595,11 @@ fn verify_output(
                 && output.name.as_deref() == Some(expected_output)
         });
         if !output_available {
-            return Err(format!(
-                "profile output unavailable: workspace {target}: expected output {expected_output:?} is not active; workspace does not yet exist; {placement_help}"
+            return Err(Failure::new(
+                Cause::ProfileOutputUnavailable,
+                format!(
+                    "profile output unavailable: workspace {target}: expected output {expected_output:?} is not active; workspace does not yet exist; {placement_help}"
+                ),
             ));
         }
     }
@@ -558,7 +607,7 @@ fn verify_output(
     Ok(())
 }
 
-fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), String> {
+fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), Failure> {
     for event in &snapshot.events {
         if let Event::Window(event) = event
             && matches!(
@@ -570,7 +619,10 @@ fn require_quiet_windows(snapshot: &WorkspaceSnapshot) -> Result<(), String> {
                     | swayipc::WindowChange::FullscreenMode
             )
         {
-            return Err("window activity during workspace observation; safety is uncertain".into());
+            return Err(Failure::new(
+                Cause::WindowActivity,
+                "window activity during workspace observation; safety is uncertain",
+            ));
         }
     }
     Ok(())
@@ -588,7 +640,7 @@ struct WorkspaceTransition<'a> {
 /// explicitly requested transition can permit; window, tick, and urgency events need none.
 fn workspace_change_requiring_transition(
     event: &Event,
-) -> Result<Option<(&WorkspaceEvent, &swayipc::Node)>, String> {
+) -> Result<Option<(&WorkspaceEvent, &swayipc::Node)>, Failure> {
     if let Event::Window(event) = event
         && !matches!(
             event.container.node_type,
@@ -601,7 +653,10 @@ fn workspace_change_requiring_transition(
         return Ok(None);
     };
     if event.change == WorkspaceChange::Reload {
-        return Err("workspace reload: revalidation required".into());
+        return Err(Failure::new(
+            Cause::ConfigurationReloaded,
+            "workspace reload: revalidation required",
+        ));
     }
     let current = event
         .current
@@ -621,16 +676,19 @@ fn workspace_change_requiring_transition(
     Ok(Some((event, current)))
 }
 
-fn unexpected_workspace_change(event: &WorkspaceEvent, current: &swayipc::Node) -> String {
-    format!(
-        "unexpected workspace change {:?} id={}",
-        event.change, current.id
+fn unexpected_workspace_change(event: &WorkspaceEvent, current: &swayipc::Node) -> Failure {
+    Failure::new(
+        Cause::ProfileWorkspaceChanged,
+        format!(
+            "unexpected workspace change {:?} id={}",
+            event.change, current.id
+        ),
     )
 }
 
 /// No transition is permitted while a layout loads: the same rule the completion snapshot
 /// applies, checked event by event because the coordinator cannot queue them meanwhile.
-fn check_event_during_construction(event: &Event) -> Result<(), String> {
+fn check_event_during_construction(event: &Event) -> Result<(), Failure> {
     match workspace_change_requiring_transition(event)? {
         None => Ok(()),
         Some((event, current)) => Err(unexpected_workspace_change(event, current)),
@@ -643,7 +701,7 @@ fn validate_workspace_history(
     snapshot: &WorkspaceSnapshot,
     expected: &WorkspaceIdentity,
     transition: Option<WorkspaceTransition<'_>>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let mut observed_focus_change = false;
     let mut observed_creation = false;
     let mut observed_hidden_destruction = false;
@@ -694,12 +752,16 @@ fn validate_workspace_history(
 
     if let Some(transition) = transition {
         if transition.selected.id != expected.id && !observed_focus_change {
-            return Err("workspace selection: expected focus event was not observed".into());
+            return Err(Failure::new(
+                Cause::SelectionUnverified,
+                "workspace selection: expected focus event was not observed",
+            ));
         }
         if transition.allow_creation && !observed_creation {
-            return Err(
-                "workspace selection: expected workspace creation event was not observed".into(),
-            );
+            return Err(Failure::new(
+                Cause::SelectionUnverified,
+                "workspace selection: expected workspace creation event was not observed",
+            ));
         }
     }
     Ok(())

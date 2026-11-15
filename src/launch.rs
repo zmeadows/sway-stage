@@ -2,7 +2,8 @@
 
 use crate::application_process::{LaunchedApplication, application_command};
 use crate::config::{Config, GroupLayout, LayoutNode, Matcher, NodeKind};
-use crate::diagnostics::{Diagnostics, SizingWarning};
+use crate::diagnostics::{Diagnostics, Phase, SizingWarning};
+use crate::failure::{Cause, Failure};
 use crate::observation::{
     self, Observer, Snapshot, app_id, class, locate_windows, proportions, sibling_dimensions,
 };
@@ -40,7 +41,7 @@ pub fn load(
     config: &Config,
     expected_workspace_id: Option<i64>,
     diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let mut connect = || {
         let socket = observation::sway_socket()?;
         observation::connect(&socket)
@@ -55,9 +56,10 @@ pub fn load(
 fn load_with(
     config: &Config,
     expected_workspace_id: Option<i64>,
-    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    connect: &mut dyn FnMut() -> Result<UnixStream, Failure>,
     diagnostics: &mut Diagnostics,
-) -> Result<Vec<SizingWarning>, String> {
+) -> Result<Vec<SizingWarning>, Failure> {
+    diagnostics.enter_phase(Phase::Construction);
     diagnostics.stage("subscribe");
     let mut observer = Observer::subscribe(connect()?, Instant::now() + IPC_TIMEOUT)?;
     let initial = observer.snapshot_for_workspace(
@@ -146,7 +148,7 @@ impl ExpectedHierarchy {
     }
 
     /// Requires `observed` to match this expectation exactly, binding unknown group IDs.
-    fn verify(&mut self, observed: &Node) -> Result<(), String> {
+    fn verify(&mut self, observed: &Node) -> Result<(), Failure> {
         if !observed.floating_nodes.is_empty()
             || matches!(observed.floating, Some(Floating::AutoOn | Floating::UserOn))
             || matches!(
@@ -154,7 +156,10 @@ impl ExpectedHierarchy {
                 Some(ScratchpadState::Fresh | ScratchpadState::Changed)
             )
         {
-            return Err(format!("invalid hierarchy state id={}", observed.id));
+            return Err(Failure::new(
+                Cause::HierarchyMismatch,
+                format!("invalid hierarchy state id={}", observed.id),
+            ));
         }
 
         let matches_expected_node = match &*self {
@@ -178,15 +183,13 @@ impl ExpectedHierarchy {
             }
         };
         if !matches_expected_node {
-            return Err(format!(
-                "unexpected hierarchy at id={} layout={:?} children={:?}",
-                observed.id,
-                observed.layout,
-                observed
-                    .nodes
-                    .iter()
-                    .map(|child| child.id)
-                    .collect::<Vec<_>>()
+            let observed_child_ids: Vec<_> = observed.nodes.iter().map(|child| child.id).collect();
+            return Err(Failure::new(
+                Cause::HierarchyMismatch,
+                format!(
+                    "unexpected hierarchy at id={} layout={:?} children={observed_child_ids:?}",
+                    observed.id, observed.layout
+                ),
             ));
         }
 
@@ -210,7 +213,7 @@ impl ExpectedHierarchy {
 
 struct Construction<'a> {
     observer: Observer,
-    connect: &'a mut dyn FnMut() -> Result<UnixStream, String>,
+    connect: &'a mut dyn FnMut() -> Result<UnixStream, Failure>,
     diagnostics: &'a mut Diagnostics,
     /// Container ID of the frozen target workspace.
     target_workspace_id: i64,
@@ -228,7 +231,7 @@ struct Construction<'a> {
 }
 
 impl<'a> Construction<'a> {
-    fn verify(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+    fn verify(&mut self, snapshot: &Snapshot) -> Result<(), Failure> {
         validate_accepted_windows(
             snapshot,
             &self.accepted_windows,
@@ -249,7 +252,7 @@ impl<'a> Construction<'a> {
     }
 
     // No mutation/launch is allowed through a fence with newer window activity.
-    fn settled_snapshot(&mut self) -> Result<Snapshot, String> {
+    fn settled_snapshot(&mut self) -> Result<Snapshot, Failure> {
         let deadline = Instant::now() + IPC_TIMEOUT;
         loop {
             let snapshot = self.observer.snapshot((self.connect)()?, deadline)?;
@@ -274,9 +277,12 @@ impl<'a> Construction<'a> {
                             | WindowChange::FullscreenMode
                     )
                 {
-                    return Err(format!(
-                        "window activity id={} during prelaunch/command fence; ownership is uncertain",
-                        window.container.id
+                    return Err(Failure::new(
+                        Cause::WindowActivity,
+                        format!(
+                            "window activity id={} during prelaunch/command fence; ownership is uncertain",
+                            window.container.id
+                        ),
                     ));
                 }
             }
@@ -326,7 +332,7 @@ impl<'a> Construction<'a> {
         &mut self,
         commands: &[String],
         expected_after: ExpectedHierarchy,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<Snapshot, Failure> {
         self.diagnostics
             .stage(format!("command {}", commands.join("; ")));
         self.settled_snapshot()?;
@@ -354,7 +360,7 @@ impl<'a> Construction<'a> {
         &mut self,
         path: &[usize],
         focus_restorations: &mut usize,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<Snapshot, Failure> {
         let container_id = self.expected_hierarchy.subtree_mut(path).id();
         let mut after_command = self.guarded_command(
             &[format!("[con_id={container_id}] focus")],
@@ -397,7 +403,7 @@ impl<'a> Construction<'a> {
         &mut self,
         layout_node: &LayoutNode,
         path: &[usize],
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let NodeKind::Group {
             layout, children, ..
         } = &layout_node.kind
@@ -435,7 +441,7 @@ impl<'a> Construction<'a> {
         layout_node: &LayoutNode,
         configured_focus: Option<&str>,
         root_path: &[usize],
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let (focus_leaf, focus_path) = find_focus_leaf(layout_node, configured_focus, root_path)
             .ok_or("validated final focus window missing from layout")?;
         let focus_id = self.expected_hierarchy.subtree_mut(&focus_path).id();
@@ -468,7 +474,7 @@ impl<'a> Construction<'a> {
         layout_node: &LayoutNode,
         path: &[usize],
         warnings: &mut Vec<SizingWarning>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let NodeKind::Group {
             layout, children, ..
         } = &layout_node.kind
@@ -497,7 +503,7 @@ impl<'a> Construction<'a> {
         path: &[usize],
         axis: &str,
         warnings: &mut Vec<SizingWarning>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let group_id = self.expected_hierarchy.subtree_mut(path).id();
         let weights: Vec<_> = children.iter().map(|child| child.value.weight()).collect();
         let target_shares = proportions(&weights);
@@ -633,7 +639,7 @@ impl<'a> Construction<'a> {
         &mut self,
         layout_node: &'a LayoutNode,
         insert_after: Option<Vec<usize>>,
-    ) -> Result<Vec<usize>, String> {
+    ) -> Result<Vec<usize>, Failure> {
         let NodeKind::Group {
             layout, children, ..
         } = &layout_node.kind
@@ -769,7 +775,7 @@ impl<'a> Construction<'a> {
         &mut self,
         layout_node: &'a LayoutNode,
         insert_after: Option<Vec<usize>>,
-    ) -> Result<Vec<usize>, String> {
+    ) -> Result<Vec<usize>, Failure> {
         let NodeKind::Window {
             id: configured_window_id,
             command,
@@ -861,7 +867,7 @@ impl<'a> Construction<'a> {
             self.diagnostics
                 .stage(format!("{stage} leaf={configured_window_id:?}"));
             if Instant::now() >= window_deadline {
-                return Err(self.diagnostics.window_timeout(
+                return Err(Failure::window_timeout(
                     &new_windows.wait_diagnostics(launch_started_at),
                     application.exit_status(),
                 ));
@@ -873,19 +879,24 @@ impl<'a> Construction<'a> {
                     (self.connect)()?,
                     window_deadline.min(Instant::now() + IPC_TIMEOUT),
                 )
-                .map_err(|error| {
-                    format!(
-                        "{error}; {}",
+                .map_err(|failure| Failure {
+                    detail: format!(
+                        "{}; {}",
+                        failure.detail,
                         new_windows.wait_diagnostics(launch_started_at)
-                    )
+                    ),
+                    ..failure
                 })?;
 
             let was_previously_provisional = provisional_window_id.is_some();
             let candidate_window_id = new_windows.reconcile(&snapshot, self.diagnostics)?;
             if let Some(provisional_window_id) = provisional_window_id {
                 if candidate_window_id != Some(provisional_window_id) {
-                    return Err(format!(
-                        "accepted window id={provisional_window_id} disappeared or failed revalidation"
+                    return Err(Failure::new(
+                        Cause::LayoutWindowChanged,
+                        format!(
+                            "accepted window id={provisional_window_id} disappeared or failed revalidation"
+                        ),
                     ));
                 }
             } else if let Some(candidate_window_id) = candidate_window_id {
@@ -1090,10 +1101,10 @@ pub(crate) fn run_command(
     socket: UnixStream,
     command: String,
     deadline: Instant,
-) -> Result<Vec<Result<(), String>>, String> {
+) -> Result<Vec<Result<(), String>>, Failure> {
     let shutdown_socket = socket
         .try_clone()
-        .map_err(|error| format!("clone command socket: {error}"))?;
+        .map_err(|error| Failure::new(Cause::SwayIpc, format!("clone command socket: {error}")))?;
 
     let (sender, receiver) = mpsc::channel();
     let reader = thread::Builder::new()
@@ -1151,7 +1162,7 @@ pub(crate) fn run_command(
             };
             let _ = sender.send(exchange());
         })
-        .map_err(|error| format!("start command reader: {error}"))?;
+        .map_err(|error| Failure::new(Cause::SwayIpc, format!("start command reader: {error}")))?;
 
     let command_result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     let _ = shutdown_socket.shutdown(Shutdown::Both);
@@ -1159,10 +1170,14 @@ pub(crate) fn run_command(
         return Err("command reader panicked".into());
     }
 
+    // Every exchange failure is in the IPC request or reply itself.
     match command_result {
         Ok(Ok(replies)) => Ok(replies),
-        Ok(Err(error)) => Err(error),
-        Err(error) => Err(format!("command deadline/channel failure: {error}")),
+        Ok(Err(error)) => Err(Failure::new(Cause::SwayIpc, error)),
+        Err(error) => Err(Failure::new(
+            Cause::SwayIpc,
+            format!("command deadline/channel failure: {error}"),
+        )),
     }
 }
 
@@ -1170,23 +1185,29 @@ pub(crate) fn run_command(
 /// before `deadline`. Sway replies once for every command it runs and stops early only
 /// after an invalid one, so any other reply count means the request was not handled as sent.
 fn run_checked_command(
-    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    connect: &mut dyn FnMut() -> Result<UnixStream, Failure>,
     diagnostics: &mut Diagnostics,
     commands: &[String],
     deadline: Instant,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let request = commands.join("; ");
     let replies = run_command(connect()?, request, deadline)?;
     diagnostics.record(&format!("command replies: {replies:?}"));
 
     if replies.iter().any(Result::is_err) {
-        return Err(format!("Sway command failed: {replies:?}"));
+        return Err(Failure::new(
+            Cause::CommandRejected,
+            format!("Sway command failed: {replies:?}"),
+        ));
     }
     if replies.len() != commands.len() {
-        return Err(format!(
-            "Sway command failed: reply count {} differs from command count {}: {replies:?}",
-            replies.len(),
-            commands.len()
+        return Err(Failure::new(
+            Cause::CommandRejected,
+            format!(
+                "Sway command failed: reply count {} differs from command count {}: {replies:?}",
+                replies.len(),
+                commands.len()
+            ),
         ));
     }
 
@@ -1200,15 +1221,18 @@ fn run_checked_command(
 /// with a fresh snapshot. Exhausting the restoration budget is fatal. `deadline` bounds
 /// the reply, so a launch passes its window deadline when that is sooner.
 fn restore_focus(
-    connect: &mut dyn FnMut() -> Result<UnixStream, String>,
+    connect: &mut dyn FnMut() -> Result<UnixStream, Failure>,
     diagnostics: &mut Diagnostics,
     container_id: i64,
     focus_restorations: &mut usize,
     deadline: Instant,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     if *focus_restorations == MAX_FOCUS_RESTORATIONS {
-        return Err(format!(
-            "focus did not stay on container id={container_id} after {MAX_FOCUS_RESTORATIONS} restorations within the target workspace"
+        return Err(Failure::new(
+            Cause::FocusUnstable,
+            format!(
+                "focus did not stay on container id={container_id} after {MAX_FOCUS_RESTORATIONS} restorations within the target workspace"
+            ),
         ));
     }
     *focus_restorations += 1;
@@ -1249,7 +1273,7 @@ fn validate_accepted_windows(
     accepted_windows: &BTreeMap<i64, &Matcher>,
     target_workspace_id: i64,
     diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     for event in &snapshot.events {
         reject_unsafe_window_event(event, accepted_windows, diagnostics)?;
     }
@@ -1259,7 +1283,12 @@ fn validate_accepted_windows(
         let located = windows
             .iter()
             .find(|window| window.node.id == *accepted_window_id)
-            .ok_or_else(|| format!("accepted window id={accepted_window_id} disappeared"))?;
+            .ok_or_else(|| {
+                Failure::new(
+                    Cause::LayoutWindowChanged,
+                    format!("accepted window id={accepted_window_id} disappeared"),
+                )
+            })?;
         if located.workspace_id != Some(target_workspace_id)
             || located.floating
             || located.fullscreen
@@ -1267,8 +1296,11 @@ fn validate_accepted_windows(
             || located.node.fullscreen_mode != Some(0)
             || !matches_window(matcher, located.node)
         {
-            return Err(format!(
-                "accepted window id={accepted_window_id} lost placement, identity or tiled state"
+            return Err(Failure::new(
+                Cause::LayoutWindowChanged,
+                format!(
+                    "accepted window id={accepted_window_id} lost placement, identity or tiled state"
+                ),
             ));
         }
     }
@@ -1300,7 +1332,7 @@ fn reject_unsafe_window_event(
     event: &Event,
     accepted_windows: &BTreeMap<i64, &Matcher>,
     diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let Event::Window(window) = event else {
         return Ok(());
     };
@@ -1313,9 +1345,9 @@ fn reject_unsafe_window_event(
             "unexpected move id={}; no safe ancestry history",
             node.id
         ));
-        return Err(format!(
-            "window move id={}; target safety is uncertain",
-            node.id
+        return Err(Failure::new(
+            Cause::WindowActivity,
+            format!("window move id={}; target safety is uncertain", node.id),
         ));
     }
 
@@ -1331,9 +1363,12 @@ fn reject_unsafe_window_event(
                 | WindowChange::New
         )
     {
-        return Err(format!(
-            "accepted window/group id={} closed or changed floating/fullscreen/ownership state",
-            node.id
+        return Err(Failure::new(
+            Cause::LayoutWindowChanged,
+            format!(
+                "accepted window/group id={} closed or changed floating/fullscreen/ownership state",
+                node.id
+            ),
         ));
     }
 
@@ -1343,20 +1378,23 @@ fn reject_unsafe_window_event(
             || node.fullscreen_mode != Some(0)
             || !matches_window(matcher, node))
     {
-        return Err(format!(
-            "accepted window id={} closed or changed identity/floating/fullscreen state",
-            node.id
+        return Err(Failure::new(
+            Cause::LayoutWindowChanged,
+            format!(
+                "accepted window id={} closed or changed identity/floating/fullscreen state",
+                node.id
+            ),
         ));
     }
 
     Ok(())
 }
 
-fn require_empty(snapshot: &Snapshot, diagnostics: &mut Diagnostics) -> Result<(), String> {
+fn require_empty(snapshot: &Snapshot, diagnostics: &mut Diagnostics) -> Result<(), Failure> {
     let workspace = snapshot
         .tree
         .find_as_ref(|node| node.id == snapshot.target_workspace_id)
-        .ok_or("target workspace missing")?;
+        .ok_or_else(|| Failure::new(Cause::TargetUnavailable, "target workspace missing"))?;
     diagnostics.record(&format!(
         "selected workspace id={}; initial occupancy: tiled={} floating={}",
         snapshot.target_workspace_id,
@@ -1364,7 +1402,10 @@ fn require_empty(snapshot: &Snapshot, diagnostics: &mut Diagnostics) -> Result<(
         workspace.floating_nodes.len()
     ));
     if !workspace.nodes.is_empty() || !workspace.floating_nodes.is_empty() {
-        return Err("target workspace must be completely empty, including tiled/floating containers; choose an empty disposable workspace".into());
+        return Err(Failure::new(
+            Cause::TargetOccupied,
+            "target workspace must be completely empty, including tiled/floating containers; choose an empty disposable workspace",
+        ));
     }
 
     Ok(())
@@ -1375,7 +1416,7 @@ fn require_empty(snapshot: &Snapshot, diagnostics: &mut Diagnostics) -> Result<(
 fn record_prelaunch_events(
     snapshot: &Snapshot,
     preexisting_container_ids: &mut HashSet<i64>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     for event in &snapshot.events {
         if let Event::Window(window) = event {
             preexisting_container_ids.insert(window.container.id);
@@ -1386,9 +1427,12 @@ fn record_prelaunch_events(
                     | WindowChange::Floating
                     | WindowChange::FullscreenMode
             ) {
-                return Err(format!(
-                    "window activity id={} during prelaunch fence; empty-workspace history is uncertain",
-                    window.container.id
+                return Err(Failure::new(
+                    Cause::WindowActivity,
+                    format!(
+                        "window activity id={} during prelaunch fence; empty-workspace history is uncertain",
+                        window.container.id
+                    ),
                 ));
             }
         }
@@ -1409,8 +1453,9 @@ struct NewWindowTracker<'a> {
     observed_windows: BTreeMap<i64, String>,
     /// The single new window whose identity has matched the selector, if any.
     matched_window_id: Option<i64>,
-    /// New windows whose observed history rules out acceptance, with the reason.
-    disqualified_windows: BTreeMap<i64, &'static str>,
+    /// New windows whose observed history rules out acceptance: the failure's cause if the
+    /// window matches the selector, and the reason.
+    disqualified_windows: BTreeMap<i64, (Cause, &'static str)>,
 }
 
 impl NewWindowTracker<'_> {
@@ -1419,10 +1464,13 @@ impl NewWindowTracker<'_> {
         node: &Node,
         location: &str,
         diagnostics: &mut Diagnostics,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let first_observation = !self.observed_windows.contains_key(&node.id);
         if first_observation && self.observed_windows.len() >= MAX_NEW_WINDOW_HISTORY {
-            return Err("new-window history limit exceeded; observation is uncertain".into());
+            return Err(Failure::new(
+                Cause::SwayIpc,
+                "new-window history limit exceeded; observation is uncertain",
+            ));
         }
 
         let description = format!(
@@ -1447,23 +1495,34 @@ impl NewWindowTracker<'_> {
             if let Some(previous) = self.matched_window_id
                 && previous != node.id
             {
-                return Err(format!(
-                    "ambiguous new windows id={previous} and id={} match {:?}",
-                    node.id, self.matcher
+                return Err(Failure::new(
+                    Cause::AmbiguousWindows,
+                    format!(
+                        "ambiguous new windows id={previous} and id={} match {:?}",
+                        node.id, self.matcher
+                    ),
                 ));
             }
             self.matched_window_id = Some(node.id);
-            if let Some(reason) = self.disqualified_windows.get(&node.id) {
-                return Err(format!(
-                    "matching window {reason}: id={}; refusing repair",
-                    node.id,
+            if let Some((cause, reason)) = self.disqualified_windows.get(&node.id) {
+                return Err(Failure::new(
+                    *cause,
+                    format!("matching window {reason}: id={}; refusing repair", node.id),
                 ));
             }
         } else if selector_identity(self.matcher, node).is_some() {
-            self.disqualified_windows
-                .insert(node.id, "changed identity after a nonmatching identity");
+            self.disqualified_windows.insert(
+                node.id,
+                (
+                    Cause::WindowIdentityChanged,
+                    "changed identity after a nonmatching identity",
+                ),
+            );
             if self.matched_window_id == Some(node.id) {
-                return Err(format!("matched window id={} changed identity", node.id));
+                return Err(Failure::new(
+                    Cause::LayoutWindowChanged,
+                    format!("matched window id={} changed identity", node.id),
+                ));
             }
         }
 
@@ -1474,7 +1533,7 @@ impl NewWindowTracker<'_> {
         &mut self,
         event: &Event,
         diagnostics: &mut Diagnostics,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         let Event::Window(window) = event else {
             return Ok(());
         };
@@ -1504,7 +1563,7 @@ impl NewWindowTracker<'_> {
             || node.fullscreen_mode.is_some_and(|mode| mode != 0)
         {
             self.disqualified_windows
-                .insert(node.id, "was floating/fullscreen");
+                .insert(node.id, (Cause::WindowNotTiled, "was floating/fullscreen"));
         }
         self.observe_window(
             node,
@@ -1513,9 +1572,12 @@ impl NewWindowTracker<'_> {
         )?;
 
         if window.change == WindowChange::Close {
-            return Err(format!(
-                "new/accepted window id={} closed; cannot verify its placement or ownership",
-                node.id
+            return Err(Failure::new(
+                Cause::NewWindowClosed,
+                format!(
+                    "new/accepted window id={} closed; cannot verify its placement or ownership",
+                    node.id
+                ),
             ));
         }
 
@@ -1551,7 +1613,7 @@ impl NewWindowTracker<'_> {
         &mut self,
         snapshot: &Snapshot,
         diagnostics: &mut Diagnostics,
-    ) -> Result<Option<i64>, String> {
+    ) -> Result<Option<i64>, Failure> {
         validate_accepted_windows(
             snapshot,
             self.accepted_windows,
@@ -1573,9 +1635,9 @@ impl NewWindowTracker<'_> {
             }
             if self.preexisting_container_ids.contains(&node.id) {
                 if located.workspace_id == Some(self.target_workspace_id) {
-                    return Err(format!(
-                        "preexisting window id={} entered target workspace",
-                        node.id
+                    return Err(Failure::new(
+                        Cause::PreexistingWindow,
+                        format!("preexisting window id={} entered target workspace", node.id),
                     ));
                 }
                 continue;
@@ -1589,46 +1651,60 @@ impl NewWindowTracker<'_> {
             // proven location over the generic floating reason without adding history
             // restrictions to windows whose selector has not matched.
             if located.scratchpad && matches_window(self.matcher, node) {
-                self.disqualified_windows
-                    .insert(node.id, "was in the scratchpad");
+                self.disqualified_windows.insert(
+                    node.id,
+                    (Cause::WindowInScratchpad, "was in the scratchpad"),
+                );
             } else if located.floating || located.fullscreen {
                 self.disqualified_windows
-                    .insert(node.id, "was floating/fullscreen");
+                    .insert(node.id, (Cause::WindowNotTiled, "was floating/fullscreen"));
             }
             self.observe_window(node, &location, diagnostics)?;
             if located.workspace_id == Some(self.target_workspace_id)
                 && (located.floating || located.fullscreen || located.scratchpad)
             {
-                return Err(format!(
-                    "unexpected floating/fullscreen/scratchpad window id={} on target workspace; refusing repair",
-                    node.id
+                return Err(Failure::new(
+                    Cause::UnexpectedWindow,
+                    format!(
+                        "unexpected floating/fullscreen/scratchpad window id={} on target workspace; refusing repair",
+                        node.id
+                    ),
                 ));
             }
 
             if matches_window(self.matcher, node) {
                 if located.workspace_id != Some(self.target_workspace_id) || located.scratchpad {
-                    let placement = if located.workspace_id.is_some() {
-                        "wrong workspace"
+                    let (cause, placement) = if located.workspace_id.is_some() {
+                        (Cause::WindowOnOtherWorkspace, "wrong workspace")
                     } else {
-                        "unknown workspace"
+                        (Cause::WindowWorkspaceUnknown, "unknown workspace")
                     };
-                    return Err(format!(
-                        "placement failure: {placement}: matching window id={} ({location}); expected workspace={}; check Sway assignment rules and activation context",
-                        node.id, self.target_workspace_id
+                    return Err(Failure::new(
+                        cause,
+                        format!(
+                            "placement failure: {placement}: matching window id={} ({location}); expected workspace={}; check Sway assignment rules and activation context",
+                            node.id, self.target_workspace_id
+                        ),
                     ));
                 }
                 if located.floating || located.fullscreen || node.fullscreen_mode != Some(0) {
-                    return Err(format!(
-                        "matching window has unusable tiled state: id={} is floating/fullscreen or fullscreen state is unknown",
-                        node.id
+                    return Err(Failure::new(
+                        Cause::WindowNotTiled,
+                        format!(
+                            "matching window has unusable tiled state: id={} is floating/fullscreen or fullscreen state is unknown",
+                            node.id
+                        ),
                     ));
                 }
                 candidate_window_id = Some(node.id);
             } else if located.workspace_id == Some(self.target_workspace_id) {
                 if selector_identity(self.matcher, node).is_some() {
-                    return Err(format!(
-                        "unexpected target-workspace window id={}: expected {:?}, observed {}; refusing adoption",
-                        node.id, self.matcher, self.observed_windows[&node.id]
+                    return Err(Failure::new(
+                        Cause::UnexpectedWindow,
+                        format!(
+                            "unexpected target-workspace window id={}: expected {:?}, observed {}; refusing adoption",
+                            node.id, self.matcher, self.observed_windows[&node.id]
+                        ),
                     ));
                 }
                 unresolved = true;
@@ -1654,12 +1730,16 @@ impl NewWindowTracker<'_> {
                 .find(|window| window.node.id == matched_window_id)
             {
                 if !matches_window(self.matcher, located.node) {
-                    return Err(format!(
-                        "matched window id={matched_window_id} changed identity"
+                    return Err(Failure::new(
+                        Cause::LayoutWindowChanged,
+                        format!("matched window id={matched_window_id} changed identity"),
                     ));
                 }
             } else if !in_event_history {
-                return Err(format!("matched window id={matched_window_id} disappeared"));
+                return Err(Failure::new(
+                    Cause::LayoutWindowChanged,
+                    format!("matched window id={matched_window_id} disappeared"),
+                ));
             }
         }
 

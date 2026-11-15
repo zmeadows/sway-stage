@@ -99,7 +99,7 @@ fn read_recorded_snapshot(tree: Value) -> Result<Snapshot, String> {
     let result = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT);
     worker.join().unwrap();
 
-    result
+    result.map_err(|failure| failure.detail)
 }
 
 fn capture_recorded_tree(tree: Value) -> Result<String, String> {
@@ -1220,10 +1220,11 @@ fn tree_query_deadline_cancels_stalled_and_fragmented_replies() {
             assert_eq!(server.read(&mut [0]).unwrap(), 0);
         });
         let started = Instant::now();
-        let error = snapshot_from_socket(client, started + Duration::from_millis(100))
+        let failure = snapshot_from_socket(client, started + Duration::from_millis(100))
             .err()
             .unwrap();
-        assert!(error.contains("deadline"), "{error}");
+        assert!(failure.detail.contains("deadline"), "{failure}");
+        assert_eq!(failure.cause, Some(Cause::SwayIpc));
         assert!(started.elapsed() < Duration::from_secs(1));
         worker.join().unwrap();
     }
@@ -1235,11 +1236,12 @@ fn failed_tree_read_produces_no_draft() {
     let worker = thread::spawn(move || {
         read_request(&mut server, 4);
     });
-    let error = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT)
+    let failure = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT)
         .err()
         .unwrap();
 
-    assert!(error.contains("get tree"), "{error}");
+    assert!(failure.detail.contains("get tree"), "{failure}");
+    assert_eq!(failure.cause, Some(Cause::SwayIpc));
     worker.join().unwrap();
 }
 

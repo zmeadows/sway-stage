@@ -6,6 +6,7 @@
 
 use crate::command_inference::read_process_command;
 use crate::config::{GroupLayout, MAX_LAYOUT_DEPTH, MAX_LAYOUT_NODES};
+use crate::failure::{Cause, Failure};
 use crate::observation::{self, app_id, class, proportions, sibling_dimensions};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -71,6 +72,16 @@ impl From<String> for Error {
 impl From<&str> for Error {
     fn from(detail: &str) -> Self {
         detail.to_owned().into()
+    }
+}
+
+/// A classified snapshot failure keeps its cause's fixed summary.
+impl From<Failure> for Error {
+    fn from(failure: Failure) -> Self {
+        Self {
+            summary: failure.cause.map(Cause::summary),
+            detail: failure.detail,
+        }
     }
 }
 
@@ -338,15 +349,15 @@ impl Snapshot {
 }
 
 /// Obtains one tree through the explicit SWAYSOCK path, without subscribing to events.
-pub fn snapshot() -> Result<Snapshot, String> {
+pub fn snapshot() -> Result<Snapshot, Failure> {
     let socket = observation::sway_socket()?;
     snapshot_from_socket(observation::connect(&socket)?, Instant::now() + IPC_TIMEOUT)
 }
 
-fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
+fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapshot, Failure> {
     let shutdown_socket = socket
         .try_clone()
-        .map_err(|error| format!("clone query socket: {error}"))?;
+        .map_err(|error| Failure::new(Cause::SwayIpc, format!("clone query socket: {error}")))?;
 
     let (sender, receiver) = mpsc::channel();
     let reader = thread::Builder::new()
@@ -357,15 +368,24 @@ fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapsho
                 .map_err(|error| format!("get tree: {error}"));
             let _ = sender.send(tree_result);
         })
-        .map_err(|error| format!("start capture reader: {error}"))?;
+        .map_err(|error| Failure::new(Cause::SwayIpc, format!("start capture reader: {error}")))?;
 
     let tree_result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
     // Cancel even a partial frame read before joining; this connection is never reused.
     let _ = shutdown_socket.shutdown(Shutdown::Both);
     reader.join().map_err(|_| "capture reader panicked")?;
 
-    let tree = tree_result.map_err(|error| format!("tree deadline/channel failure: {error}"))??;
-    Snapshot::from_tree(tree)
+    let tree = match tree_result {
+        Ok(Ok(tree)) => tree,
+        Ok(Err(error)) => return Err(Failure::new(Cause::SwayIpc, error)),
+        Err(error) => {
+            return Err(Failure::new(
+                Cause::SwayIpc,
+                format!("tree deadline/channel failure: {error}"),
+            ));
+        }
+    };
+    Snapshot::from_tree(tree).map_err(Failure::from)
 }
 
 /// Returns a complete draft in memory, so a failed capture cannot print partial YAML.
@@ -410,7 +430,12 @@ fn capture_workspace(snapshot: &Snapshot, workspace_id: i64) -> Result<CapturedW
     let workspace = snapshot
         .tree
         .find_as_ref(|node| node.id == workspace_id && node.node_type == NodeType::Workspace)
-        .ok_or("target workspace missing from tree")?;
+        .ok_or_else(|| {
+            Failure::new(
+                Cause::TargetUnavailable,
+                "target workspace missing from tree",
+            )
+        })?;
     let name = workspace.name.as_deref().unwrap_or_default();
     let in_workspace = |error: Error| error.context(format_args!("workspace {name:?}"));
 

@@ -217,12 +217,15 @@ fn start_failures_are_spawn_errors_that_started_nothing() {
         (vec!["./app".into()], &missing_cwd),
     ] {
         let command = application_command(&argv, Some(cwd), &BTreeMap::new()).unwrap();
-        let error = LaunchedApplication::start(command, LONG_SUPERVISION, &mut diagnostics)
+        let failure = LaunchedApplication::start(command, LONG_SUPERVISION, &mut diagnostics)
             .err()
             .expect("exec fails");
+        assert_eq!(failure.cause, Some(Cause::ApplicationStart), "{failure}");
         assert!(
-            error.starts_with("spawn application: No such file or directory"),
-            "{error}"
+            failure
+                .detail
+                .starts_with("spawn application: No such file or directory"),
+            "{failure}"
         );
     }
     assert!(!fixture.log().contains("spawned"), "{}", fixture.log());

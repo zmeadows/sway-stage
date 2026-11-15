@@ -66,7 +66,8 @@ fn focus_away_and_back_before_next_query_is_a_sticky_failure() {
     .err()
     .unwrap();
 
-    assert!(error.contains("focus changed"), "{error}");
+    assert!(error.detail.contains("focus changed"), "{error}");
+    assert_eq!(error.cause, Some(Cause::FocusLost));
     assert!(observer.next_until(ipc_deadline()).is_err());
 }
 
@@ -102,7 +103,8 @@ fn target_workspace_move_away_and_back_is_a_sticky_failure() {
     .err()
     .unwrap();
 
-    assert!(error.contains("moved to another output"), "{error}");
+    assert!(error.detail.contains("moved to another output"), "{error}");
+    assert_eq!(error.cause, Some(Cause::OutputChanged));
     assert!(observer.next_until(ipc_deadline()).is_err());
 }
 
@@ -119,7 +121,8 @@ fn target_move_during_initial_fence_is_rejected() {
     .err()
     .unwrap();
 
-    assert!(error.contains("moved to another output"), "{error}");
+    assert!(error.detail.contains("moved to another output"), "{error}");
+    assert_eq!(error.cause, Some(Cause::OutputChanged));
 }
 
 #[test]
@@ -141,9 +144,10 @@ fn changed_output_in_tree_without_move_event_is_a_sticky_failure() {
         .unwrap();
 
     assert!(
-        error.contains("changed output from id=2 to id=3"),
+        error.detail.contains("changed output from id=2 to id=3"),
         "{error}"
     );
+    assert_eq!(error.cause, Some(Cause::OutputChanged));
     assert!(observer.next_until(ipc_deadline()).is_err());
 }
 
@@ -336,14 +340,15 @@ fn overflow_invalidates_all_history() {
         assert!(Instant::now() < limit, "reader failed to detect overflow");
         thread::yield_now();
     }
-    let error = observer.next_until(ipc_deadline()).unwrap_err();
+    let failure = observer.next_until(ipc_deadline()).unwrap_err();
 
-    assert!(error.contains("overflow"), "{error}");
+    assert!(failure.detail.contains("overflow"), "{failure}");
+    assert_eq!(failure.cause, Some(Cause::SwayIpc));
 }
 
 static CHECKED_EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn count_checked_event(_: &Event) -> Result<(), String> {
+fn count_checked_event(_: &Event) -> Result<(), Failure> {
     CHECKED_EVENT_COUNT.fetch_add(1, Ordering::SeqCst);
     Ok(())
 }
@@ -406,9 +411,12 @@ fn unconsumed_events_are_checked_without_queueing_until_the_next_snapshot() {
     );
 }
 
-fn reject_workspace_events(event: &Event) -> Result<(), String> {
+fn reject_workspace_events(event: &Event) -> Result<(), Failure> {
     match event {
-        Event::Workspace(_) => Err("rejected workspace event".into()),
+        Event::Workspace(_) => Err(Failure::new(
+            Cause::ProfileWorkspaceChanged,
+            "rejected workspace event",
+        )),
         _ => Ok(()),
     }
 }
@@ -429,11 +437,16 @@ fn a_failed_unconsumed_event_check_is_a_sticky_failure() {
 
     // The next snapshot refuses before it queries anything.
     let (unused_query, _server) = socket_pair();
-    let error = observer
+    let failure = observer
         .snapshot(unused_query, ipc_deadline())
         .err()
         .unwrap();
-    assert!(error.contains("rejected workspace event"), "{error}");
+    assert!(
+        failure.detail.contains("rejected workspace event"),
+        "{failure}"
+    );
+    // The sticky failure keeps the check's own classification.
+    assert_eq!(failure.cause, Some(Cause::ProfileWorkspaceChanged));
     assert!(observer.next_until(ipc_deadline()).is_err());
     assert!(
         observer
@@ -524,11 +537,12 @@ fn malformed_queries_and_missing_fence_fail() {
             read_request(&mut server, 10);
             send_message(&mut server, 10, tick_reply);
         });
-        let error = observer
+        let failure = observer
             .snapshot(client, Instant::now() + Duration::from_millis(100))
             .err()
             .unwrap();
-        assert!(error.contains("fence"), "{error}");
+        assert!(failure.detail.contains("fence"), "{failure}");
+        assert_eq!(failure.cause, Some(Cause::SwayIpc));
         worker.join().unwrap();
         assert!(observer.next_until(ipc_deadline()).is_err());
     }

@@ -5,6 +5,7 @@ mod config;
 mod diagnostics;
 mod discovery;
 mod draft_file;
+mod failure;
 mod launch;
 mod menu;
 mod observation;
@@ -14,6 +15,7 @@ mod profile_capture;
 use clap::{CommandFactory, Parser, Subcommand};
 use diagnostics::Diagnostics;
 use discovery::{ConfigDirectory, Discovery};
+use failure::Failure;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -248,8 +250,12 @@ fn load_profile(
     let mut diagnostics = Diagnostics::start("profile load");
     diagnostics.stage(format!("profile {name:?}: validation"));
     diagnostics.record(&format!("profile {name:?}; completed 0 workspaces []"));
-    let result = prepared.and_then(|prepared| profile::load(&prepared, &mut diagnostics));
-    result.map_err(|error| diagnostics.report_failure(format!("profile {name:?}: {error}")))
+    let result = prepared
+        .map_err(Failure::from)
+        .and_then(|prepared| profile::load(&prepared, &mut diagnostics));
+    result.map_err(|failure| {
+        diagnostics.report_failure(failure.context(format_args!("profile {name:?}")))
+    })
 }
 
 fn load(name: &str, layouts_dir: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<(), String> {
@@ -273,7 +279,7 @@ fn load_named_layout(
     default_cwd_override: Option<PathBuf>,
     expected_workspace_id: Option<i64>,
     diagnostics: &mut Diagnostics,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let (path, mut config) = layout_result?;
     if let Some(mut directory) = default_cwd_override {
         if directory.is_relative()
@@ -294,7 +300,7 @@ fn load_named_layout(
         path.display()
     ));
     launch::load(&config, expected_workspace_id, diagnostics)
-        .map_err(|error| format!("layout {name:?}: {error}"))
+        .map_err(|failure| failure.context(format_args!("layout {name:?}")))
 }
 
 /// Read once so menu selection and loading use the same validated configuration.

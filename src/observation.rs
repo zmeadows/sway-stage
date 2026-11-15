@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use crate::failure::{Cause, Failure};
 use swayipc::{
     Connection, Event, EventType, Floating, Node, NodeLayout, NodeType, ScratchpadState, Workspace,
     WorkspaceChange,
@@ -22,16 +23,22 @@ static NEXT_FENCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Sway's own IPC socket. Never use `Connection::new()`: it prefers `I3SOCK` and can spawn
 /// socket-discovery processes, so it could reach another compositor or launch a process.
-pub fn sway_socket() -> Result<PathBuf, String> {
+pub fn sway_socket() -> Result<PathBuf, Failure> {
     env::var_os("SWAYSOCK")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| "connect: SWAYSOCK is unset or empty; run inside Sway".to_owned())
+        .ok_or_else(|| {
+            Failure::new(
+                Cause::SwayIpc,
+                "connect: SWAYSOCK is unset or empty; run inside Sway",
+            )
+        })
 }
 
 /// The observer needs a fresh connection for its subscription and for every snapshot.
-pub fn connect(socket: &Path) -> Result<UnixStream, String> {
-    UnixStream::connect(socket).map_err(|error| format!("connect to SWAYSOCK: {error}"))
+pub fn connect(socket: &Path) -> Result<UnixStream, Failure> {
+    UnixStream::connect(socket)
+        .map_err(|error| Failure::new(Cause::SwayIpc, format!("connect to SWAYSOCK: {error}")))
 }
 
 enum Message {
@@ -55,7 +62,7 @@ pub struct WorkspaceSnapshot {
 }
 
 /// Checks one event that arrives while the observer's owner cannot consume its history.
-pub type UnconsumedEventCheck = fn(&Event) -> Result<(), String>;
+pub type UnconsumedEventCheck = fn(&Event) -> Result<(), Failure>;
 
 pub struct Observer {
     /// A clone of the reader thread's event socket, kept only to shut it down.
@@ -63,7 +70,7 @@ pub struct Observer {
     reader: Option<JoinHandle<()>>,
     messages: mpsc::Receiver<Message>,
     /// A terminal failure, set by the reader thread or the observer; never cleared.
-    failure: Arc<Mutex<Option<String>>>,
+    failure: Arc<Mutex<Option<Failure>>>,
     /// While set, the reader checks each new event with this instead of queueing it.
     unconsumed_event_check: Arc<Mutex<Option<UnconsumedEventCheck>>>,
     /// The focused workspace frozen by the first snapshot.
@@ -75,16 +82,18 @@ pub struct Observer {
 impl Observer {
     /// Returns only after Sway acknowledges all subscriptions. Connections are supplied
     /// explicitly so neither socket discovery nor a live compositor is needed in tests.
-    pub fn subscribe(socket: UnixStream, deadline: Instant) -> Result<Self, String> {
-        let shutdown_socket = socket
-            .try_clone()
-            .map_err(|error| format!("clone event socket: {error}"))?;
+    pub fn subscribe(socket: UnixStream, deadline: Instant) -> Result<Self, Failure> {
+        let shutdown_socket = socket.try_clone().map_err(|error| {
+            Failure::new(Cause::SwayIpc, format!("clone event socket: {error}"))
+        })?;
 
         // Never time out/retry read_exact: swayipc discards partial-frame progress.
         socket
             .set_read_timeout(None)
             .and_then(|()| socket.set_write_timeout(None))
-            .map_err(|error| format!("configure event socket: {error}"))?;
+            .map_err(|error| {
+                Failure::new(Cause::SwayIpc, format!("configure event socket: {error}"))
+            })?;
 
         let (sender, messages) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
@@ -95,19 +104,26 @@ impl Observer {
         let reader = thread::Builder::new()
             .name("sway-events".into())
             .spawn(move || {
-                let read_events = || -> Result<(), String> {
+                let read_events = || -> Result<(), Failure> {
                     let mut event_stream = Connection::from(socket)
                         .subscribe([EventType::Workspace, EventType::Window, EventType::Tick])
-                        .map_err(|error| format!("subscribe to workspace/window/tick: {error}"))?;
+                        .map_err(|error| {
+                            Failure::new(
+                                Cause::SwayIpc,
+                                format!("subscribe to workspace/window/tick: {error}"),
+                            )
+                        })?;
                     sender
                         .try_send(Message::Subscribed)
-                        .map_err(|_| "event history unavailable".to_owned())?;
+                        .map_err(|_| Failure::new(Cause::SwayIpc, "event history unavailable"))?;
 
                     loop {
                         let event = event_stream
                             .next()
-                            .ok_or("event stream ended")?
-                            .map_err(|error| format!("read Sway event: {error}"))?;
+                            .ok_or_else(|| Failure::new(Cause::SwayIpc, "event stream ended"))?
+                            .map_err(|error| {
+                                Failure::new(Cause::SwayIpc, format!("read Sway event: {error}"))
+                            })?;
 
                         let unconsumed_check = *reader_unconsumed_event_check
                             .lock()
@@ -120,8 +136,10 @@ impl Observer {
                         }
 
                         sender.try_send(Message::Event(event)).map_err(|_| {
-                            "event history unavailable: queue overflow or receiver closed"
-                                .to_owned()
+                            Failure::new(
+                                Cause::SwayIpc,
+                                "event history unavailable: queue overflow or receiver closed",
+                            )
                         })?;
                     }
                 };
@@ -133,7 +151,9 @@ impl Observer {
                     *failure = Some(error);
                 }
             })
-            .map_err(|error| format!("start event reader: {error}"))?;
+            .map_err(|error| {
+                Failure::new(Cause::SwayIpc, format!("start event reader: {error}"))
+            })?;
 
         let mut observer = Self {
             event_socket: shutdown_socket,
@@ -147,17 +167,18 @@ impl Observer {
 
         match observer.receive(deadline)? {
             Some(Message::Subscribed) => Ok(observer),
-            _ => {
-                Err("subscribe: deadline expired or unexpected event before acknowledgement".into())
-            }
+            _ => Err(Failure::new(
+                Cause::SwayIpc,
+                "subscribe: deadline expired or unexpected event before acknowledgement",
+            )),
         }
     }
 
-    fn check_health(&self) -> Result<(), String> {
+    fn check_health(&self) -> Result<(), Failure> {
         let failure = self
             .failure
             .lock()
-            .map_err(|_| "event reader status poisoned")?;
+            .map_err(|_| Failure::new(Cause::SwayIpc, "event reader status poisoned"))?;
         if let Some(error) = failure.as_ref() {
             return Err(error.clone());
         }
@@ -167,13 +188,16 @@ impl Observer {
             .as_ref()
             .is_some_and(|reader| reader.is_finished())
         {
-            return Err("event reader stopped; history cannot be trusted".into());
+            return Err(Failure::new(
+                Cause::SwayIpc,
+                "event reader stopped; history cannot be trusted",
+            ));
         }
 
         Ok(())
     }
 
-    fn fail<T>(&mut self, error: String) -> Result<T, String> {
+    fn fail<T>(&mut self, error: Failure) -> Result<T, Failure> {
         if let Ok(mut failure) = self.failure.lock() {
             *failure = Some(error.clone());
         }
@@ -182,7 +206,7 @@ impl Observer {
         Err(error)
     }
 
-    fn receive(&mut self, deadline: Instant) -> Result<Option<Message>, String> {
+    fn receive(&mut self, deadline: Instant) -> Result<Option<Message>, Failure> {
         self.check_health()?;
         let remaining_time = deadline.saturating_duration_since(Instant::now());
         if remaining_time.is_zero() {
@@ -195,15 +219,16 @@ impl Observer {
         match received_message {
             Ok(message) => Ok(Some(message)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.fail("event reader disconnected; history cannot be trusted".into())
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => self.fail(Failure::new(
+                Cause::SwayIpc,
+                "event reader disconnected; history cannot be trusted",
+            )),
         }
     }
 
     /// Idle expiry is not an IPC error and does not interrupt the reader's frame.
     /// Periodically query fresh trees too: not every identity/property update emits an event.
-    pub fn next_until(&mut self, deadline: Instant) -> Result<Option<Event>, String> {
+    pub fn next_until(&mut self, deadline: Instant) -> Result<Option<Event>, Failure> {
         if self.target_workspace_id.is_none() {
             return self.fail("capture an initial snapshot before consuming events".into());
         }
@@ -212,7 +237,10 @@ impl Observer {
             Some(Message::Event(event)) => {
                 if let Event::Workspace(workspace) = &event {
                     if workspace.change == WorkspaceChange::Reload {
-                        return self.fail("workspace reload: revalidation required".into());
+                        return self.fail(Failure::new(
+                            Cause::ConfigurationReloaded,
+                            "workspace reload: revalidation required",
+                        ));
                     }
 
                     let Some(current_workspace) = workspace.current.as_ref() else {
@@ -235,23 +263,30 @@ impl Observer {
                                 .as_ref()
                                 .is_some_and(|old| old.id != target_workspace_id))
                     {
-                        return self.fail(format!(
-                            "workspace focus changed from target id={target_workspace_id}"
+                        return self.fail(Failure::new(
+                            Cause::FocusLost,
+                            format!("workspace focus changed from target id={target_workspace_id}"),
                         ));
                     }
 
                     if workspace.change == WorkspaceChange::Empty
                         && Some(current_workspace.id) == self.target_workspace_id
                     {
-                        return self.fail("target workspace was destroyed".into());
+                        return self.fail(Failure::new(
+                            Cause::TargetUnavailable,
+                            "target workspace was destroyed",
+                        ));
                     }
 
                     if workspace.change == WorkspaceChange::Move
                         && Some(current_workspace.id) == self.target_workspace_id
                     {
-                        return self.fail(format!(
-                            "target workspace id={} moved to another output",
-                            current_workspace.id
+                        return self.fail(Failure::new(
+                            Cause::OutputChanged,
+                            format!(
+                                "target workspace id={} moved to another output",
+                                current_workspace.id
+                            ),
                         ));
                     }
                 }
@@ -279,7 +314,7 @@ impl Observer {
     pub fn check_events_until_next_snapshot(
         &mut self,
         check: UnconsumedEventCheck,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         self.check_health()?;
         *self
             .unconsumed_event_check
@@ -292,7 +327,7 @@ impl Observer {
         &mut self,
         socket: UnixStream,
         deadline: Instant,
-    ) -> Result<(Vec<Workspace>, Node, String), String> {
+    ) -> Result<(Vec<Workspace>, Node, String), Failure> {
         self.check_health()?;
 
         // Queue again before the fence is requested, so the fence and every later event
@@ -302,9 +337,9 @@ impl Observer {
             .lock()
             .map_err(|_| "unconsumed event check poisoned")? = None;
 
-        let shutdown_socket = socket
-            .try_clone()
-            .map_err(|error| format!("clone query socket: {error}"))?;
+        let shutdown_socket = socket.try_clone().map_err(|error| {
+            Failure::new(Cause::SwayIpc, format!("clone query socket: {error}"))
+        })?;
         let fence_token = format!(
             "sway-stage:{}:{}",
             std::process::id(),
@@ -316,6 +351,7 @@ impl Observer {
         let query_thread = thread::Builder::new()
             .name("sway-snapshot".into())
             .spawn(move || {
+                // Every failure here is a query or fence exchange with Sway.
                 let query = || -> Result<_, String> {
                     let mut connection = Connection::from(socket);
                     let workspaces = connection
@@ -337,7 +373,9 @@ impl Observer {
                 };
                 let _ = sender.send(query());
             })
-            .map_err(|error| format!("start snapshot reader: {error}"))?;
+            .map_err(|error| {
+                Failure::new(Cause::SwayIpc, format!("start snapshot reader: {error}"))
+            })?;
 
         let query_result =
             receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
@@ -349,8 +387,13 @@ impl Observer {
 
         let (workspaces, tree) = match query_result {
             Ok(Ok(snapshot)) => snapshot,
-            Ok(Err(error)) => return self.fail(error),
-            Err(error) => return self.fail(format!("snapshot deadline/channel failure: {error}")),
+            Ok(Err(error)) => return self.fail(Failure::new(Cause::SwayIpc, error)),
+            Err(error) => {
+                return self.fail(Failure::new(
+                    Cause::SwayIpc,
+                    format!("snapshot deadline/channel failure: {error}"),
+                ));
+            }
         };
 
         Ok((workspaces, tree, fence_token))
@@ -362,7 +405,7 @@ impl Observer {
         &mut self,
         socket: UnixStream,
         deadline: Instant,
-    ) -> Result<WorkspaceSnapshot, String> {
+    ) -> Result<WorkspaceSnapshot, Failure> {
         let (workspaces, tree, fence_token) = self.query_workspace_tree(socket, deadline)?;
         let mut events = Vec::new();
         loop {
@@ -375,14 +418,22 @@ impl Observer {
                 Some(Message::Event(Event::Tick(_))) => {}
                 Some(Message::Event(event)) => {
                     if events.len() == EVENT_QUEUE_CAPACITY {
-                        return self.fail("snapshot event history limit exceeded".into());
+                        return self.fail(Failure::new(
+                            Cause::SwayIpc,
+                            "snapshot event history limit exceeded",
+                        ));
                     }
                     events.push(event);
                 }
                 Some(Message::Subscribed) => {
                     return self.fail("duplicate subscription acknowledgement".into());
                 }
-                None => return self.fail("snapshot: event fence deadline expired".into()),
+                None => {
+                    return self.fail(Failure::new(
+                        Cause::SwayIpc,
+                        "snapshot: event fence deadline expired",
+                    ));
+                }
             }
         }
 
@@ -395,7 +446,7 @@ impl Observer {
 
     /// Each snapshot uses a separate, disposable query connection. The temporary query
     /// thread makes even a stalled/fragmented reply subject to the same monotonic deadline.
-    pub fn snapshot(&mut self, socket: UnixStream, deadline: Instant) -> Result<Snapshot, String> {
+    pub fn snapshot(&mut self, socket: UnixStream, deadline: Instant) -> Result<Snapshot, Failure> {
         self.snapshot_for_workspace(socket, deadline, None)
     }
 
@@ -406,13 +457,18 @@ impl Observer {
         socket: UnixStream,
         deadline: Instant,
         expected_workspace_id: Option<i64>,
-    ) -> Result<Snapshot, String> {
+    ) -> Result<Snapshot, Failure> {
         let (workspaces, tree, fence_token) = self.query_workspace_tree(socket, deadline)?;
 
         let mut focused_workspaces = workspaces.iter().filter(|workspace| workspace.focused);
         let target_workspace_id = match (focused_workspaces.next(), focused_workspaces.next()) {
             (Some(workspace), None) => workspace.id,
-            _ => return self.fail("snapshot: expected exactly one focused workspace".into()),
+            _ => {
+                return self.fail(Failure::new(
+                    Cause::InconsistentWorkspaces,
+                    "snapshot: expected exactly one focused workspace",
+                ));
+            }
         };
 
         let mut workspace_ids = HashSet::new();
@@ -420,22 +476,29 @@ impl Observer {
             .iter()
             .any(|workspace| !workspace_ids.insert(workspace.id))
         {
-            return self.fail("snapshot: duplicate workspace identities".into());
+            return self.fail(Failure::new(
+                Cause::InconsistentWorkspaces,
+                "snapshot: duplicate workspace identities",
+            ));
         }
 
         if let Some(original_workspace_id) = self.target_workspace_id
             && original_workspace_id != target_workspace_id
         {
-            return self.fail(format!(
-                "snapshot: focus left target id={original_workspace_id}"
+            return self.fail(Failure::new(
+                Cause::FocusLost,
+                format!("snapshot: focus left target id={original_workspace_id}"),
             ));
         }
 
         if let Some(expected_workspace_id) = expected_workspace_id
             && expected_workspace_id != target_workspace_id
         {
-            return self.fail(format!(
-                "snapshot: focused workspace id={target_workspace_id} differs from pre-menu workspace id={expected_workspace_id}; keep the original workspace focused"
+            return self.fail(Failure::new(
+                Cause::FocusLost,
+                format!(
+                    "snapshot: focused workspace id={target_workspace_id} differs from pre-menu workspace id={expected_workspace_id}; keep the original workspace focused"
+                ),
             ));
         }
         self.target_workspace_id = Some(target_workspace_id);
@@ -444,17 +507,26 @@ impl Observer {
         if tree.node_type != NodeType::Root
             || tree.iter().any(|node| !container_ids.insert(node.id))
         {
-            return self.fail("snapshot: invalid root or duplicate container identities".into());
+            return self.fail(Failure::new(
+                Cause::InconsistentWorkspaces,
+                "snapshot: invalid root or duplicate container identities",
+            ));
         }
 
         let Some(workspace) = tree.find_as_ref(|node| node.id == target_workspace_id) else {
-            return self.fail("snapshot: target workspace missing from tree".into());
+            return self.fail(Failure::new(
+                Cause::TargetUnavailable,
+                "snapshot: target workspace missing from tree",
+            ));
         };
         if workspace.node_type != NodeType::Workspace
             || workspace.iter().filter(|node| node.focused).count() != 1
             || tree.iter().filter(|node| node.focused).count() != 1
         {
-            return self.fail("snapshot: workspace/tree focus is inconsistent".into());
+            return self.fail(Failure::new(
+                Cause::InconsistentWorkspaces,
+                "snapshot: workspace/tree focus is inconsistent",
+            ));
         }
 
         let Some(output) = tree.nodes.iter().find(|container| {
@@ -468,9 +540,12 @@ impl Observer {
         if let Some(original_output_id) = self.target_output_id
             && output.id != original_output_id
         {
-            return self.fail(format!(
-                "snapshot: target workspace id={target_workspace_id} changed output from id={original_output_id} to id={}",
-                output.id
+            return self.fail(Failure::new(
+                Cause::OutputChanged,
+                format!(
+                    "snapshot: target workspace id={target_workspace_id} changed output from id={original_output_id} to id={}",
+                    output.id
+                ),
             ));
         }
         self.target_output_id = Some(output.id);
@@ -482,11 +557,19 @@ impl Observer {
                 Some(Event::Tick(_)) => {}
                 Some(event) => {
                     if events.len() == EVENT_QUEUE_CAPACITY {
-                        return self.fail("snapshot event history limit exceeded".into());
+                        return self.fail(Failure::new(
+                            Cause::SwayIpc,
+                            "snapshot event history limit exceeded",
+                        ));
                     }
                     events.push(event);
                 }
-                None => return self.fail("snapshot: event fence deadline expired".into()),
+                None => {
+                    return self.fail(Failure::new(
+                        Cause::SwayIpc,
+                        "snapshot: event fence deadline expired",
+                    ));
+                }
             }
         }
 

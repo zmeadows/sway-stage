@@ -5,6 +5,7 @@ use crate::discovery::ConfigDirectory;
 use crate::draft_file::{DraftSaveError, save_draft};
 #[cfg(test)]
 use crate::draft_file::{publish_draft, reject_existing_layout, validate_draft_name};
+use crate::failure::{Cause, Failure};
 use crate::{capture, config, diagnostics, profile, profile_capture};
 use std::fs;
 #[cfg(test)]
@@ -24,7 +25,8 @@ pub struct Error {
 
 #[derive(Debug)]
 pub enum FailureKind {
-    Snapshot,
+    /// The pre-menu snapshot failed; its classified Sway failure supplies any summary.
+    Snapshot(Option<&'static str>),
     LayoutDiscovery,
     ProfileDiscovery,
     NoActions,
@@ -60,7 +62,7 @@ pub enum MenuAction {
 /// Eligibility uses only the saved tree. Discovery failures disable one category;
 /// a valid independent action keeps the selector usable.
 pub fn select_action(
-    snapshot: Result<&capture::Snapshot, &String>,
+    snapshot: Result<&capture::Snapshot, &Failure>,
     layouts_dir: Option<PathBuf>,
     profiles_dir: Option<PathBuf>,
 ) -> Result<Option<MenuAction>, Error> {
@@ -93,7 +95,7 @@ pub fn select_action(
             )),
         },
         Err(error) => unavailable.push(Error::new(
-            FailureKind::Snapshot,
+            FailureKind::Snapshot(error.cause.map(Cause::summary)),
             format!("pre-menu workspace snapshot: {error}"),
         )),
     }

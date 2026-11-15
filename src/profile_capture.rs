@@ -98,7 +98,8 @@ pub fn capture(
     let layouts_directory = ConfigDirectory::layouts(layouts_dir)?.path;
     let profiles_directory = ConfigDirectory::profiles(profiles_dir)?.path;
 
-    let snapshot = capture::snapshot().map_err(|error| format!("snapshot: {error}"))?;
+    let snapshot =
+        capture::snapshot().map_err(|failure| capture::Error::from(failure).context("snapshot"))?;
     let prepared = prepare(&snapshot, &targets, all, infer_commands)?;
     prepared
         .save(name, &layouts_directory, &profiles_directory)
