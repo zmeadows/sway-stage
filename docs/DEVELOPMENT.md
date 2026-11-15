@@ -46,13 +46,13 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 43 scenarios
+tools/integration/run.sh                  # all 45 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the fifteen
+suite order: `--filter single-window` runs one scenario and `--filter profile` the sixteen
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
@@ -128,13 +128,14 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `0` | The second target of `profile-workspace-zero`, created and removed like `3`. |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. |
-| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` temporarily renames it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. |
-| `3` | The second target of the successful, partial, and shared-layout profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. |
+| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every other profile scenario, runs here; `profile-named-success` temporarily renames it. `profile-recreated-origin` targets it second, after Sway has removed it, and so creates a new `2`. The [floating refusals](#floating-occupancy-refusals) leave one floating window on it while focus is on `3`, so it keeps its identity. |
+| `3` | The second target of the successful, partial, and shared-layout profile scenarios, the first target of `profile-recreated-origin`, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. `profile-floating-refusal` selects `3` before its load as the empty, focused first target; Sway removes it again on the return to `2`. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
 | `5`–`8` | The [session round-trip](#four-workspace-session-round-trip)'s workspaces, created twice in that order and removed by Sway after each cleanup. |
 
 The suite runs twenty-three standard Foot scenarios, the
-[failing standalone loads](#failing-standalone-loads), then the profile scenarios, the
+[failing standalone loads](#failing-standalone-loads), the
+[floating-occupancy refusals](#floating-occupancy-refusals), then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
 [four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
@@ -184,6 +185,29 @@ recorder and allow no workspace event:
 | --- | --- |
 | `layout-partial-failure` | Three windows with a 5000 ms window timeout; the second runs `sleep 0`, which opens no window. Require exit 1 with the second window's `window timeout` and `stopped without cleanup or relaunch`; launch records for exactly the first two windows; and exactly one new window, the first, still tiled, focused, owned, and unmoved on the primary, with an unchanged foreign fixture. Verified cleanup then closes only that window. |
 | `layout-missing-executable` | Two windows; the first runs an absolute path inside the case's new private directory, checked to be absent, with no recorder or shell in front of it. Require exit 1 with the first window's `spawn application` diagnostic, neither `window timeout` nor the stop advice that follows any started application, an empty launch record (the second window never launches), and no window or workspace event and an unchanged observed desktop, so there is nothing to clean up. |
+
+#### Floating-occupancy refusals
+
+A target holding only a floating window is occupied. Both cases first prepare that window on
+the empty, focused primary `2`: Sway's own `exec` opens a Foot window with a run-unique app ID,
+whose ordered new-window event, app ID, and `/proc/PID/cmdline` establish that the run owns it.
+The harness then sends `[con_id=ID] floating enable` for that one window and requires
+Sway's floating event for it, no workspace event, and a fresh tree in which `2` holds no tiled
+container and exactly that window as a user-floating, non-fullscreen container outside the
+scratchpad. No `for_window` rule or app-ID criteria are used. The refused layouts record
+every launch.
+
+| Scenario | Independent expectations |
+| --- | --- |
+| `layout-floating-refusal` | `load` of a valid two-window layout on `2`. Require exit 1 with the occupied-workspace prelaunch diagnostic naming `2`, an empty launch record, and the complete observed desktop, workspace list, and event history unchanged, including the floating window's identity and state and the foreign fixture. |
+| `profile-floating-refusal` | From `2`, the harness selects the absent `3`, which Sway creates; `2` keeps its identity because it is occupied. The profile's empty, focused first target `3` is fully eligible, and its second target is `2`. Require exit 1 with the profile preflight diagnostic `workspace 2 id=ID must be completely empty`, `completed 0 workspaces []`, `no applications launched`, an empty launch record, and an unchanged desktop and event history: no selection and no construction of `3`, so every target was checked before any construction. |
+
+Only after a verified refusal does cleanup return to `2` where needed (Sway removes the empty
+`3`), then close the floating window by its exact ID. Ordinary cleanup accepts only tiled
+windows, so this close has its own guard: trusted focus on `2`, no window activity, unchanged
+foreign windows, and a fresh check of the window's identity, launch arguments, and floating
+state, then a bounded wait for its close event and an empty `2`. The structural-only variant
+of occupancy, an empty container, is not covered.
 
 Expected profile failures count as passes only after independent verification:
 

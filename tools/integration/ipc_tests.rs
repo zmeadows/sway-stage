@@ -22,6 +22,9 @@ fn commands_accept_only_validated_workspace_names_and_exact_ids() {
     }
     assert!(close_command(0).is_err());
     assert!(close_command(-1).is_err());
+    assert_eq!(float_command(42).unwrap(), "[con_id=42] floating enable");
+    assert!(float_command(0).is_err());
+    assert!(float_command(-1).is_err());
 }
 
 #[test]

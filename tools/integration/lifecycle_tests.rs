@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 43] = [
+const SUITE_ORDER: [&str; 45] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -71,6 +71,8 @@ const SUITE_ORDER: [&str; 43] = [
     "duplicate-foot-ids",
     "layout-partial-failure",
     "layout-missing-executable",
+    "layout-floating-refusal",
+    "profile-floating-refusal",
     "profile-success",
     "profile-occupied-refusal",
     "profile-partial-failure",
@@ -121,6 +123,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     assert_eq!(
         select_scenarios(Some("profile")).unwrap(),
         [
+            "profile-floating-refusal",
             "profile-success",
             "profile-occupied-refusal",
             "profile-partial-failure",
@@ -170,6 +173,10 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
         ["layout-exec-menu", "profile-exec-menu"]
     );
     assert_eq!(
+        select_scenarios(Some("floating-refusal")).unwrap(),
+        ["layout-floating-refusal", "profile-floating-refusal"]
+    );
+    assert_eq!(
         select_scenarios(Some("partial-failure")).unwrap(),
         ["layout-partial-failure", "profile-partial-failure"]
     );
@@ -181,6 +188,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
         select_scenarios(Some("refusal")).unwrap(),
         [
             "occupied-workspace-refusal",
+            "layout-floating-refusal",
+            "profile-floating-refusal",
             "profile-occupied-refusal",
             "assigned-workspace-refusal"
         ]

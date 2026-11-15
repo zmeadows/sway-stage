@@ -38,11 +38,11 @@ use crate::ownership::{
 };
 use crate::preservation::{ForeignWindows, output_ancestry};
 use crate::scenarios::{
-    ConfiguredNode, Scenario, configuration_yaml, configure_process_execution,
+    ConfiguredNode, ConfiguredWindow, Scenario, configuration_yaml, configure_process_execution,
     foreign_fixture_scenario, session_roundtrip_layouts, standard_scenarios,
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
-use crate::{launch_context, load_failure, process, profile};
+use crate::{floating_refusal, launch_context, load_failure, process, profile};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -65,7 +65,7 @@ const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
 const ASSIGNED_WORKSPACE: &str = "4";
 
 /// Every scenario in suite order: the standard scenarios, the failing standalone loads, the
-/// profile cases, the sequentially verified profiles, the Sway exec entry points, the session
+/// floating-occupancy refusals, the profile cases, the sequentially verified profiles, the Sway exec entry points, the session
 /// round-trip, the assigned-workspace refusal, then the two-output session's cross-output
 /// profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
@@ -74,6 +74,7 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
 
     let mut names: Vec<&'static str> = standard.iter().map(|scenario| scenario.name).collect();
     names.extend(load_failure::CASES.iter().map(|case| case.name()));
+    names.extend(floating_refusal::CASES.iter().map(|case| case.name()));
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(profile::SEQUENTIAL_CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
@@ -374,6 +375,12 @@ impl Harness {
         for case in load_failure::CASES {
             if selected.contains(&case.name()) {
                 self.run_load_failure(case, &directory)?;
+            }
+        }
+        // These leave the primary empty and focused with its identity, like the cases above.
+        for case in floating_refusal::CASES {
+            if selected.contains(&case.name()) {
+                self.run_floating_refusal(case, &directory)?;
             }
         }
 
@@ -1829,6 +1836,295 @@ impl Harness {
         self.passed += 1;
         println!("PASS  {name} (independent verification; success-path cleanup only)");
         Ok(())
+    }
+
+    /// Opens this run's own window on the empty, focused primary and makes it floating, then
+    /// asks sway-stage to load onto that floating-only workspace: directly, or as a profile's
+    /// second target behind the empty, focused workspace `3`. sway-stage must refuse before
+    /// launching or selecting anything. Verified cleanup then closes only the floating
+    /// window. The primary is occupied whenever focus leaves it, so it keeps its identity.
+    fn run_floating_refusal(
+        &mut self,
+        case: floating_refusal::Case,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = case.name();
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let profiles_directory = files.subdirectory("profiles")?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        let window_script_path = files.path.join("floating-window.sh");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+
+        let floating_layout =
+            floating_refusal::floating_window(case, &self.run_id, &self.foot, &self.sleep);
+        let floating_leaf = floating_layout.layout.leaves()[0].clone();
+        fs::write(
+            &window_script_path,
+            session_roundtrip::window_launch_script(&floating_leaf.command),
+        )
+        .map_err(|error| format!("write floating window launch script: {error}"))?;
+
+        let refused_layouts = floating_refusal::refused_layouts(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+        );
+        for layout in &refused_layouts {
+            layouts_directory.write(layout.name, &configuration_yaml(layout))?;
+        }
+        let mut load = Command::new(&self.binary);
+        load.arg("--layouts-dir").arg(&layouts_directory.path);
+        match case {
+            floating_refusal::Case::Layout => {
+                check_configuration(&self.binary, &layouts_directory.path, name, &self.stage)?;
+                load.args(["load", name]);
+            }
+            floating_refusal::Case::Profile => {
+                // The empty first target is selected before the load; the floating-only
+                // primary is the second.
+                profiles_directory.write(
+                    name,
+                    &profile::configuration(PROFILE_WORKSPACE, &primary.name),
+                )?;
+                let mut check = Command::new(&self.binary);
+                check
+                    .arg("--layouts-dir")
+                    .arg(&layouts_directory.path)
+                    .arg("--profiles-dir")
+                    .arg(&profiles_directory.path)
+                    .args(["profile", "check", name]);
+                self.sway.select_socket(&mut check);
+                if process::run(check, &self.stage, IPC_TIMEOUT)? != format!("{name}: valid\n") {
+                    return Err("unexpected profile check output".into());
+                }
+                load.arg("--profiles-dir")
+                    .arg(&profiles_directory.path)
+                    .args(["profile", "load", name]);
+            }
+        }
+        self.sway.select_socket(&mut load);
+
+        let floating_window_id =
+            self.open_floating_window(name, &primary, &floating_layout, &window_script_path)?;
+        let floating_window =
+            AcceptedWindows::from([(floating_window_id, floating_leaf.layout_id.clone())]);
+
+        let first_target = match case {
+            floating_refusal::Case::Layout => None,
+            floating_refusal::Case::Profile => {
+                self.stage = format!("{name}: select the empty first target");
+                process::check_interruption()?;
+                self.sway.switch_workspace(PROFILE_WORKSPACE)?;
+                let transition = ExpectedSwitch {
+                    from_id: primary.id,
+                    destination_name: PROFILE_WORKSPACE.into(),
+                };
+                let selected = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+                require_quiet(&selected.window_events, None)?;
+                let first = profile::Target::record(&selected, PROFILE_WORKSPACE)?
+                    .ok_or("the empty first target is missing after its selection")?;
+                // The primary holds the floating window, so Sway keeps it.
+                let expected_events = [
+                    profile::ExpectedWorkspaceEvent::Init(&first.workspace),
+                    profile::ExpectedWorkspaceEvent::Focus {
+                        from_id: primary.id,
+                        to: &first.workspace,
+                    },
+                ];
+                profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+                require_empty(first.verify(&selected)?)?;
+                Some(first)
+            }
+        };
+
+        self.stage = format!("{name}: fresh desktop baseline");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        floating_refusal::verify_floating_only(
+            &before,
+            primary.id,
+            floating_window_id,
+            &floating_leaf,
+        )?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        if let Some(first) = &first_target {
+            let first_workspace = first.verify(&before)?;
+            require_empty(first_workspace)?;
+            if before.focused_workspace_id != first.workspace.id {
+                return Err("the profile must start on its empty, focused first target".into());
+            }
+        } else if before.focused_workspace_id != primary.id {
+            return Err("the load must start on the focused, floating-only primary".into());
+        }
+        let workspace_revision = self.events.workspace_revision();
+
+        self.stage = format!("{name}: load expected to be refused");
+        process::check_interruption()?;
+        let result = process::run_with_status(load, &self.stage, CAPTURE_TIMEOUT);
+        let completed = refusal_completion(result, process::interruption_requested())?;
+        let after = snapshot(&self.sway, &mut self.events, None)?;
+
+        self.stage = format!("{name}: independent verification");
+        // Both also require the complete observed desktop and its event history unchanged.
+        let workspace_activity = workspace_revision != self.events.workspace_revision();
+        match case {
+            floating_refusal::Case::Layout => {
+                verify_refusal(&completed, &before, &after, workspace_activity)?;
+            }
+            floating_refusal::Case::Profile => verify_profile_refusal(
+                &completed,
+                &before,
+                &after,
+                &primary.name,
+                primary.id,
+                workspace_activity,
+            )?,
+        }
+        floating_refusal::verify_floating_only(
+            &after,
+            primary.id,
+            floating_window_id,
+            &floating_leaf,
+        )?;
+        foreign.verify(&after)?;
+        verify_fixture_state(&after, fixture, fixture_signature)?;
+        let observed_record = match fs::read_to_string(&launch_record_path) {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read launch record: {error}")),
+        };
+        if !observed_record.is_empty() {
+            return Err(format!(
+                "the refused load launched applications: {observed_record:?}"
+            ));
+        }
+        println!(
+            "      workspace {} id={} held only floating window id={floating_window_id}; \
+             sway-stage refused it before any launch or selection",
+            primary.name, primary.id
+        );
+
+        // Only an independently verified refusal enters cleanup, which the harness performs.
+        if let Some(first) = &first_target {
+            self.stage = format!("{name}: return to the primary");
+            process::check_interruption()?;
+            self.sway.switch_workspace(&primary.name)?;
+            let transition = ExpectedSwitch {
+                from_id: first.workspace.id,
+                destination_name: primary.name.clone(),
+            };
+            let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+            require_return_focus(&returned.window_events, &floating_window)?;
+            let expected_events = [
+                profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: first.workspace.id,
+                    to: &primary,
+                },
+                profile::ExpectedWorkspaceEvent::Empty(&first.workspace),
+            ];
+            profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+            floating_refusal::verify_floating_only(
+                &returned,
+                primary.id,
+                floating_window_id,
+                &floating_leaf,
+            )?;
+            foreign.verify(&returned)?;
+        }
+
+        self.stage = format!("{name}: verified cleanup");
+        close_floating_window(
+            &self.sway,
+            &mut self.events,
+            &primary,
+            floating_window_id,
+            &floating_leaf,
+            &foreign,
+        )?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Opens `layout`'s one window on the empty, focused primary through Sway's own `exec` of
+    /// `window_script`, verifies that this run owns it, and makes exactly that window
+    /// floating. Returns its container ID once Sway reports it floating alone on the primary.
+    fn open_floating_window(
+        &mut self,
+        scenario_name: &str,
+        primary: &WorkspaceIdentity,
+        layout: &Scenario,
+        window_script: &Path,
+    ) -> Result<i64, String> {
+        self.stage = format!("{scenario_name}: open this run's window through Sway's exec");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        if before.focused_workspace_id != primary.id {
+            return Err("the floating window must open on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        let mut window_events = exec_window_and_wait(
+            &self.sway,
+            &mut self.events,
+            window_script,
+            &preexisting,
+            1,
+            Duration::from_millis(layout.window_timeout_ms),
+        )?;
+        let mut opened = snapshot(&self.sway, &mut self.events, None)?;
+        profile::verify_workspace_events(&opened.workspace_events, &[])?;
+        window_events.append(&mut opened.window_events);
+        let accepted = bind_launches(&window_events, &layout.layout, &preexisting)?;
+        verify_ownership(
+            &opened.tree,
+            primary.id,
+            &layout.layout,
+            &preexisting,
+            &accepted,
+        )?;
+        verify_fixture_state(&opened, fixture, fixture_signature)?;
+        let window_id = *accepted
+            .keys()
+            .next()
+            .expect("a one-window layout binds exactly one launch");
+
+        self.stage = format!("{scenario_name}: make this run's window floating");
+        process::check_interruption()?;
+        self.sway.float_owned_window(window_id)?;
+        let floated = snapshot(&self.sway, &mut self.events, None)?;
+        floating_refusal::require_float_events(&floated.window_events, window_id)?;
+        profile::verify_workspace_events(&floated.workspace_events, &[])?;
+        floating_refusal::verify_floating_only(
+            &floated,
+            primary.id,
+            window_id,
+            layout.layout.leaves()[0],
+        )?;
+        verify_fixture_state(&floated, fixture, fixture_signature)?;
+        Ok(window_id)
     }
 
     /// Loads a two-entry profile from the empty, focused primary and verifies it workspace by
@@ -3509,6 +3805,60 @@ fn require_signature(
         return Err(message.to_owned());
     }
     Ok(())
+}
+
+/// Closes this run's one floating window on the focused `target`, after fresh evidence that
+/// it is still the window this run opened, alone and floating there. The ordinary cleanup
+/// accepts only tiled windows, so this is its floating counterpart: the same trusted focus,
+/// event, preservation, and identity checks before the one exact-ID close, then a bounded
+/// wait for the window to disappear and leave `target` empty.
+fn close_floating_window(
+    sway: &Swaymsg,
+    events: &mut Events,
+    target: &WorkspaceIdentity,
+    window_id: i64,
+    leaf: &ConfiguredWindow,
+    foreign: &ForeignWindows,
+) -> Result<(), String> {
+    process::check_interruption()?;
+    let before = snapshot(sway, events, None)?;
+    if !events.focus_history_trusted() || before.focused_workspace_id != target.id {
+        return Err("cleanup requires trusted target workspace focus".into());
+    }
+    require_quiet(&before.window_events, None)?;
+    foreign.verify(&before)?;
+    floating_refusal::verify_floating_only(&before, target.id, window_id, leaf)?;
+
+    // The sole destructive desktop command. IPC cannot make the guard/command atomic.
+    process::check_interruption()?;
+    sway.close_owned_window(window_id)?;
+    let no_remaining_windows = AcceptedWindows::new();
+    let expected_close = ExpectedClose {
+        closing_window_id: window_id,
+        remaining: &no_remaining_windows,
+    };
+    let deadline = Instant::now() + IPC_TIMEOUT;
+    loop {
+        process::check_interruption()?;
+        let observed = snapshot(sway, events, None)?;
+        require_quiet(&observed.window_events, Some(&expected_close))?;
+        foreign.verify(&observed)?;
+
+        let disappeared = !walk(&observed.tree)
+            .iter()
+            .any(|placed| placed.node.id == window_id);
+        if disappeared {
+            return require_empty(observed.focused_workspace());
+        }
+        floating_refusal::verify_floating_only(&observed, target.id, window_id, leaf)?;
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "cleanup timeout: container {window_id} did not disappear"
+            ));
+        }
+        thread::sleep(CLOSE_POLL_INTERVAL);
+    }
 }
 
 struct CleanupContext<'a> {

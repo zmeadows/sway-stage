@@ -86,6 +86,12 @@ impl Swaymsg {
         self.command(&close_command(container_id)?)
     }
 
+    /// Makes exactly one window floating. The caller must have just verified that this run
+    /// opened it, and observes the result with a fence.
+    pub fn float_owned_window(&self, container_id: i64) -> Result<(), String> {
+        self.command(&float_command(container_id)?)
+    }
+
     /// Starts `/bin/sh SCRIPT` through Sway's own `exec`, as a keybinding would, so Sway
     /// records a launch context for the focused workspace. The process inherits the
     /// compositor's environment, never the harness's, and is not our child: it is observed
@@ -280,6 +286,13 @@ fn close_command(container_id: i64) -> Result<String, String> {
         return Err("owned window must have a positive container ID".into());
     }
     Ok(format!("[con_id={container_id}] kill"))
+}
+
+fn float_command(container_id: i64) -> Result<String, String> {
+    if container_id <= 0 {
+        return Err("owned window must have a positive container ID".into());
+    }
+    Ok(format!("[con_id={container_id}] floating enable"))
 }
 
 /// Sway's command parser and the `sh -c` that `exec` runs would both interpret quotes,

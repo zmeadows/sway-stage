@@ -12,6 +12,7 @@
 //!   to Sway.
 
 mod capture;
+mod floating_refusal;
 mod headless;
 mod ipc;
 mod launch_context;

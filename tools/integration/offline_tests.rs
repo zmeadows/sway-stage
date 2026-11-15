@@ -13,6 +13,7 @@
 
 mod capture;
 mod fixtures;
+mod floating_refusal;
 mod headless;
 mod ipc;
 mod launch_context;
