@@ -35,13 +35,32 @@ pub struct ExpectedSwitch {
     pub destination_name: String,
 }
 
+/// The workspace switches one fence may accept, in order, as a profile load with several
+/// targets makes them: focus moving from the workspace with `from_id` to the first
+/// destination, then from each destination to the next. Only the first origin is known
+/// beforehand; each later one is the workspace the previous switch established.
+pub struct ExpectedSwitches {
+    pub from_id: i64,
+    pub destination_names: Vec<String>,
+}
+
+impl From<&ExpectedSwitch> for ExpectedSwitches {
+    fn from(switch: &ExpectedSwitch) -> Self {
+        Self {
+            from_id: switch.from_id,
+            destination_names: vec![switch.destination_name.clone()],
+        }
+    }
+}
+
 /// Everything one fence read before its own tick, apart from other ticks.
 struct FencedEvents {
     window_events: Vec<WindowEvent>,
     /// Non-urgent workspace events, in order, each already accepted by the fence.
     workspace_events: Vec<WorkspaceEvent>,
-    /// How many window events preceded the expected switch's focus event.
-    switch_window_index: Option<usize>,
+    /// For each expected switch that occurred, how many window events preceded its focus
+    /// event.
+    switch_window_indexes: Vec<usize>,
 }
 
 /// The event subscription and the focus history derived from it.
@@ -114,14 +133,14 @@ impl Events {
     fn fence(
         &mut self,
         swaymsg: &Swaymsg,
-        expected_switch: Option<&ExpectedSwitch>,
+        expected_switches: Option<&ExpectedSwitches>,
         expected_rename: Option<&WorkspaceIdentity>,
     ) -> Result<FencedEvents, String> {
         if !self.focus_history_trusted {
             return Err("event history is no longer trusted; refusing another fence".into());
         }
 
-        let result = self.read_through_fence(swaymsg, expected_switch, expected_rename);
+        let result = self.read_through_fence(swaymsg, expected_switches, expected_rename);
         if result.is_err() {
             self.focus_history_trusted = false;
         }
@@ -131,7 +150,7 @@ impl Events {
     fn read_through_fence(
         &mut self,
         swaymsg: &Swaymsg,
-        expected_switch: Option<&ExpectedSwitch>,
+        expected_switches: Option<&ExpectedSwitches>,
         expected_rename: Option<&WorkspaceIdentity>,
     ) -> Result<FencedEvents, String> {
         // The tick request counts against the same deadline as the events before it.
@@ -141,14 +160,16 @@ impl Events {
 
         let mut window_events = Vec::new();
         let mut workspace_events = Vec::new();
-        let mut switch_window_index = None;
+        let mut switch_window_indexes = Vec::new();
         let mut observed_rename = false;
         for _ in 0..MAX_FENCE_EVENTS {
             let workspace_event = match self.subscription.next_event(deadline)? {
                 Event::Tick(tick) => {
                     // The initial tick and other clients' ticks cannot complete this fence.
                     if tick.payload == token && !tick.first {
-                        if expected_switch.is_some() && switch_window_index.is_none() {
+                        let expected_switch_count = expected_switches
+                            .map_or(0, |switches| switches.destination_names.len());
+                        if switch_window_indexes.len() != expected_switch_count {
                             return Err("workspace switch produced no expected focus event".into());
                         }
                         if expected_rename.is_some() && !observed_rename {
@@ -157,7 +178,7 @@ impl Events {
                         return Ok(FencedEvents {
                             window_events,
                             workspace_events,
-                            switch_window_index,
+                            switch_window_indexes,
                         });
                     }
                     continue;
@@ -187,8 +208,8 @@ impl Events {
             }
             apply_workspace_event(
                 &workspace_event,
-                expected_switch,
-                &mut switch_window_index,
+                expected_switches,
+                &mut switch_window_indexes,
                 window_events.len(),
                 &mut self.current_workspace,
             )?;
@@ -206,14 +227,14 @@ impl Events {
 /// Interprets one workspace event read by a fence, failing when it shows that the harness
 /// may have lost control of focus or workspace identity.
 ///
-/// Until `expected_switch` has occurred, which `switch_window_index` records for this fence,
-/// the next focus event must be exactly that switch; it establishes the destination as
-/// `current_workspace`. Otherwise the only acceptable focus event refocuses
-/// `current_workspace`, which persists across fences.
+/// While any of `expected_switches` has not yet occurred, which `switch_window_indexes`
+/// records for this fence, the next focus event must be exactly the next switch; it
+/// establishes its destination as `current_workspace`. Otherwise the only acceptable focus
+/// event refocuses `current_workspace`, which persists across fences.
 fn apply_workspace_event(
     workspace_event: &WorkspaceEvent,
-    expected_switch: Option<&ExpectedSwitch>,
-    switch_window_index: &mut Option<usize>,
+    expected_switches: Option<&ExpectedSwitches>,
+    switch_window_indexes: &mut Vec<usize>,
     window_event_count: usize,
     current_workspace: &mut Option<WorkspaceIdentity>,
 ) -> Result<(), String> {
@@ -224,18 +245,28 @@ fn apply_workspace_event(
     let old_id = workspace_event.old.as_ref().map(|workspace| workspace.id);
     match workspace_event.change {
         WorkspaceChange::Focus => {
-            if let Some(expected) = expected_switch
-                && switch_window_index.is_none()
-            {
+            let pending_switch = expected_switches.and_then(|switches| {
+                let destination_name = switches
+                    .destination_names
+                    .get(switch_window_indexes.len())?;
+                // Only the first origin is known beforehand; a later switch leaves the
+                // destination that the previous one established.
+                let origin_id = if switch_window_indexes.is_empty() {
+                    Some(switches.from_id)
+                } else {
+                    current_workspace.as_ref().map(|workspace| workspace.id)
+                };
+                Some((origin_id, destination_name))
+            });
+            if let Some((origin_id, destination_name)) = pending_switch {
                 let destination = match (&workspace_event.old, &workspace_event.current) {
                     (Some(old), Some(current))
-                        if old.id == expected.from_id
-                            && current.name.as_deref()
-                                == Some(expected.destination_name.as_str()) =>
+                        if Some(old.id) == origin_id
+                            && current.name.as_deref() == Some(destination_name.as_str()) =>
                     {
                         WorkspaceIdentity {
                             id: current.id,
-                            name: expected.destination_name.clone(),
+                            name: destination_name.clone(),
                         }
                     }
                     _ => {
@@ -246,7 +277,7 @@ fn apply_workspace_event(
                     }
                 };
                 *current_workspace = Some(destination);
-                *switch_window_index = Some(window_event_count);
+                switch_window_indexes.push(window_event_count);
             } else if let Some(current_workspace) = current_workspace.as_ref() {
                 // Refocusing the same workspace is harmless. Any other focus change means
                 // something other than the harness moved focus, even if focus has returned
@@ -319,20 +350,39 @@ pub fn snapshot(
     events: &mut Events,
     expected_switch: Option<&ExpectedSwitch>,
 ) -> Result<Snapshot, String> {
-    synchronized_snapshot(swaymsg, events, expected_switch, None).map(|(observed, _)| observed)
+    let expected_switches = expected_switch.map(ExpectedSwitches::from);
+    synchronized_snapshot(swaymsg, events, expected_switches.as_ref(), None)
+        .map(|(observed, _)| observed)
 }
 
-/// Profile loads have one switch. Retain its position among window events so launches
+/// Most profile loads have one switch. Retain its position among window events so launches
 /// on the two targets cannot be reordered or interleaved and still pass verification.
 pub fn snapshot_with_switch(
     swaymsg: &Swaymsg,
     events: &mut Events,
     expected_switch: &ExpectedSwitch,
 ) -> Result<(Snapshot, usize), String> {
-    let (observed, switch_window_index) =
-        synchronized_snapshot(swaymsg, events, Some(expected_switch), None)?;
-    let switch_window_index = switch_window_index.ok_or("missing profile transition boundary")?;
+    let (observed, switch_window_indexes) =
+        snapshot_with_switches(swaymsg, events, &ExpectedSwitches::from(expected_switch))?;
+    let [switch_window_index] = switch_window_indexes[..] else {
+        return Err("missing profile transition boundary".into());
+    };
     Ok((observed, switch_window_index))
+}
+
+/// A profile load with several targets switches once per target. Retain each switch's
+/// position among window events, so each layout's launches can be bound to its own target.
+pub fn snapshot_with_switches(
+    swaymsg: &Swaymsg,
+    events: &mut Events,
+    expected_switches: &ExpectedSwitches,
+) -> Result<(Snapshot, Vec<usize>), String> {
+    let (observed, switch_window_indexes) =
+        synchronized_snapshot(swaymsg, events, Some(expected_switches), None)?;
+    if switch_window_indexes.len() != expected_switches.destination_names.len() {
+        return Err("missing profile transition boundary".into());
+    }
+    Ok((observed, switch_window_indexes))
 }
 
 /// Only the success path's explicit disposable rename may accept this event. Ordinary
@@ -372,12 +422,12 @@ fn accept_disposable_rename(
 fn synchronized_snapshot(
     swaymsg: &Swaymsg,
     events: &mut Events,
-    expected_switch: Option<&ExpectedSwitch>,
+    expected_switches: Option<&ExpectedSwitches>,
     expected_rename: Option<&WorkspaceIdentity>,
-) -> Result<(Snapshot, Option<usize>), String> {
+) -> Result<(Snapshot, Vec<usize>), String> {
     let workspaces = swaymsg.get_workspaces()?;
     let tree = swaymsg.get_tree()?;
-    let fenced = events.fence(swaymsg, expected_switch, expected_rename)?;
+    let fenced = events.fence(swaymsg, expected_switches, expected_rename)?;
 
     let focused_workspace_id = validate_snapshot(&tree, &workspaces, events.current_workspace())
         .map_err(|error| events.distrust_focus_history(error))?;
@@ -389,7 +439,7 @@ fn synchronized_snapshot(
             window_events: fenced.window_events,
             workspace_events: fenced.workspace_events,
         },
-        fenced.switch_window_index,
+        fenced.switch_window_indexes,
     ))
 }
 

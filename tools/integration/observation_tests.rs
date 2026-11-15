@@ -275,8 +275,8 @@ fn focus_event(old: &WorkspaceIdentity, current: &WorkspaceIdentity) -> Workspac
 /// has occurred.
 struct FenceState {
     current_workspace: Option<WorkspaceIdentity>,
-    expected_switch: Option<ExpectedSwitch>,
-    switch_window_index: Option<usize>,
+    expected_switches: Option<ExpectedSwitches>,
+    switch_window_indexes: Vec<usize>,
 }
 
 impl FenceState {
@@ -285,18 +285,28 @@ impl FenceState {
         current_workspace: Option<WorkspaceIdentity>,
         expected_switch: Option<ExpectedSwitch>,
     ) -> Self {
+        Self::with_switches(
+            current_workspace,
+            expected_switch.as_ref().map(ExpectedSwitches::from),
+        )
+    }
+
+    fn with_switches(
+        current_workspace: Option<WorkspaceIdentity>,
+        expected_switches: Option<ExpectedSwitches>,
+    ) -> Self {
         Self {
             current_workspace,
-            expected_switch,
-            switch_window_index: None,
+            expected_switches,
+            switch_window_indexes: Vec::new(),
         }
     }
 
     fn apply(&mut self, workspace_event: &WorkspaceEvent) -> Result<(), String> {
         apply_workspace_event(
             workspace_event,
-            self.expected_switch.as_ref(),
-            &mut self.switch_window_index,
+            self.expected_switches.as_ref(),
+            &mut self.switch_window_indexes,
             0,
             &mut self.current_workspace,
         )
@@ -311,14 +321,14 @@ impl FenceState {
     /// Requires a rejection that leaves the fence's state unchanged.
     fn assert_rejects(&mut self, workspace_event: &WorkspaceEvent, expected_error: &str) {
         let workspace_before = self.current_workspace.clone();
-        let boundary_before = self.switch_window_index;
+        let boundaries_before = self.switch_window_indexes.clone();
 
         let Err(error) = self.apply(workspace_event) else {
             panic!("accepted {workspace_event:?}");
         };
         assert_contains(&error, expected_error);
         assert_eq!(self.current_workspace, workspace_before);
-        assert_eq!(self.switch_window_index, boundary_before);
+        assert_eq!(self.switch_window_indexes, boundaries_before);
     }
 }
 
@@ -332,7 +342,7 @@ fn refocusing_the_established_workspace_is_accepted() {
     fence.assert_accepts(&workspace_event("focus", None, Some(&original)));
 
     assert_eq!(fence.current_workspace, Some(original));
-    assert_eq!(fence.switch_window_index, None);
+    assert!(fence.switch_window_indexes.is_empty());
 }
 
 #[test]
@@ -344,11 +354,11 @@ fn expected_switch_is_accepted_and_establishes_its_destination() {
     // Creating the destination is not the switch.
     fence.assert_accepts(&workspace_event("init", None, Some(&target)));
 
-    assert_eq!(fence.switch_window_index, None);
+    assert!(fence.switch_window_indexes.is_empty());
     assert_eq!(fence.current_workspace, Some(original.clone()));
 
     fence.assert_accepts(&focus_event(&original, &target));
-    assert_eq!(fence.switch_window_index, Some(0));
+    assert_eq!(fence.switch_window_indexes, [0]);
     assert_eq!(fence.current_workspace, Some(target.clone()));
 
     // Later events in the same fence are judged against the destination.
@@ -374,7 +384,7 @@ fn return_switch_ignores_the_emptied_workspace_it_left() {
     // Once focus has left it, the empty disposable workspace's destruction is unrelated.
     fence.assert_accepts(&workspace_event("empty", None, Some(&target)));
 
-    assert_eq!(fence.switch_window_index, Some(0));
+    assert_eq!(fence.switch_window_indexes, [0]);
     assert_eq!(fence.current_workspace, Some(original));
 }
 
@@ -413,7 +423,7 @@ fn unrelated_workspace_events_are_ignored() {
             let mut fence = FenceState::new(current_workspace.clone(), None);
             fence.assert_accepts(unrelated_event);
             assert_eq!(fence.current_workspace, current_workspace);
-            assert_eq!(fence.switch_window_index, None);
+            assert!(fence.switch_window_indexes.is_empty());
         }
     }
 }
@@ -514,46 +524,117 @@ fn profile_switch_records_the_window_event_boundary_once() {
     let original = original_identity();
     let target = target_identity();
     let mut current = Some(original.clone());
-    let mut boundary = None;
-    let expected = switch_to_target();
+    let mut boundaries = Vec::new();
+    let expected = ExpectedSwitches::from(&switch_to_target());
     apply_workspace_event(
         &workspace_event("init", None, Some(&target)),
         Some(&expected),
-        &mut boundary,
+        &mut boundaries,
         3,
         &mut current,
     )
     .unwrap();
-    assert_eq!(boundary, None);
+    assert!(boundaries.is_empty());
     apply_workspace_event(
         &focus_event(&original, &target),
         Some(&expected),
-        &mut boundary,
+        &mut boundaries,
         5,
         &mut current,
     )
     .unwrap();
-    assert_eq!(boundary, Some(5));
+    assert_eq!(boundaries, [5]);
     apply_workspace_event(
         &focus_event(&target, &target),
         Some(&expected),
-        &mut boundary,
+        &mut boundaries,
         9,
         &mut current,
     )
     .unwrap();
-    assert_eq!(boundary, Some(5));
+    assert_eq!(boundaries, [5]);
     assert!(
         apply_workspace_event(
             &focus_event(&target, &original),
             Some(&expected),
-            &mut boundary,
+            &mut boundaries,
             10,
             &mut current
         )
         .is_err()
     );
-    assert_eq!(boundary, Some(5));
+    assert_eq!(boundaries, [5]);
+}
+
+/// A profile load from `original` through the targets "9" and "3" in that order.
+fn switches_through_target_then_elsewhere() -> ExpectedSwitches {
+    ExpectedSwitches {
+        from_id: OTHER_WORKSPACE_ID,
+        destination_names: vec!["9".into(), "3".into()],
+    }
+}
+
+#[test]
+fn sequential_switches_each_leave_the_previous_destination() {
+    let original = original_identity();
+    let target = target_identity();
+    let elsewhere = elsewhere_identity();
+    let mut fence = FenceState::with_switches(
+        Some(original.clone()),
+        Some(switches_through_target_then_elsewhere()),
+    );
+
+    fence.assert_accepts(&workspace_event("init", None, Some(&target)));
+    fence.assert_accepts(&focus_event(&original, &target));
+    assert_eq!(fence.current_workspace, Some(target.clone()));
+    fence.assert_accepts(&workspace_event("init", None, Some(&elsewhere)));
+    fence.assert_accepts(&focus_event(&target, &elsewhere));
+    assert_eq!(fence.switch_window_indexes, [0, 0]);
+    assert_eq!(fence.current_workspace, Some(elsewhere.clone()));
+
+    // Once every switch has occurred, only a refocus of the last destination is harmless.
+    fence.assert_accepts(&focus_event(&elsewhere, &elsewhere));
+    fence.assert_rejects(
+        &focus_event(&elsewhere, &target),
+        "no longer controls focus",
+    );
+}
+
+#[test]
+fn sequential_switches_reject_a_skipped_reordered_or_misdirected_switch() {
+    let original = original_identity();
+    let target = target_identity();
+    let elsewhere = elsewhere_identity();
+    let first_switch_mismatches = [
+        // Skipping the first destination.
+        focus_event(&original, &elsewhere),
+        // Arriving at the first destination from somewhere else.
+        focus_event(&elsewhere, &target),
+    ];
+    for mismatch in &first_switch_mismatches {
+        let mut fence = FenceState::with_switches(
+            Some(original.clone()),
+            Some(switches_through_target_then_elsewhere()),
+        );
+        fence.assert_rejects(mismatch, "unexpected workspace switch");
+    }
+
+    let later_switch_mismatches = [
+        // The later switch must leave the first destination, not the original origin.
+        focus_event(&original, &elsewhere),
+        // Returning to the origin is not the next destination.
+        focus_event(&target, &original),
+        // While the next switch is pending, even a refocus is unexpected.
+        focus_event(&target, &target),
+    ];
+    for mismatch in &later_switch_mismatches {
+        let mut fence = FenceState::with_switches(
+            Some(original.clone()),
+            Some(switches_through_target_then_elsewhere()),
+        );
+        fence.assert_accepts(&focus_event(&original, &target));
+        fence.assert_rejects(mismatch, "unexpected workspace switch");
+    }
 }
 
 #[test]
