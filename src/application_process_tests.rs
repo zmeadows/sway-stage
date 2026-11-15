@@ -205,14 +205,18 @@ fn exit_statuses_come_from_the_application() {
 }
 
 #[test]
-fn exec_failure_is_a_spawn_error_that_started_nothing() {
+fn start_failures_are_spawn_errors_that_started_nothing() {
     let fixture = ApplicationFixture::new("exit 0");
     let mut diagnostics = Diagnostics::for_test(fixture.path.join("last-run.log"));
-    for argv in [
-        vec!["./missing-application".into()],
-        vec!["missing-sway-stage-fixture".into()],
+    // The application's exec fails after both forks. A missing cwd fails earlier, in the
+    // intermediate, before any supervisor exists.
+    let missing_cwd = fixture.path.join("missing-directory");
+    for (argv, cwd) in [
+        (vec!["./missing-application".into()], &fixture.path),
+        (vec!["missing-sway-stage-fixture".into()], &fixture.path),
+        (vec!["./app".into()], &missing_cwd),
     ] {
-        let command = application_command(&argv, Some(&fixture.path), &BTreeMap::new()).unwrap();
+        let command = application_command(&argv, Some(cwd), &BTreeMap::new()).unwrap();
         let error = LaunchedApplication::start(command, LONG_SUPERVISION, &mut diagnostics)
             .err()
             .expect("exec fails");
@@ -256,5 +260,27 @@ fn supervision_ends_when_sway_stage_stops_listening_or_at_its_limit() {
             .contains("launch supervision ended without an exit status"),
         "{}",
         limited_fixture.log()
+    );
+}
+
+#[test]
+fn a_zero_supervision_limit_ends_supervision_at_once() {
+    // A window deadline that has already passed leaves no time to supervise. The
+    // application still starts, and the supervisor never waits for it.
+    let fixture = ApplicationFixture::new("sleep 1");
+    let (mut application, mut diagnostics) = fixture.start(Duration::ZERO);
+    let application_pid = fixture.recorded_pid();
+
+    assert_eq!(
+        record_exit_when_reported(&mut application, &mut diagnostics),
+        None
+    );
+    assert!(!has_exited(application_pid));
+    assert!(
+        fixture
+            .log()
+            .contains("launch supervision ended without an exit status"),
+        "{}",
+        fixture.log()
     );
 }
