@@ -14,10 +14,11 @@ cause a conservative stop, leaving any applications already started in place.
 
 ## Get started
 
-Requires Linux, a running Sway session with `SWAYSOCK` set, and Rust 1.89 or newer to
-build. Install the applications your layouts use. Fuzzel 1.11+ is optional for the menu;
-`notify-send` enables desktop notifications. The first public release is in preparation;
-build from source:
+Requires Linux with glibc 2.34 or newer (see
+[platform requirements](docs/SPECIFICATION.md#platform-requirements)), a running Sway
+session with `SWAYSOCK` set, and Rust 1.89 or newer to build. Install the applications
+your layouts use. Fuzzel 1.11+ is optional for the menu; `notify-send` enables desktop
+notifications. The first public release is in preparation; build from source:
 
 ```sh
 git clone https://github.com/zmeadows/sway-stage.git

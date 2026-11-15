@@ -830,5 +830,22 @@ include only nonzero exit codes or terminating signals. Process exit never short
 | Menu fails | Install Fuzzel 1.11+ and check Fuzzel's stderr/configuration; selection lists use index output. |
 | Proportions differ | Check gaps and application minimum sizes; substantial deviations are warnings. |
 
-No minimum supported Sway version or Linux architecture/libc baseline has been established.
-Release packaging and compatibility verification remain in the [roadmap](PLAN.md).
+## Platform requirements
+
+sway-stage runs only on Linux with glibc 2.34 or newer: the launch supervisor calls
+glibc's `_Fork` and `close_range`, which glibc 2.34 introduced. An older glibc refuses to
+start the executable with a missing `GLIBC_2.34` version error. Other C libraries, such as
+musl, are untested. An executable may also require newer glibc symbol versions from the
+system that built it.
+
+Complete supervision also needs `pidfd_open` (Linux 5.3) and `close_range` (Linux 5.9).
+If either call fails, the supervisor exits as soon as it has reported the application's
+PID. The application still starts outside the launch context and loading continues, but a
+window timeout can no longer report the application's exit status. This fallback follows
+from the implementation and has not been tested on an older kernel.
+
+The offline tests and the headless integration suite have run only on x86_64 Debian 13
+with glibc 2.41, Linux 6.12, Sway 1.10.1 (wlroots 0.18.2), and Foot 1.21.0. Other
+architectures, distributions, kernels, and Sway versions are unverified, and no minimum
+supported Sway version has been established. Release packaging and compatibility
+verification remain in the [roadmap](PLAN.md).
