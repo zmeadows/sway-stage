@@ -216,14 +216,17 @@ fn fixture() -> CliFixture {
 }
 
 fn run(fixture: &CliFixture, steps: Vec<Step>, remove_layouts: bool) -> Output {
-    run_transcript(fixture, steps, remove_layouts, None)
+    run_transcript(fixture, steps, remove_layouts, None, None)
 }
 
+/// `replaced_while_menu_is_open` names a file that the Fuzzel substitute overwrites with the
+/// fixture's `replacement` before it returns the menu selection.
 fn run_transcript(
     fixture: &CliFixture,
     steps: Vec<Step>,
     remove_layouts: bool,
     menu_snapshot: Option<(Value, &str)>,
+    replaced_while_menu_is_open: Option<&str>,
 ) -> Output {
     let (menu_tree, menu_selection) = match menu_snapshot {
         Some((tree, selection)) => (Some(tree), Some(selection)),
@@ -361,6 +364,9 @@ fn run_transcript(
         Some(selection) => super::menu::menu_command(fixture, selection, ""),
         None => fixture.command(),
     };
+    if let Some(replaced_path) = replaced_while_menu_is_open {
+        process.env("REPLACE_LAYOUT", fixture.path.join(replaced_path));
+    }
     process
         .env("SWAYSOCK", socket_path)
         .env("PATH", &fixture.path)
@@ -1763,7 +1769,13 @@ fn unified_menu_profiles_use_fresh_coordinator_state_and_one_diagnostics_session
         } else {
             "2\n"
         };
-        let output = run_transcript(&fixture, steps, false, Some((initial_snapshot, selection)));
+        let output = run_transcript(
+            &fixture,
+            steps,
+            false,
+            Some((initial_snapshot, selection)),
+            None,
+        );
         assert!(output.status.success(), "{output:?}");
         assert!(
             output.stdout.is_empty() && output.stderr.is_empty(),
@@ -1786,6 +1798,56 @@ fn unified_menu_profiles_use_fresh_coordinator_state_and_one_diagnostics_session
 }
 
 #[test]
+fn unified_menu_profile_loads_the_profile_validated_after_selection() {
+    let fixture = fixture();
+    super::menu::prepare_menu_fixture(&fixture);
+    fs::create_dir(fixture.path.join("profiles")).unwrap();
+    fixture.file(
+        "profiles/work.yaml",
+        "version: 1\nworkspaces: [{workspace: 3, layout: first}]\n",
+    );
+    // The substitute Fuzzel installs this valid edit while it is open.
+    fixture.file(
+        "replacement",
+        "version: 1\nworkspaces: [{workspace: 3, layout: second}]\n",
+    );
+    let initial = tree();
+    let selected = focus_workspace(&initial, 3);
+    let mut steps = vec![snapshot(&initial)];
+    steps.extend(selection_steps(&initial, &selected, 3, 90, false));
+    let (construction, _) = construction_steps(&selected, 3, 20);
+    steps.extend(construction);
+
+    // Every layout file disappears after the coordinator's first query, so construction can
+    // only use the configurations retained from that validation.
+    let output = run_transcript(
+        &fixture,
+        steps,
+        true,
+        Some((json!({}), "0\n")),
+        Some("profiles/work.yaml"),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(fixture.path.join("launches")).unwrap(),
+        "second\n"
+    );
+    let log = fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+    assert!(
+        log.contains(r#"using validated layout \"second\""#),
+        "{log}"
+    );
+    assert!(log.contains("completed 1 workspaces [(3, 103)]"), "{log}");
+    assert_eq!(
+        log.matches(r#"[profile \"work\": validation] begin"#)
+            .count(),
+        1,
+        "{log}"
+    );
+}
+
+#[test]
 fn unified_menu_profile_preflights_all_targets_before_any_selection() {
     let fixture = fixture();
     super::menu::prepare_menu_fixture(&fixture);
@@ -1797,6 +1859,7 @@ fn unified_menu_profile_preflights_all_targets_before_any_selection() {
         vec![snapshot(&initial)],
         false,
         Some((initial, "2\n")),
+        None,
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(

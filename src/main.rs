@@ -130,7 +130,10 @@ fn main() -> ExitCode {
             .map_err(|error| format!("profile check: {error}")),
         Some(CliCommand::Profile {
             command: ProfileCommand::Load { name },
-        }) => load_profile(&name, cli.profiles_dir, cli.layouts_dir),
+        }) => {
+            let prepared = profile::read_named(&name, cli.profiles_dir, cli.layouts_dir);
+            load_profile(&name, prepared)
+        }
         Some(CliCommand::Profile {
             command:
                 ProfileCommand::Capture {
@@ -239,16 +242,18 @@ fn check_profile(
     writeln!(io::stdout().lock(), "{name}: valid").map_err(|error| format!("stdout: {error}"))
 }
 
+/// One diagnostics session, which replaces the launch log, covers each profile-load attempt.
+/// Standalone loading passes its validation result, so a validation failure is reported
+/// like any other. The menu passes only the profile it validated after selection, having
+/// already reported an invalid selection without replacing the log.
 fn load_profile(
     name: &str,
-    profiles_dir: Option<PathBuf>,
-    layouts_dir: Option<PathBuf>,
+    prepared: Result<profile::PreparedProfile, String>,
 ) -> Result<(), String> {
     let mut diagnostics = Diagnostics::start("profile load");
     diagnostics.stage(format!("profile {name:?}: validation"));
     diagnostics.record(&format!("profile {name:?}; completed 0 workspaces []"));
-    let result = profile::read_named(name, profiles_dir, layouts_dir)
-        .and_then(|prepared| profile::load(&prepared, &mut diagnostics));
+    let result = prepared.and_then(|prepared| profile::load(&prepared, &mut diagnostics));
     result.map_err(|error| diagnostics.report_failure(format!("profile {name:?}: {error}")))
 }
 
@@ -378,11 +383,13 @@ fn menu(
 
     let name = match action {
         menu::MenuAction::Profile(name) => {
-            // Invalid selections are menu errors and preserve the previous launch log.
-            // load_profile then owns the entire attempt, including its fresh IPC preflight.
-            profile::read_named(&name, profiles_dir.clone(), layouts_dir.clone())
+            // Validate again: the files may have changed while Fuzzel was open. Invalid
+            // selections are menu errors and preserve the previous launch log. load_profile
+            // then loads exactly this profile and owns the attempt, including its fresh
+            // IPC preflight.
+            let prepared = profile::read_named(&name, profiles_dir, layouts_dir)
                 .map_err(|error| report_menu_failure(menu::invalid_profile(&name, Some(error))))?;
-            return load_profile(&name, profiles_dir, layouts_dir);
+            return load_profile(&name, Ok(prepared));
         }
         menu::MenuAction::CaptureProfile => {
             let snapshot = snapshot

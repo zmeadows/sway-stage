@@ -716,9 +716,10 @@ output, control characters, or anything other than one UTF-8 newline-terminated 
   primary selector.
 - **Profile:** re-read and validate the selected profile and every referenced layout before
   construction. Invalid selections, including files changed while the selector was open,
-  preserve the previous launch log. The ordinary profile-loading path then owns one
-  diagnostics session and performs its fresh whole-profile occupancy preflight and guarded
-  sequential construction. The initial menu snapshot is never a profile loading baseline:
+  preserve the previous launch log. The ordinary profile-loading path then loads exactly
+  those validated configurations without reading the files again, owns one diagnostics
+  session, and performs its fresh whole-profile occupancy preflight and guarded sequential
+  construction. The initial menu snapshot is never a profile loading baseline:
   the focused workspace may be populated and unrelated to the profile targets. Numeric and
   exact named targets retain the normal profile safety checks. Success is silent; failure
   stops the whole profile, preserves earlier and partial layouts, and reports progress with
