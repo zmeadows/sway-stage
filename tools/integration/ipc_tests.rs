@@ -181,16 +181,31 @@ fn outputs_decode_active_and_disabled_entries() {
 
 #[test]
 fn empty_workspace_layout_commands_use_native_sway_spelling() {
-    assert_eq!(InitialWorkspaceLayout::Tabbed.command(), "layout tabbed");
-    assert_eq!(
-        InitialWorkspaceLayout::Tabbed.observed_layout(),
-        Layout::Tabbed
-    );
-    assert_eq!(InitialWorkspaceLayout::Stacked.command(), "layout stacking");
-    assert_eq!(
-        InitialWorkspaceLayout::Stacked.observed_layout(),
-        Layout::Stacked
-    );
+    for (initial_layout, command, observed_layout) in [
+        (
+            InitialWorkspaceLayout::SplitH,
+            "layout splith",
+            Layout::SplitH,
+        ),
+        (
+            InitialWorkspaceLayout::SplitV,
+            "layout splitv",
+            Layout::SplitV,
+        ),
+        (
+            InitialWorkspaceLayout::Tabbed,
+            "layout tabbed",
+            Layout::Tabbed,
+        ),
+        (
+            InitialWorkspaceLayout::Stacked,
+            "layout stacking",
+            Layout::Stacked,
+        ),
+    ] {
+        assert_eq!(initial_layout.command(), command);
+        assert_eq!(initial_layout.observed_layout(), observed_layout);
+    }
 }
 
 #[test]

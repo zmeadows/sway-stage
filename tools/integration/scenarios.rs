@@ -409,6 +409,56 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
     scenarios
 }
 
+/// Foot's own app ID when no `--app-id` is given. Every window of the session round-trip
+/// keeps it, as ordinary terminals do.
+pub const FOOT_DEFAULT_APP_ID: &str = "foot";
+
+/// The session round-trip's four layouts in profile order: three Foot terminals each in a
+/// horizontal split, a vertical split, a tabbed group, and a stacked group, with the third
+/// focused and, in the tabbed and stacked groups, selected. Its windows are first opened by
+/// Sway itself on an empty workspace given `initial_workspace_layout`, so every split child
+/// has an equal share; the captured profile then reloads them through sway-stage.
+pub fn session_roundtrip_layouts(run_id: &str, foot: &str, sleep: &str) -> [Scenario; 4] {
+    use GroupLayout::{Horizontal, Stacked, Tabbed, Vertical};
+
+    let three_windows = || vec![window(1, 1), window(2, 1), window(3, 1)];
+    let workspaces = [
+        (
+            "session-splith",
+            InitialWorkspaceLayout::SplitH,
+            group(Horizontal, 1, three_windows()),
+        ),
+        (
+            "session-splitv",
+            InitialWorkspaceLayout::SplitV,
+            group(Vertical, 1, three_windows()),
+        ),
+        (
+            "session-tabbed",
+            InitialWorkspaceLayout::Tabbed,
+            group_with_active(Tabbed, 1, 3, three_windows()),
+        ),
+        (
+            "session-stacked",
+            InitialWorkspaceLayout::Stacked,
+            group_with_active(Stacked, 1, 3, three_windows()),
+        ),
+    ];
+
+    workspaces.map(|(name, initial_layout, layout)| {
+        let mut scenario = Scenario {
+            name,
+            initial_workspace_layout: Some(initial_layout),
+            layout,
+            expected_focus: "window3",
+            configured_focus: Some("window3"),
+            window_timeout_ms: WINDOW_TIMEOUT_MS,
+        };
+        use_default_foot_app_id(&mut scenario, run_id, foot, sleep);
+        scenario
+    })
+}
+
 /// One independently owned window kept outside every scenario's target workspace.
 pub fn foreign_fixture_scenario(run_id: &str, foot: &str, sleep: &str) -> Scenario {
     let mut scenario = Scenario {
@@ -469,7 +519,7 @@ fn use_unique_foot_windows(scenario: &mut Scenario, run_id: &str, foot: &str, sl
             "sway-stage-it-{run_id}-{}-{}",
             scenario.name, leaf.layout_id
         );
-        leaf.command = foot_command(foot, &app_id, None, sleep);
+        leaf.command = foot_command(foot, Some(&app_id), None, sleep);
         leaf.app_id = app_id;
     }
 }
@@ -481,16 +531,35 @@ fn use_shared_foot_app_id(scenario: &mut Scenario, run_id: &str, foot: &str, sle
     let shared_app_id = format!("sway-stage-it-{run_id}-duplicate-foot");
     for leaf in scenario.layout.leaves_mut() {
         let title = format!("{shared_app_id}-{}", leaf.layout_id);
-        leaf.command = foot_command(foot, &shared_app_id, Some(&title), sleep);
+        leaf.command = foot_command(foot, Some(&shared_app_id), Some(&title), sleep);
         leaf.app_id = shared_app_id.clone();
+        leaf.requires_process_evidence = true;
+    }
+}
+
+/// Leaves every window with Foot's default app ID, which this run's other windows never
+/// use. As with a shared app ID, a distinct literal `--title` argument per leaf, unique to
+/// the run, scenario, and leaf, is the independent launch evidence.
+fn use_default_foot_app_id(scenario: &mut Scenario, run_id: &str, foot: &str, sleep: &str) {
+    for leaf in scenario.layout.leaves_mut() {
+        let title = format!(
+            "sway-stage-it-{run_id}-{}-{}",
+            scenario.name, leaf.layout_id
+        );
+        leaf.command = foot_command(foot, None, Some(&title), sleep);
+        leaf.app_id = FOOT_DEFAULT_APP_ID.to_owned();
         leaf.requires_process_evidence = true;
     }
 }
 
 /// Foot's documented syntax is `foot [OPTIONS] command [ARGUMENTS]`. A bounded `sleep`
 /// child rather than a shell leaves nothing interactive behind after an aborted run.
-fn foot_command(foot: &str, app_id: &str, title: Option<&str>, sleep: &str) -> Vec<String> {
-    let mut command = vec![foot.to_owned(), format!("--app-id={app_id}")];
+/// Without `app_id`, Foot uses `FOOT_DEFAULT_APP_ID`.
+fn foot_command(foot: &str, app_id: Option<&str>, title: Option<&str>, sleep: &str) -> Vec<String> {
+    let mut command = vec![foot.to_owned()];
+    if let Some(app_id) = app_id {
+        command.push(format!("--app-id={app_id}"));
+    }
     if let Some(title) = title {
         command.push(format!("--title={title}"));
     }

@@ -233,6 +233,36 @@ pub fn verify_inferred_capture(
     Ok(())
 }
 
+/// Compares an inferred draft with the verified inference-disabled draft, as
+/// `verify_inferred_capture` does, for windows that keep an application's default app ID and
+/// so carry no `--app-id` to check. Each recovered command must instead be its own leaf's
+/// launch: exactly the configured literal arguments after a nonempty executable, the same
+/// rule that `/proc/PID/cmdline` ownership evidence applies, so a distinct per-leaf title
+/// identifies the window. Such a draft can be loaded unchanged.
+pub fn verify_recovered_launch_commands(
+    inferred_draft: &str,
+    default_draft: &str,
+    layout: &ConfiguredNode,
+) -> Result<(), String> {
+    let commands = inferred_commands(inferred_draft, default_draft)?;
+
+    let leaves = layout.leaves();
+    if commands.len() != leaves.len() {
+        return Err("inferred command count differs".into());
+    }
+    for (arguments, leaf) in commands.iter().zip(&leaves) {
+        let same_arguments =
+            arguments.len() == leaf.command.len() && arguments.get(1..) == leaf.command.get(1..);
+        if !same_arguments {
+            return Err(format!(
+                "inferred command does not reproduce the window's own launch: {}",
+                leaf.layout_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse command arrays and prove that normalizing only those arrays reproduces the
 /// verified ordinary draft. No recovered arguments enter diagnostics.
 fn inferred_commands(

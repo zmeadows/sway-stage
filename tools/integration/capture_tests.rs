@@ -789,3 +789,98 @@ fn outside_focus_replay_preserves_inactive_selection_and_rejects_changed_active_
     assert_ne!(omitted, draft);
     assert!(executable_capture(&omitted, &scenario, &measurements).is_err());
 }
+
+/// The session round-trip's tabbed workspace as inference-disabled capture renders it.
+fn session_tabbed_layout_and_draft() -> (Scenario, String) {
+    let [_, _, tabbed, _] = crate::scenarios::session_roundtrip_layouts(
+        RUN_ID,
+        crate::fixtures::FOOT,
+        "/usr/bin/sleep",
+    );
+    // Children of a tabbed root carry no weights, so no measured shares are needed.
+    let default_draft = crate::scenarios::expected_draft(&tabbed, &BTreeMap::new()).unwrap();
+    (tabbed, default_draft)
+}
+
+/// Fills the draft's null commands in order with flow sequences.
+fn with_recovered_commands(default_draft: &str, commands: &[Vec<String>]) -> String {
+    let mut draft = default_draft.to_owned();
+    for command in commands {
+        let filled = format!("command: {}", crate::scenarios::json_sequence(command));
+        draft = draft.replacen("command: null", &filled, 1);
+    }
+    draft
+}
+
+#[test]
+fn recovered_launch_commands_reproduce_each_window_launch() {
+    let (tabbed, default_draft) = session_tabbed_layout_and_draft();
+    let launches: Vec<Vec<String>> = tabbed
+        .layout
+        .leaves()
+        .iter()
+        .map(|leaf| leaf.command.clone())
+        .collect();
+    let inferred = with_recovered_commands(&default_draft, &launches);
+    verify_recovered_launch_commands(&inferred, &default_draft, &tabbed.layout).unwrap();
+
+    // As in process-argument ownership evidence, a wrapper may change only the executable.
+    let mut through_wrapper = launches.clone();
+    through_wrapper[1][0] = "/usr/lib/foot/foot".into();
+    let inferred = with_recovered_commands(&default_draft, &through_wrapper);
+    verify_recovered_launch_commands(&inferred, &default_draft, &tabbed.layout).unwrap();
+}
+
+#[test]
+fn recovered_launch_commands_reject_another_windows_or_altered_launch() {
+    let (tabbed, default_draft) = session_tabbed_layout_and_draft();
+    let launches: Vec<Vec<String>> = tabbed
+        .layout
+        .leaves()
+        .iter()
+        .map(|leaf| leaf.command.clone())
+        .collect();
+
+    let mut swapped = launches.clone();
+    swapped.swap(0, 2);
+    let mut extra_argument = launches.clone();
+    extra_argument[1].push("--hold".into());
+    let mut missing_argument = launches.clone();
+    missing_argument[2].pop();
+    let mut empty_executable = launches.clone();
+    empty_executable[0][0] = String::new();
+    for (commands, expected_error) in [
+        (
+            swapped,
+            "does not reproduce the window's own launch: window1",
+        ),
+        (
+            extra_argument,
+            "does not reproduce the window's own launch: window2",
+        ),
+        (
+            missing_argument,
+            "does not reproduce the window's own launch: window3",
+        ),
+        (empty_executable, "empty executable"),
+    ] {
+        let inferred = with_recovered_commands(&default_draft, &commands);
+        let error = verify_recovered_launch_commands(&inferred, &default_draft, &tabbed.layout)
+            .unwrap_err();
+        assert_contains(&error, expected_error);
+        assert!(
+            !error.contains(RUN_ID),
+            "recovered arguments must stay out of {error:?}"
+        );
+    }
+
+    // An unresolved command, or any change outside the command arrays, is refused too.
+    let unresolved = with_recovered_commands(&default_draft, &launches[..2]);
+    assert!(verify_recovered_launch_commands(&unresolved, &default_draft, &tabbed.layout).is_err());
+    let changed_selection =
+        with_recovered_commands(&default_draft, &launches).replace("active: 3", "active: 2");
+    let error =
+        verify_recovered_launch_commands(&changed_selection, &default_draft, &tabbed.layout)
+            .unwrap_err();
+    assert_contains(&error, "inference changed capture hierarchy");
+}

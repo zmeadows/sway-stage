@@ -46,6 +46,28 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// launch context for the `exec`. Presence alone is recorded, never the token itself.
 const LAUNCH_CONTEXT_EXPORTED: &str = "activation_token=present\nstartup_id=present\n";
 
+/// How the entry script starts sway-stage, and so which launch-context paths it leaves Sway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryMode {
+    /// As a keybinding does: the token in its environment, descending from the exec'd process.
+    Inherited,
+    /// The token is removed first; only process ancestry remains.
+    WithoutToken,
+    /// From a subshell that exits at once; only the token remains.
+    Detached,
+}
+
+impl EntryMode {
+    /// Selects the entry script's branch.
+    fn script_value(self) -> &'static str {
+        match self {
+            Self::Inherited => "inherited",
+            Self::WithoutToken => "without-token",
+            Self::Detached => "detached",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
     /// `sway-stage load` from a keybinding, on the focused workspace.
@@ -130,16 +152,15 @@ impl Case {
         self == Self::OccupiedOrigin
     }
 
-    /// Selects the entry script's branch.
-    fn entry_mode(self) -> &'static str {
+    pub fn entry_mode(self) -> EntryMode {
         match self {
-            Self::AncestryOnly => "without-token",
-            Self::TokenOnly => "detached",
+            Self::AncestryOnly => EntryMode::WithoutToken,
+            Self::TokenOnly => EntryMode::Detached,
             Self::LayoutLoad
             | Self::MenuLayout
             | Self::ContextInherited
             | Self::OccupiedOrigin
-            | Self::MenuProfile => "inherited",
+            | Self::MenuProfile => EntryMode::Inherited,
         }
     }
 
@@ -253,7 +274,7 @@ esac
 /// expands or splits the harness's paths or sway-stage's arguments. Only the menu cases
 /// have a `fuzzel_directory`.
 pub fn entry_script(
-    case: Case,
+    entry_mode: EntryMode,
     evidence_directory: &str,
     fuzzel_directory: Option<&str>,
     sway_stage_command: &[String],
@@ -264,7 +285,7 @@ pub fn entry_script(
         .collect();
     format!(
         "#!/bin/sh\nmode={}\nevidence={}\nfuzzel_directory={}\nset -- {}\n\n{ENTRY_SCRIPT_BODY}",
-        shell_quote(case.entry_mode()),
+        shell_quote(entry_mode.script_value()),
         shell_quote(evidence_directory),
         shell_quote(fuzzel_directory.unwrap_or_default()),
         quoted_command.join(" ")
@@ -308,7 +329,7 @@ pub fn fuzzel_substitute_script(selection: &str, evidence_directory: &str) -> St
 
 /// One literal sh word. Single quotes preserve every byte except `'` itself, which closes
 /// the quotes, adds an escaped quote, and reopens them.
-fn shell_quote(text: &str) -> String {
+pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
@@ -414,6 +435,17 @@ impl MenuEvidence {
         let selection = case
             .menu_selection()
             .expect("only menu cases have menu evidence");
+        let expected_rows = [
+            "Capture session profile…".to_owned(),
+            format!("Layout: {}", case.name()),
+            format!("Profile: {}", case.name()),
+        ];
+        self.verify_rows(&expected_rows, &selection)
+    }
+
+    /// Requires the menu's one selection prompt on the virtual output, offering exactly
+    /// `expected_rows` in order, with `selection` selected by its index.
+    pub fn verify_rows(&self, expected_rows: &[String], selection: &str) -> Result<(), String> {
         let expected_arguments = format!(
             "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output={OUTPUT_NAME}\n--prompt=> \n"
         );
@@ -424,11 +456,6 @@ impl MenuEvidence {
             ));
         }
 
-        let expected_rows = [
-            "Capture session profile…".to_owned(),
-            format!("Layout: {}", case.name()),
-            format!("Profile: {}", case.name()),
-        ];
         let observed_rows: Vec<&str> = self.rows.lines().collect();
         if observed_rows != expected_rows {
             return Err(format!(
@@ -438,8 +465,8 @@ impl MenuEvidence {
 
         let selected_index = expected_rows
             .iter()
-            .position(|row| *row == selection)
-            .expect("the case's row is offered");
+            .position(|row| row == selection)
+            .expect("the selected row is offered");
         if self.selected_index != format!("{selected_index}\n") {
             return Err(format!(
                 "menu selection differs: expected index {selected_index} ({selection:?}), observed {:?}",

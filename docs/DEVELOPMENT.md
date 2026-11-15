@@ -46,13 +46,13 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 35 scenarios
+tools/integration/run.sh                  # all 36 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
-suite order: `--filter single-window` runs one scenario and `--filter profile` the eleven
+suite order: `--filter single-window` runs one scenario and `--filter profile` the twelve
 profile scenarios. Any other argument, a missing or empty TEXT, or a filter that matches no
 scenario exits with status 2 before anything starts.
 
@@ -104,13 +104,15 @@ first command, then establishes its workspaces explicitly:
 
 | Workspace | Role |
 | --- | --- |
-| `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` starts its exec here. |
+| `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. |
 | `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
 | `3` | The second target of the successful and partial profile scenarios, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
+| `5`–`8` | The [session round-trip](#four-workspace-session-round-trip)'s workspaces, created twice in that order and removed by Sway after each cleanup. |
 
 The suite runs twenty-one standard Foot scenarios, then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
+[four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
 profile in the two-output compositor. The
 original eleven standard scenarios cover single window, horizontal/vertical pairs, uneven
@@ -365,6 +367,70 @@ workspace is empty and the fixture's workspace is capturable. The selected index
 the scenario's row. Fuzzel itself, keyboard selection, and rendering remain
 [manual checks](#manual-application-acceptance).
 
+### Four-workspace session round-trip
+
+`profile-session-roundtrip` reproduces, end to end, the workflow in which Sway's launch
+context first misplaced a profile's windows: four populated workspaces are captured into a
+profile, their windows are closed, and the profile is loaded through the menu from a
+keybinding on another workspace. It runs after the exec entry points, which keep their own
+targeted coverage.
+
+```sh
+tools/integration/run.sh --filter session-roundtrip
+```
+
+| Workspace | Group | Windows |
+| --- | --- | --- |
+| `5` | `splith` | three Foot terminals, third focused |
+| `6` | `splitv` | three Foot terminals, third focused |
+| `7` | `tabbed` | three Foot terminals, third focused and selected |
+| `8` | `stacked` | three Foot terminals, third focused and selected |
+
+Every window keeps Foot's default app ID, `foot`; ownership instead requires each window's
+`/proc/PID/cmdline` to match its own run-unique literal `--title` argument.
+
+1. **Original desktop.** From the empty primary, the harness selects each workspace in
+   turn, sets the empty workspace's layout with `layout splith`, `splitv`, `tabbed`, or
+   `stacking`, and opens its three windows one at a time with Sway's own `exec` of a
+   generated script that replaces itself with Foot. Sway arranges them; sway-stage is not
+   involved. Each workspace is verified like a loaded layout: exactly the selection's
+   workspace events (Sway removes only the empty primary), one new window per `exec`, equal
+   thirds, the third window focused, and tabbed/stacked selections on it.
+2. **Capture.** `profile capture session 5 6 7 8` runs twice into separate private
+   directories, with `--no-infer-commands` and then with inference. Neither may change the
+   observed desktop or print to stdout. Each must write exactly `session.yaml` and
+   `session-001.yaml` to `session-004.yaml`. The profile must reference those layouts in
+   that order with targets `5` to `8`, and both captures' profiles must be identical. Each
+   inference-disabled draft is compared line by line with the independently measured
+   workspace: groups, order, `app_id: foot` selectors, weights within 0.02 of the measured
+   shares, `focus: window3`, and `active: 3`. Each inferred draft must differ only in its
+   command arrays, and each recovered command must match its own window's launch after the
+   executable. `profile check` must accept the inferred profile unchanged; nothing is filled in.
+3. **Clearing.** Verified cleanup closes only the twelve owned windows, from `8` back to `5`;
+   as focus returns to each earlier workspace, Sway removes the emptied one. The harness then
+   selects the fixture's workspace `1`, and Sway removes `5`. Only `1` remains.
+4. **Reload.** As in the menu exec entry points, Sway's `exec` starts `sway-stage menu` on
+   `1` with the Fuzzel substitute, which must be offered exactly `Capture workspace layout…`,
+   `Capture session profile…`, and `Profile: session`, and selects the profile. sway-stage
+   must exit 0 with empty stdout and stderr. The workspace events must be exactly the
+   creation of each target followed by its selection, in profile order, each from the
+   previous one, with nothing removed or recreated. Each layout's three new windows must
+   appear only between its own selection and the next, and every layout but the last must
+   select its focus before the next selection. Ownership, hierarchy, order, sizing, global
+   focus on `8`, the inactive targets' selected windows, and the unchanged fixture alone on
+   `1` are checked independently. Verified cleanup again closes only the reloaded windows,
+   then the harness returns to a new primary `2`.
+
+A negative check that kept the inherited activation token in sway-stage's launches made
+the reload fail: the first reloaded window opened on `1`, and sway-stage refused it with
+`placement failure: wrong workspace`.
+
+The capture uses the `profile capture` command rather than the menu. The menu's
+`Capture session profile…` captures every populated workspace, which would include the
+fixture's workspace `1`, and its name prompt is a second prompt that the Fuzzel substitute
+refuses. Menu-driven session capture remains a
+[manual check](#manual-application-acceptance).
+
 ### Assigned-workspace refusal
 
 `assigned-workspace-refusal` checks that sway-stage still refuses a matching window that
@@ -443,7 +509,12 @@ layout and profile directories and trusted applications on disposable workspaces
    Select capture, then check name retries, collisions, Escape, private draft publication,
    and the save notification. Repeat with `--no-infer-commands` and review recovered
    arguments. The draft must retain the original hierarchy, weights, selectors, and focus
-   even when workspace or window focus changes during either prompt.
+   even when workspace or window focus changes during either prompt. Then select
+   `Capture session profile…` with several populated disposable workspaces, review the saved
+   profile and drafts, close those windows, and load the profile from the menu on another
+   workspace: every window must return to its own workspace. The headless
+   [session round-trip](#four-workspace-session-round-trip) automates this workflow with
+   `profile capture` instead of the menu's capture.
 3. With floating/fullscreen windows or unsupported containers/focus, confirm only profiles
    appear. Load a profile targeting separate empty disposable workspaces from a populated
    unrelated workspace. Check YAML order, numeric and named targets, silent success, and

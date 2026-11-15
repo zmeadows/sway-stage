@@ -146,6 +146,87 @@ fn partial_failure_accepts_no_second_target_windows_or_corrective_activity() {
     }
 }
 
+/// The session round-trip's four layouts, each launched after its own switch: the window
+/// events and each switch's boundary among them.
+fn sequential_session_events() -> ([Scenario; 4], Vec<WindowEvent>, Vec<usize>) {
+    let layouts = crate::scenarios::session_roundtrip_layouts(RUN_ID, FOOT, SLEEP);
+    let mut events = Vec::new();
+    let mut switch_indexes = Vec::new();
+    for (layout_index, layout) in layouts.iter().enumerate() {
+        switch_indexes.push(events.len());
+        events.extend(launch_events(layout, 20 + 10 * layout_index as i64));
+    }
+    (layouts, events, switch_indexes)
+}
+
+#[test]
+fn sequential_binding_gives_each_target_only_the_windows_after_its_own_switch() {
+    let (layouts, events, switch_indexes) = sequential_session_events();
+    let accepted =
+        bind_sequential_launches(&events, &switch_indexes, &layouts, &HashSet::new()).unwrap();
+    for (layout_index, accepted_windows_of_layout) in accepted.iter().enumerate() {
+        let first_id = 20 + 10 * layout_index as i64;
+        assert_eq!(
+            *accepted_windows_of_layout,
+            accepted_windows(&[
+                (first_id, "window1"),
+                (first_id + 1, "window2"),
+                (first_id + 2, "window3")
+            ])
+        );
+    }
+
+    // Every window shares Foot's default app ID, so only the boundaries tell targets apart:
+    // a shifted, missing, or reordered boundary is fatal.
+    let shifted_later = vec![0, 8, 14, 21];
+    let shifted_earlier = vec![0, 6, 14, 21];
+    let missing = vec![0, 7, 14];
+    let reordered = vec![0, 14, 7, 21];
+    let past_the_end = vec![0, 7, 14, events.len() + 1];
+    for boundaries in [
+        shifted_later,
+        shifted_earlier,
+        missing,
+        reordered,
+        past_the_end,
+    ] {
+        assert!(
+            bind_sequential_launches(&events, &boundaries, &layouts, &HashSet::new()).is_err(),
+            "{boundaries:?}"
+        );
+    }
+}
+
+#[test]
+fn sequential_binding_rejects_early_launches_reuse_and_unselected_focus() {
+    let (layouts, events, switch_indexes) = sequential_session_events();
+    let bind = |events: &[WindowEvent], switch_indexes: &[usize], preexisting: &HashSet<i64>| {
+        bind_sequential_launches(events, switch_indexes, &layouts, preexisting)
+    };
+
+    // A window before the first switch belongs to no target.
+    let (_, mut early_window, _) = sequential_session_events();
+    early_window.insert(0, window_event("new", 90, Some("foot")));
+    let shifted: Vec<usize> = switch_indexes.iter().map(|index| index + 1).collect();
+    assert!(bind(&early_window, &shifted, &HashSet::new()).is_err());
+
+    // An earlier target's window cannot be launched again for a later one.
+    let (_, mut reused, _) = sequential_session_events();
+    reused[switch_indexes[1]] = window_event("new", 20, Some("foot"));
+    assert!(bind(&reused, &switch_indexes, &HashSet::new()).is_err());
+    assert!(bind(&events, &switch_indexes, &HashSet::from([40])).is_err());
+
+    // A completed layout must have selected its own final focus before the next switch.
+    let (_, mut unselected, _) = sequential_session_events();
+    unselected[switch_indexes[2] - 1] = window_event("focus", 30, None);
+    assert!(bind(&unselected, &switch_indexes, &HashSet::new()).is_err());
+
+    // Activity of an earlier target's window during a later target's construction is fatal.
+    let (_, mut late_activity, _) = sequential_session_events();
+    late_activity.push(window_event("move", 21, None));
+    assert!(bind(&late_activity, &switch_indexes, &HashSet::new()).is_err());
+}
+
 fn empty_target() -> Snapshot {
     Snapshot {
         tree: parse_tree(desktop("splith", Vec::new(), PREEXISTING_WINDOW_ID)),
@@ -315,15 +396,35 @@ fn captured_profile_references_preserve_targets_and_ordinal_order() {
         let yaml = format!(
             "version: 1\nworkspaces:\n  - workspace: {target}\n    layout: captured-001\n  - workspace: 10\n    layout: captured-002\n"
         );
-        verify_captured_references(&yaml, primary, "10").unwrap();
+        verify_captured_references(&yaml, "captured", &[primary, "10"]).unwrap();
         for changed in [
             yaml.replace("captured-001", "wrong"),
             yaml.replace("workspace: 10", "workspace: 9"),
             yaml.replace("version: 1", "version: 2"),
         ] {
-            assert!(verify_captured_references(&changed, primary, "10").is_err());
+            assert!(verify_captured_references(&changed, "captured", &[primary, "10"]).is_err());
         }
     }
+}
+
+#[test]
+fn captured_profile_references_name_each_target_in_capture_order() {
+    let yaml = "version: 1\nworkspaces:\n  - workspace: 5\n    layout: session-001\n  \
+                - workspace: 6\n    layout: session-002\n  - workspace: 7\n    layout: \
+                session-003\n  - workspace: 8\n    layout: session-004\n";
+    let targets = ["5", "6", "7", "8"];
+    verify_captured_references(yaml, "session", &targets).unwrap();
+
+    assert!(verify_captured_references(yaml, "other", &targets).is_err());
+    assert!(verify_captured_references(yaml, "session", &["5", "6", "8", "7"]).is_err());
+    assert!(verify_captured_references(yaml, "session", &["5", "6", "7"]).is_err());
+    let swapped_layouts = yaml
+        .replace("session-003", "swap")
+        .replace("session-004", "session-003")
+        .replace("swap", "session-004");
+    assert!(verify_captured_references(&swapped_layouts, "session", &targets).is_err());
+    assert_eq!(captured_layout_name("session", 0), "session-001");
+    assert_eq!(captured_layout_name("session", 3), "session-004");
 }
 
 #[test]

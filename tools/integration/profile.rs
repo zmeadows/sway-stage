@@ -213,9 +213,14 @@ pub fn configuration(primary: &str, second: &str) -> String {
     )
 }
 
-/// Independent decoding of the two known profile references. Layout verification is
+/// Independent decoding of a captured profile: `targets` in capture order, each referencing
+/// its ordinal layout `{profile_name}-001`, `-002`, and so on. Layout verification is
 /// performed separately against measured Sway state, never through production parsing.
-pub fn verify_captured_references(yaml: &str, primary: &str, second: &str) -> Result<(), String> {
+pub fn verify_captured_references(
+    yaml: &str,
+    profile_name: &str,
+    targets: &[&str],
+) -> Result<(), String> {
     let observed: serde_json::Value =
         serde_saphyr::from_str(yaml).map_err(|_| "invalid captured profile YAML")?;
     let target = |name: &str| -> serde_json::Value {
@@ -224,17 +229,29 @@ pub fn verify_captured_references(yaml: &str, primary: &str, second: &str) -> Re
             Err(_) => serde_json::json!(name),
         }
     };
+    let expected_entries: Vec<serde_json::Value> = targets
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            serde_json::json!({
+                "workspace": target(name),
+                "layout": captured_layout_name(profile_name, index),
+            })
+        })
+        .collect();
     let expected = serde_json::json!({
         "version": 1,
-        "workspaces": [
-            {"workspace": target(primary), "layout": "captured-001"},
-            {"workspace": target(second), "layout": "captured-002"},
-        ]
+        "workspaces": expected_entries,
     });
     if observed != expected {
         return Err("captured profile targets/order/references differ".into());
     }
     Ok(())
+}
+
+/// The name `profile capture` gives the layout of the profile's entry at `entry_index`.
+pub fn captured_layout_name(profile_name: &str, entry_index: usize) -> String {
+    format!("{profile_name}-{:03}", entry_index + 1)
 }
 
 /// Existing targets keep their identity/output; missing ones may be created on any
@@ -316,19 +333,7 @@ pub fn bind_ordered_launches(
     let (first_events, second_events) = events
         .split_at_checked(switch_index)
         .ok_or("invalid profile transition boundary")?;
-    let first = bind_launches(first_events, &layouts[0].layout, preexisting)?;
-    let expected_focus = first
-        .iter()
-        .find(|(_, leaf)| leaf.as_str() == layouts[0].expected_focus)
-        .map(|(&id, _)| id);
-    let last_focus = first_events
-        .iter()
-        .rev()
-        .find(|event| event.change == WindowChange::Focus)
-        .map(|event| event.container.id);
-    if last_focus != expected_focus {
-        return Err("first profile layout did not select its final focus before switching".into());
-    }
+    let first = bind_layout_before_switch(first_events, &layouts[0], preexisting)?;
 
     let mut before_second = preexisting.clone();
     before_second.extend(first.keys());
@@ -339,6 +344,72 @@ pub fn bind_ordered_launches(
         bind_launches(second_events, &layouts[1].layout, &before_second)?
     };
     Ok([first, second])
+}
+
+/// Binds a profile load that selects every one of its targets, one segment of window events
+/// per expected switch. Nothing may launch before the first switch, each layout's windows
+/// appear only between its own switch and the next, and every layout but the last must
+/// select its final focus before the next switch. `switch_indexes` are the fence's window
+/// event boundaries, one per layout.
+pub fn bind_sequential_launches(
+    events: &[WindowEvent],
+    switch_indexes: &[usize],
+    layouts: &[Scenario],
+    preexisting: &HashSet<i64>,
+) -> Result<Vec<AcceptedWindows>, String> {
+    let boundaries_valid = switch_indexes.len() == layouts.len()
+        && switch_indexes.is_sorted()
+        && switch_indexes
+            .last()
+            .is_some_and(|&last| last <= events.len());
+    if !boundaries_valid {
+        return Err("invalid profile transition boundaries".into());
+    }
+    require_quiet(&events[..switch_indexes[0]], None)?;
+
+    let mut known_ids = preexisting.clone();
+    let mut accepted_per_layout = Vec::new();
+    for (layout_index, layout) in layouts.iter().enumerate() {
+        let segment_start = switch_indexes[layout_index];
+        let next_switch = switch_indexes.get(layout_index + 1).copied();
+        let segment_end = next_switch.unwrap_or(events.len());
+        let segment = &events[segment_start..segment_end];
+
+        let accepted = if next_switch.is_some() {
+            bind_layout_before_switch(segment, layout, &known_ids)?
+        } else {
+            bind_launches(segment, &layout.layout, &known_ids)?
+        };
+        known_ids.extend(accepted.keys());
+        accepted_per_layout.push(accepted);
+    }
+    Ok(accepted_per_layout)
+}
+
+/// Binds the launches of a layout completed before the coordinator's next switch, whose
+/// last focus event must be the layout's own final focus.
+fn bind_layout_before_switch(
+    events: &[WindowEvent],
+    layout: &Scenario,
+    preexisting: &HashSet<i64>,
+) -> Result<AcceptedWindows, String> {
+    let accepted = bind_launches(events, &layout.layout, preexisting)?;
+    let expected_focus = accepted
+        .iter()
+        .find(|(_, leaf)| leaf.as_str() == layout.expected_focus)
+        .map(|(&id, _)| id);
+    let last_focus = events
+        .iter()
+        .rev()
+        .find(|event| event.change == WindowChange::Focus)
+        .map(|event| event.container.id);
+    if last_focus != expected_focus {
+        return Err(format!(
+            "profile layout {} did not select its final focus before switching",
+            layout.name
+        ));
+    }
+    Ok(accepted)
 }
 
 /// A rename borrows the focused primary slot, never a fourth workspace. Refuse name

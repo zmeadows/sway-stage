@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 35] = [
+const SUITE_ORDER: [&str; 36] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -79,6 +79,7 @@ const SUITE_ORDER: [&str; 35] = [
     "profile-exec-token-only",
     "profile-exec-occupied-origin",
     "profile-exec-menu",
+    "profile-session-roundtrip",
     "assigned-workspace-refusal",
     "profile-cross-output",
 ];
@@ -123,8 +124,13 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-token-only",
             "profile-exec-occupied-origin",
             "profile-exec-menu",
+            "profile-session-roundtrip",
             "profile-cross-output"
         ]
+    );
+    assert_eq!(
+        select_scenarios(Some("roundtrip")).unwrap(),
+        ["capture-reload-roundtrip", "profile-session-roundtrip"]
     );
     assert_eq!(
         select_scenarios(Some("profile-exec")).unwrap(),

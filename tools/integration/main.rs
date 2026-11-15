@@ -24,6 +24,7 @@ mod preservation;
 mod process;
 mod profile;
 mod scenarios;
+mod session_roundtrip;
 
 use std::env;
 use std::ffi::OsString;

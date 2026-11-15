@@ -447,9 +447,13 @@ pub enum ScratchpadState {
     Changed,
 }
 
-/// The two empty-workspace initial conditions exercised before ordinary construction.
+/// A layout set on an empty workspace: the tabbed and stacked initial conditions exercised
+/// before ordinary construction, and each layout of the session round-trip's workspaces,
+/// whose windows Sway then arranges itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitialWorkspaceLayout {
+    SplitH,
+    SplitV,
     Tabbed,
     Stacked,
 }
@@ -457,6 +461,8 @@ pub enum InitialWorkspaceLayout {
 impl InitialWorkspaceLayout {
     pub fn command(self) -> &'static str {
         match self {
+            Self::SplitH => "layout splith",
+            Self::SplitV => "layout splitv",
             Self::Tabbed => "layout tabbed",
             Self::Stacked => "layout stacking",
         }
@@ -464,6 +470,8 @@ impl InitialWorkspaceLayout {
 
     pub fn observed_layout(self) -> Layout {
         match self {
+            Self::SplitH => Layout::SplitH,
+            Self::SplitV => Layout::SplitV,
             Self::Tabbed => Layout::Tabbed,
             Self::Stacked => Layout::Stacked,
         }

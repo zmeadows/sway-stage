@@ -20,7 +20,10 @@ fn cases_have_distinct_names_entry_points_and_entry_modes() {
             "profile-exec-menu"
         ]
     );
-    let modes: Vec<&str> = CASES.iter().map(|case| case.entry_mode()).collect();
+    let modes: Vec<&str> = CASES
+        .iter()
+        .map(|case| case.entry_mode().script_value())
+        .collect();
     assert_eq!(
         modes,
         [
@@ -127,7 +130,7 @@ fn entry_scripts_quote_every_value_and_select_one_mode() {
         "load".to_owned(),
         "profile-exec-context".to_owned(),
     ];
-    let script = entry_script(Case::TokenOnly, "/tmp/run/evidence", None, &command);
+    let script = entry_script(EntryMode::Detached, "/tmp/run/evidence", None, &command);
 
     assert!(script.starts_with(
         "#!/bin/sh\nmode='detached'\nevidence='/tmp/run/evidence'\nfuzzel_directory=''\n\
@@ -152,7 +155,7 @@ fn entry_scripts_quote_every_value_and_select_one_mode() {
 fn only_a_menu_entry_script_puts_the_fuzzel_substitute_first_on_path() {
     let command = vec!["/build/sway-stage".to_owned(), "menu".to_owned()];
     let script = entry_script(
-        Case::MenuProfile,
+        EntryMode::Inherited,
         "/tmp/run/evidence",
         Some("/tmp/run/fuzzel substitute"),
         &command,
