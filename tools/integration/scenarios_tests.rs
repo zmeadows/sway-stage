@@ -111,6 +111,16 @@ fn standard_scenarios_keep_their_structures_weights_and_focus() {
             "window3",
         ),
         (
+            "initially-splitv",
+            "h(window1@4, v(window2@3, window3@2)@3, window4@3)",
+            "window3",
+        ),
+        (
+            "initially-splith",
+            "v(h(window1@2, h(window2@2, v(window3@3, window4@2)@3)@3)@3, window5@2)",
+            "window4",
+        ),
+        (
             "outside-focus-capture-reload",
             "v(t(s(window1), h(window2@3, window3@2))@3, window4@2)",
             "window4",
@@ -433,14 +443,19 @@ fn native_group_yaml_uses_parent_dependent_weights_and_no_root_weight() {
 }
 
 #[test]
-fn only_initial_layout_cases_prepare_layout_and_reuse_mixed_configuration() {
+fn only_initial_layout_cases_prepare_layout_and_reuse_their_base_configuration() {
     let standard = standard_scenarios(RUN_ID, FOOT, SLEEP);
-    let mixed = standard_scenario("mixed-native-nesting");
-    assert_eq!(standard.len(), 21);
+    assert_eq!(standard.len(), 23);
+    let initial_layout_names = [
+        "initially-tabbed",
+        "initially-stacked",
+        "initially-splitv",
+        "initially-splith",
+    ];
     assert!(
         standard
             .iter()
-            .filter(|scenario| !matches!(scenario.name, "initially-tabbed" | "initially-stacked"))
+            .filter(|scenario| !initial_layout_names.contains(&scenario.name))
             .all(|scenario| scenario.initial_workspace_layout.is_none())
     );
     assert!(
@@ -448,24 +463,51 @@ fn only_initial_layout_cases_prepare_layout_and_reuse_mixed_configuration() {
             .initial_workspace_layout
             .is_none()
     );
-    for (scenario, expected) in standard[17..19].iter().zip([
-        InitialWorkspaceLayout::Tabbed,
-        InitialWorkspaceLayout::Stacked,
-    ]) {
-        assert_eq!(scenario.initial_workspace_layout, Some(expected));
-        assert_eq!(scenario.configured_focus, mixed.configured_focus);
-        assert_eq!(scenario.expected_focus, mixed.expected_focus);
+
+    let expectations = [
+        (
+            InitialWorkspaceLayout::Tabbed,
+            "mixed-native-nesting",
+            GroupLayout::Horizontal,
+        ),
+        (
+            InitialWorkspaceLayout::Stacked,
+            "mixed-native-nesting",
+            GroupLayout::Horizontal,
+        ),
+        (
+            InitialWorkspaceLayout::SplitV,
+            "mixed-nesting",
+            GroupLayout::Horizontal,
+        ),
+        (
+            InitialWorkspaceLayout::SplitH,
+            "deep-nesting",
+            GroupLayout::Vertical,
+        ),
+    ];
+    for (scenario, (initial_layout, base_name, root_layout)) in
+        standard[17..21].iter().zip(expectations)
+    {
+        let base = standard_scenario(base_name);
+        assert_eq!(scenario.initial_workspace_layout, Some(initial_layout));
+        assert_eq!(scenario.configured_focus, base.configured_focus);
+        assert_eq!(scenario.expected_focus, base.expected_focus);
         assert_eq!(
             configured_layout_outline(&scenario.layout),
-            configured_layout_outline(&mixed.layout)
+            configured_layout_outline(&base.layout)
         );
-        // Split-root construction returns the workspace to an ordinary split layout.
-        assert!(matches!(
-            scenario.layout,
-            ConfiguredNode::Group {
-                layout: GroupLayout::Horizontal,
-                ..
-            }
-        ));
+        // Split-root construction returns the workspace to an ordinary split layout, and
+        // never the one that the workspace started with.
+        let ConfiguredNode::Group { layout, .. } = &scenario.layout else {
+            panic!("{} has a group root", scenario.name);
+        };
+        assert_eq!(*layout, root_layout, "{}", scenario.name);
+        assert_ne!(
+            layout.sway_layout(),
+            initial_layout.observed_layout(),
+            "{}",
+            scenario.name
+        );
     }
 }

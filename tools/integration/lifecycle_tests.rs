@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 37] = [
+const SUITE_ORDER: [&str; 41] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -65,8 +65,12 @@ const SUITE_ORDER: [&str; 37] = [
     "mixed-capture-reload",
     "initially-tabbed",
     "initially-stacked",
+    "initially-splitv",
+    "initially-splith",
     "outside-focus-capture-reload",
     "duplicate-foot-ids",
+    "layout-partial-failure",
+    "layout-missing-executable",
     "profile-success",
     "profile-occupied-refusal",
     "profile-partial-failure",
@@ -160,6 +164,14 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     assert_eq!(
         select_scenarios(Some("exec-menu")).unwrap(),
         ["layout-exec-menu", "profile-exec-menu"]
+    );
+    assert_eq!(
+        select_scenarios(Some("partial-failure")).unwrap(),
+        ["layout-partial-failure", "profile-partial-failure"]
+    );
+    assert_eq!(
+        select_scenarios(Some("initially-split")).unwrap(),
+        ["initially-splitv", "initially-splith"]
     );
     assert_eq!(
         select_scenarios(Some("refusal")).unwrap(),

@@ -447,8 +447,8 @@ pub enum ScratchpadState {
     Changed,
 }
 
-/// A layout set on an empty workspace: the tabbed and stacked initial conditions exercised
-/// before ordinary construction, and each layout of the session round-trip's workspaces,
+/// A layout set on an empty workspace: the initial conditions exercised before ordinary
+/// construction, and each layout of the session round-trip's workspaces,
 /// whose windows Sway then arranges itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitialWorkspaceLayout {

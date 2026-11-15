@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 37 scenarios
+tools/integration/run.sh                  # all 41 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -128,12 +128,13 @@ first command, then establishes its workspaces explicitly:
 | --- | --- |
 | `0` | The second target of `profile-workspace-zero`, created and removed like `3`. |
 | `1` | The compositor's initial workspace. The foreign fixture loads here and stays for the whole run. `profile-exec-occupied-origin` and the reload of `profile-session-roundtrip` start their exec here. |
-| `2` | Created by one fenced switch from `1`. Every standard scenario, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
+| `2` | Created by one fenced switch from `1`. Every standard scenario and failing standalone load, and the first target of every profile scenario, runs here; `profile-named-success` temporarily renames it. |
 | `3` | The second target of the successful and partial profile scenarios, and the only target of the exec'd profile scenarios. Each profile load creates it, and Sway removes it once the run returns to `2`. `profile-occupied-refusal` targets the occupied workspace `1` instead, and `profile-workspace-zero` targets `0`. |
 | `4` | Created by Sway for the window of `assigned-workspace-refusal` under an `assign` rule, and removed after that window's cleanup. |
 | `5`–`8` | The [session round-trip](#four-workspace-session-round-trip)'s workspaces, created twice in that order and removed by Sway after each cleanup. |
 
-The suite runs twenty-one standard Foot scenarios, then the profile scenarios, the
+The suite runs twenty-three standard Foot scenarios, the
+[failing standalone loads](#failing-standalone-loads), then the profile scenarios, the
 [Sway exec entry points](#sway-exec-entry-points), the
 [four-workspace session round-trip](#four-workspace-session-round-trip), the
 [assigned-workspace refusal](#assigned-workspace-refusal), and finally the cross-output
@@ -142,8 +143,9 @@ original eleven standard scenarios cover single window, horizontal/vertical pair
 siblings, mixed nesting, deep nesting (including same-axis groups), sibling nested groups,
 process execution, default final focus, occupied-workspace refusal, and capture/reload
 round-tripping. Each verifies raw-tree identity, order, hierarchy, sizing, final focus,
-capture, and guarded cleanup. The nine native-group additions are listed below; the
-twenty-first, `duplicate-foot-ids`, gives two windows one shared app ID (described below).
+capture, and guarded cleanup. The nine native-group additions and the two opposite-orientation
+cases are listed below; the last, `duplicate-foot-ids`, gives two windows one shared app ID
+(described below).
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -155,19 +157,33 @@ twenty-first, `duplicate-foot-ids`, gives two windows one shared app ID (describ
 | `mixed-capture-reload` | Vertical split containing tabs, a singleton stack, and a weighted horizontal split; capture and replay with interior focus. |
 | `initially-tabbed` | Load `mixed-native-nesting` after establishing an empty tabbed workspace. |
 | `initially-stacked` | The same mixed hierarchy after establishing an empty stacked workspace. |
+| `initially-splitv` | Load the `splith`-rooted `mixed-nesting` after establishing an empty `splitv` workspace. |
+| `initially-splith` | Load the `splitv`-rooted `deep-nesting` after establishing an empty `splith` workspace. |
 | `outside-focus-capture-reload` | Capture/reload with a non-first tab selected while global focus stays in an unrelated split branch. |
 
-The `initially-tabbed` and `initially-stacked` cases recheck the selected target's identity,
-focus, output, and emptiness, apply `layout tabbed` or `layout stacking`, check the reply,
-then require a fresh fenced tree to report `tabbed` or `stacked` while still empty. Unexpected
+The four `initially-*` cases recheck the selected target's identity, focus, output, and
+emptiness, apply `layout tabbed`, `layout stacking`, `layout splitv`, or `layout splith`,
+check the reply, then require a fresh fenced tree to report that layout while still empty;
+neither output geometry nor Sway's default orientation is assumed. Unexpected
 workspace/window activity fails preparation without a load; observation history is retained.
-Both reuse ordinary hierarchy, sizing, selection, capture, preservation, and success-only
-cleanup checks. Their requested split root leaves an ordinary split workspace after success;
+All four reuse ordinary hierarchy, sizing, selection, capture, preservation, and
+success-only cleanup checks. Their requested split root leaves an ordinary split workspace after success;
 no layout reset or placeholder windows are used. Sway's
 [`layout` implementation](https://github.com/swaywm/sway/blob/master/sway/commands/layout.c)
 updates the empty workspace directly.
 
 Single-window, horizontal-pair, and duplicate-foot-ids cases also check inferred commands.
+
+#### Failing standalone loads
+
+Two standalone loads on the empty, focused primary must fail, and count as passes only after
+independent verification. Both record launches through the profile scenarios' launch
+recorder and allow no workspace event:
+
+| Scenario | Independent expectations |
+| --- | --- |
+| `layout-partial-failure` | Three windows with a 5000 ms window timeout; the second runs `sleep 0`, which opens no window. Require exit 1 with the second window's `window timeout` and `stopped without cleanup or relaunch`; launch records for exactly the first two windows; and exactly one new window, the first, still tiled, focused, owned, and unmoved on the primary, with an unchanged foreign fixture. Verified cleanup then closes only that window. |
+| `layout-missing-executable` | Two windows; the first runs an absolute path inside the case's new private directory, checked to be absent, with no recorder or shell in front of it. Require exit 1 with the first window's `spawn application` diagnostic, neither `window timeout` nor the stop advice that follows any started application, an empty launch record (the second window never launches), and no window or workspace event and an unchanged observed desktop, so there is nothing to clean up. |
 
 Expected profile failures count as passes only after independent verification:
 

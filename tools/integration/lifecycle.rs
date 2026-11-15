@@ -42,7 +42,7 @@ use crate::scenarios::{
     foreign_fixture_scenario, session_roundtrip_layouts, standard_scenarios,
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
-use crate::{launch_context, process, profile};
+use crate::{launch_context, load_failure, process, profile};
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -64,14 +64,15 @@ const ASSIGNED_WORKSPACE_SCENARIO: &str = "assigned-workspace-refusal";
 /// Created by Sway for that window alone, and removed after its cleanup.
 const ASSIGNED_WORKSPACE: &str = "4";
 
-/// Every scenario in suite order: the standard scenarios, the profile cases, the Sway exec
-/// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
-/// session's cross-output profile.
+/// Every scenario in suite order: the standard scenarios, the failing standalone loads, the
+/// profile cases, the Sway exec entry points, the session round-trip, the assigned-workspace
+/// refusal, then the two-output session's cross-output profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
 
     let mut names: Vec<&'static str> = standard.iter().map(|scenario| scenario.name).collect();
+    names.extend(load_failure::CASES.iter().map(|case| case.name()));
     names.extend(profile::CASES.iter().map(|case| case.name()));
     names.extend(launch_context::CASES.iter().map(|case| case.name()));
     names.push(session_roundtrip::SCENARIO);
@@ -367,6 +368,12 @@ impl Harness {
             self.run_scenario(&directory, &target_baseline)?;
         }
         self.current_scenario = None;
+
+        for case in load_failure::CASES {
+            if selected.contains(&case.name()) {
+                self.run_load_failure(case, &directory)?;
+            }
+        }
 
         for case in profile::CASES {
             if !selected.contains(&case.name()) {
@@ -1672,6 +1679,149 @@ impl Harness {
         Ok(())
     }
 
+    /// Loads a layout on the empty, focused primary that sway-stage must fail to construct.
+    /// The failure counts only after sway-stage's report, the launch record, and the desktop
+    /// are verified independently: any window it accepted stays where it opened, and nothing
+    /// else changed. Verified cleanup then closes only that window.
+    fn run_load_failure(
+        &mut self,
+        case: load_failure::Case,
+        directory: &TemporaryConfigurations,
+    ) -> Result<(), String> {
+        let name = case.name();
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        // Inside this case's new private directory, so no installed program can be found
+        // there, whatever the host provides.
+        let missing_executable_path = files.path.join(load_failure::MISSING_EXECUTABLE_FILE_NAME);
+        match fs::symlink_metadata(&missing_executable_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err("the missing executable's private path exists".into()),
+        }
+        let failing = load_failure::failing_load(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+            utf8_path(&missing_executable_path)?,
+        );
+        // `check` validates the configuration only; it never looks for the executable.
+        directory.write(name, &configuration_yaml(&failing.layout))?;
+        check_configuration(&self.binary, &directory.path, name, &self.stage)?;
+
+        self.stage = format!("{name}: fresh workspace baseline");
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let primary = self
+            .primary
+            .clone()
+            .expect("primary selected before scenarios");
+        if before.focused_workspace_id != primary.id {
+            return Err("the failing load must start on the focused primary".into());
+        }
+        require_empty(before.focused_workspace())?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&before, fixture, fixture_signature)?;
+        let foreign = ForeignWindows::record(&before, primary.id)?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        let workspace_revision = self.events.workspace_revision();
+
+        self.stage = format!("{name}: load expected to fail");
+        process::check_interruption()?;
+        let mut load = configured_command(&self.binary, &directory.path, "load", name);
+        self.sway.select_socket(&mut load);
+        let completed = process::run_with_status(load, &self.stage, load_timeout(&failing.layout))?;
+        process::check_interruption()?;
+        let loaded = snapshot(&self.sway, &mut self.events, None)?;
+
+        self.stage = format!("{name}: independent verification");
+        load_failure::verify_failure_report(case, &completed)?;
+        // Every snapshot already requires the primary to stay focused. Nothing may create,
+        // select, or remove a workspace either.
+        profile::verify_workspace_events(&loaded.workspace_events, &[])?;
+        foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+        let observed_record = match fs::read_to_string(&launch_record_path) {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read launch record: {error}")),
+        };
+        if observed_record != failing.expected_launch_record {
+            return Err(format!(
+                "launch order/count differs: expected {:?}, observed {observed_record:?}",
+                failing.expected_launch_record
+            ));
+        }
+
+        let Some(accepted_part) = &failing.accepted_part else {
+            // Nothing started, so nothing anywhere may differ from the baseline.
+            verify_unchanged_desktop(
+                &before,
+                &loaded,
+                workspace_revision != self.events.workspace_revision(),
+            )?;
+            println!("      the spawn failed before any launch; the desktop is unchanged");
+            self.passed += 1;
+            println!("PASS  {name} (independent verification; nothing to clean up)");
+            return Ok(());
+        };
+
+        // The accepted window is the only new window: neither moved, closed, replaced, nor
+        // launched again, and still tiled and focused where it opened.
+        let accepted = bind_launches(&loaded.window_events, &accepted_part.layout, &preexisting)?;
+        verify_ownership(
+            &loaded.tree,
+            primary.id,
+            &accepted_part.layout,
+            &preexisting,
+            &accepted,
+        )?;
+        verify_layout(loaded.focused_workspace(), accepted_part, &accepted)?;
+        let first_window_id = *accepted
+            .keys()
+            .next()
+            .expect("a one-window accepted part binds exactly one launch");
+        println!(
+            "      window1 id={first_window_id} stayed open on the primary; window2 opened no \
+             window; window3 never launched"
+        );
+
+        // Only an independently verified failure enters cleanup, which the harness performs;
+        // sway-stage left the window in place.
+        self.stage = format!("{name}: verified cleanup");
+        let context = CleanupContext {
+            target: &primary,
+            layout: &accepted_part.layout,
+            preexisting_ids: &preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &accepted,
+            signature(loaded.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
     fn run_named_profile(&mut self, directory: &TemporaryConfigurations) -> Result<(), String> {
         let original_name = self
             .primary
@@ -2816,7 +2966,7 @@ fn verify_unchanged_desktop(
         || signature(&before.tree) != signature(&after.tree)
         || before.focused_workspace_id != after.focused_workspace_id
     {
-        return Err("occupied refusal changed desktop state or workspace event history".into());
+        return Err("the refused load changed desktop state or workspace event history".into());
     }
     Ok(())
 }

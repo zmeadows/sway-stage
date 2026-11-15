@@ -124,7 +124,7 @@ impl ConfiguredNode {
         }
     }
 
-    fn leaves_mut(&mut self) -> Vec<&mut ConfiguredWindow> {
+    pub fn leaves_mut(&mut self) -> Vec<&mut ConfiguredWindow> {
         match self {
             ConfiguredNode::Window(window) => vec![window],
             ConfiguredNode::Group { children, .. } => children
@@ -360,18 +360,36 @@ pub fn standard_scenarios(run_id: &str, foot: &str, sleep: &str) -> Vec<Scenario
         scenarios.push(scenario);
     }
 
-    // Keep the original scenarios in order. Both additions build the same split-root
-    // layout, so successful construction/cleanup leaves no special initial state to reset.
-    let mixed = scenarios
-        .iter()
-        .find(|scenario| scenario.name == "mixed-native-nesting")
-        .expect("standard scenarios include mixed native nesting")
-        .clone();
-    for (name, initial_layout) in [
-        ("initially-tabbed", InitialWorkspaceLayout::Tabbed),
-        ("initially-stacked", InitialWorkspaceLayout::Stacked),
+    // Keep the original scenarios in order. Each addition builds a split-root layout, so
+    // successful construction/cleanup leaves no special initial state to reset. The split
+    // cases start from the orientation opposite to the layout's root split.
+    for (name, initial_layout, base_name) in [
+        (
+            "initially-tabbed",
+            InitialWorkspaceLayout::Tabbed,
+            "mixed-native-nesting",
+        ),
+        (
+            "initially-stacked",
+            InitialWorkspaceLayout::Stacked,
+            "mixed-native-nesting",
+        ),
+        (
+            "initially-splitv",
+            InitialWorkspaceLayout::SplitV,
+            "mixed-nesting",
+        ),
+        (
+            "initially-splith",
+            InitialWorkspaceLayout::SplitH,
+            "deep-nesting",
+        ),
     ] {
-        let mut scenario = mixed.clone();
+        let mut scenario = scenarios
+            .iter()
+            .find(|scenario| scenario.name == base_name)
+            .expect("standard scenarios include each initial-layout base")
+            .clone();
         scenario.name = name;
         scenario.initial_workspace_layout = Some(initial_layout);
         use_unique_foot_windows(&mut scenario, run_id, foot, sleep);

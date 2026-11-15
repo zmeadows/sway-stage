@@ -18,6 +18,7 @@ mod launch_context;
 mod launcher;
 mod layout;
 mod lifecycle;
+mod load_failure;
 mod observation;
 mod ownership;
 mod preservation;
