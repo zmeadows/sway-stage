@@ -34,3 +34,44 @@ jobs:
         uses: dtolnay/rust-toolchain@1.89.0
       - name: Check Rust 1.89 compatibility
         run: cargo +1.89.0 check --locked --all-targets
+
+  integration:
+    # Not ubuntu-24.04: its Sway 1.9 omits the `floating` and `scratchpad_state` tree fields
+    # that the harness requires as evidence for every foreign window. Sway 1.10 added them.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # setpriv (util-linux), sleep, and /bin/sh are already part of the base system.
+      - name: Install Sway and Foot
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends sway foot
+          sway --version
+          foot --version
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run headless integration suite
+        # Shorter than the job, so that a hang still fails this step and uploads diagnostics.
+        timeout-minutes: 20
+        env:
+          # Where the harness creates its private session directories, collected below.
+          TMPDIR: /tmp
+        run: tools/integration/run.sh
+      - name: Upload preserved harness diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-diagnostics-attempt-${{ github.run_attempt }}
+          # Only the files the harness names in its failure report, never the sockets or the
+          # rest of the private home directory. `.local` makes the launch log a hidden path.
+          path: |
+            /tmp/sway-stage-headless-*/sway.config
+            /tmp/sway-stage-headless-*/sway.log
+            /tmp/sway-stage-headless-*/final-tree.json
+            /tmp/sway-stage-headless-*/home/.local/state/sway-stage/last-run.log
+            /tmp/sway-stage-headless-*/tmp/sway-stage-integration-*/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

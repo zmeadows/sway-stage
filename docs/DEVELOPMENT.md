@@ -97,6 +97,28 @@ and no input devices or desktop services. Other applications, physical outputs, 
 keybindings, and visual rendering need the occasional user-run checks under
 [manual application acceptance](#manual-application-acceptance).
 
+### Continuous integration
+
+On every push to `main` and every pull request against it, the `integration` job in
+`.github/workflows/ci.yml` runs the complete suite with `tools/integration/run.sh`, beside
+and independent of the offline-check job. It uses GitHub's `ubuntu-26.04` runner and installs
+only the `sway` and `foot` packages, without recommended packages; `setpriv`, `sleep`, and
+`/bin/sh` come with the base system, and Rust is the current stable toolchain. Ubuntu 24.04
+cannot run the suite: its Sway 1.9 omits the `floating` and `scratchpad_state` tree fields
+that the harness requires. The runner has no GPU, and the harness still leaves renderer
+selection to wlroots.
+
+The job fails whenever `run.sh` exits nonzero; its log holds the suite's usual output,
+including each `PASS` and `FAIL` line. The suite step is limited to 20 minutes and the job
+to 30. After a failure, including a timed-out suite step, the run's
+`integration-diagnostics-attempt-N` artifact (kept 14 days) contains, for each preserved
+session directory, `sway.config`, `sway.log`, `final-tree.json`,
+`home/.local/state/sway-stage/last-run.log`, and `tmp/sway-stage-integration-*/`, and
+nothing else from the runner. Download it from the run's summary page or with
+`gh run download RUN_ID --name integration-diagnostics-attempt-1`, and read it as described
+above. Use `tools/integration/run.sh` locally to reproduce or iterate; like a local run, a
+passing CI run is headless evidence only.
+
 ### Scenarios
 
 The runner requires a fresh compositor (only workspace `1`, focused and empty) before its

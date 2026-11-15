@@ -8,8 +8,9 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   headers against the installed Sway version, following the developer guide's
   native-group visual check.
 - **Final CI and repository audit.** Confirm Linux CI covers the required offline checks
-  and locked MSRV build; review repository contents, dependencies, licensing, and release
-  metadata for public distribution.
+  and locked MSRV build, and that the headless integration job passes on GitHub's hosted
+  runner; review repository contents, dependencies, licensing, and release metadata for
+  public distribution.
 - **Release packaging and distribution.** Produce reproducible tagged Linux archives and
   checksums, reusing CI checks. Start with x86_64; document the architecture/libc baseline
   demonstrated by build and run verification. Do not claim static linking or untested
