@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 53] = [
+const SUITE_ORDER: [&str; 58] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -98,6 +98,11 @@ const SUITE_ORDER: [&str; 53] = [
     "profile-exec-menu",
     "profile-session-roundtrip",
     "assigned-workspace-refusal",
+    "profile-output-mismatch-refusal",
+    "profile-output-unavailable-refusal",
+    "profile-created-output-mismatch",
+    "profile-later-created-output-mismatch",
+    "profile-existing-other-output",
     "profile-cross-output",
 ];
 
@@ -148,6 +153,11 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-exec-occupied-origin",
             "profile-exec-menu",
             "profile-session-roundtrip",
+            "profile-output-mismatch-refusal",
+            "profile-output-unavailable-refusal",
+            "profile-created-output-mismatch",
+            "profile-later-created-output-mismatch",
+            "profile-existing-other-output",
             "profile-cross-output"
         ]
     );
@@ -222,7 +232,9 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "layout-floating-refusal",
             "profile-floating-refusal",
             "profile-occupied-refusal",
-            "assigned-workspace-refusal"
+            "assigned-workspace-refusal",
+            "profile-output-mismatch-refusal",
+            "profile-output-unavailable-refusal"
         ]
     );
 
@@ -234,19 +246,51 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     }
 }
 
+/// The two-output session's scenarios, in suite order: the output-expectation profiles, then
+/// the cross-output profile, which removes the second output's initial workspace.
+const TWO_OUTPUT_ORDER: [&str; 6] = [
+    "profile-output-mismatch-refusal",
+    "profile-output-unavailable-refusal",
+    "profile-created-output-mismatch",
+    "profile-later-created-output-mismatch",
+    "profile-existing-other-output",
+    "profile-cross-output",
+];
+
 #[test]
-fn only_the_cross_output_profile_needs_the_two_output_session() {
+fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
     for name in SUITE_ORDER {
-        let expected = if name == "profile-cross-output" {
+        let expected = if TWO_OUTPUT_ORDER.contains(&name) {
             OutputSetup::TwoOutputs
         } else {
             OutputSetup::OneOutput
         };
         assert_eq!(output_setup(name), expected, "{name}");
     }
+
+    // The two-output scenarios end the suite, the cross-output profile last.
+    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 6..], TWO_OUTPUT_ORDER);
     assert_eq!(
         select_scenarios(Some("cross-output")).unwrap(),
         ["profile-cross-output"]
+    );
+    assert_eq!(select_scenarios(Some("output")).unwrap(), TWO_OUTPUT_ORDER);
+    // A filter can select several two-output scenarios and nothing from the other session.
+    assert_eq!(
+        select_scenarios(Some("output-mismatch")).unwrap(),
+        [
+            "profile-output-mismatch-refusal",
+            "profile-created-output-mismatch",
+            "profile-later-created-output-mismatch"
+        ]
+    );
+    assert_eq!(
+        select_scenarios(Some("output-unavailable")).unwrap(),
+        ["profile-output-unavailable-refusal"]
+    );
+    assert_eq!(
+        select_scenarios(Some("existing-other-output")).unwrap(),
+        ["profile-existing-other-output"]
     );
 }
 

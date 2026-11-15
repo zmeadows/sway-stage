@@ -758,6 +758,52 @@ impl TwoOutputBaseline {
         })
     }
 
+    /// Requires `workspace_id` on the output named `output_name`, which still has the
+    /// container identity this baseline recorded for it.
+    pub fn require_on_output(
+        &self,
+        observed: &Snapshot,
+        workspace_id: i64,
+        output_name: &str,
+    ) -> Result<(), String> {
+        let expected_output = match output_name {
+            OUTPUT_NAME => &self.fixture_output,
+            SECOND_OUTPUT_NAME => &self.second_output,
+            _ => return Err(format!("no baseline output is named {output_name}")),
+        };
+        if output_ancestry(&observed.tree, workspace_id)? != *expected_output {
+            return Err(format!(
+                "workspace id={workspace_id} is not on {output_name}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Activity on the first output left the second output's initial workspace in place:
+    /// the same identity, still empty, and still shown there.
+    pub fn require_second_output_workspace_kept(
+        &self,
+        observed: &Snapshot,
+        outputs: &[Output],
+    ) -> Result<(), String> {
+        let kept = Target::record(observed, SECOND_OUTPUT_INITIAL_WORKSPACE)?
+            .ok_or("the second output's initial workspace disappeared")?;
+        let kept_node = kept.verify(observed)?;
+        if kept.workspace != self.second_output_workspace
+            || kept.output != self.second_output
+            || !kept_node.nodes.is_empty()
+            || !kept_node.floating_nodes.is_empty()
+            || !output_shows(outputs, SECOND_OUTPUT_NAME, SECOND_OUTPUT_INITIAL_WORKSPACE)
+        {
+            return Err(format!(
+                "the second output's initial workspace id={} changed identity, output, \
+                 occupancy, or visibility",
+                self.second_output_workspace.id
+            ));
+        }
+        Ok(())
+    }
+
     /// The cross-output profile's result: the second output's initial workspace is gone,
     /// the created target is focused on the second output, and the fixture workspace is
     /// still on the first.

@@ -1017,3 +1017,76 @@ fn cross_output_result_requires_removal_placement_focus_and_an_unmoved_fixture()
             .is_err()
     );
 }
+
+#[test]
+fn two_output_baseline_names_each_output_and_keeps_the_second_outputs_workspace() {
+    let before = cross_output_before();
+    let outputs = two_output_outputs();
+    let baseline = TwoOutputBaseline::record(
+        &before,
+        &outputs,
+        &fixture_workspace(),
+        &second_output_workspace(),
+    )
+    .unwrap();
+
+    baseline
+        .require_on_output(&before, OTHER_WORKSPACE_ID, "HEADLESS-1")
+        .unwrap();
+    baseline
+        .require_on_output(&before, SECOND_OUTPUT_WORKSPACE_ID, "HEADLESS-2")
+        .unwrap();
+    for (workspace_id, output_name) in [
+        (OTHER_WORKSPACE_ID, "HEADLESS-2"),
+        (SECOND_OUTPUT_WORKSPACE_ID, "HEADLESS-1"),
+        (OTHER_WORKSPACE_ID, "HEADLESS-9"),
+    ] {
+        assert!(
+            baseline
+                .require_on_output(&before, workspace_id, output_name)
+                .is_err(),
+            "{workspace_id} on {output_name}"
+        );
+    }
+    baseline
+        .require_second_output_workspace_kept(&before, &outputs)
+        .unwrap();
+
+    let mut occupied = cross_output_before();
+    occupied.tree.nodes[2].nodes[0].nodes = vec![parse_tree(wayland_window(
+        41,
+        "other",
+        crate::fixtures::rect(0, 0, 10, 10),
+    ))];
+    assert!(
+        baseline
+            .require_second_output_workspace_kept(&occupied, &outputs)
+            .is_err()
+    );
+
+    let mut hidden = two_output_outputs();
+    hidden[1].current_workspace = Some("3".into());
+    assert!(
+        baseline
+            .require_second_output_workspace_kept(&before, &hidden)
+            .is_err()
+    );
+
+    // The cross-output profile's result: the initial workspace is gone.
+    assert!(
+        baseline
+            .require_second_output_workspace_kept(&cross_output_loaded(false), &outputs)
+            .unwrap_err()
+            .contains("disappeared")
+    );
+
+    // The same name with another identity.
+    let mut replaced = cross_output_before();
+    replaced.workspaces[1].id = CREATED_WORKSPACE_ID;
+    replaced.tree.nodes[2].nodes[0].id = CREATED_WORKSPACE_ID;
+    assert!(
+        baseline
+            .require_second_output_workspace_kept(&replaced, &outputs)
+            .is_err()
+    );
+}
