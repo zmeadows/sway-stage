@@ -45,8 +45,8 @@ use crate::scenarios::{
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
 use crate::{
-    floating_refusal, held_launch, interference, launch_context, load_failure, output_expectation,
-    process, profile,
+    alternating_profile, floating_refusal, held_launch, interference, launch_context, load_failure,
+    output_expectation, process, profile,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -75,7 +75,8 @@ const ASSIGNED_WORKSPACE: &str = "4";
 /// floating-occupancy refusals, the interfered loads, the held-launch interference, the
 /// interfered profiles, the profile cases, the sequentially verified profiles, the Sway exec
 /// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
-/// session's output-expectation profiles and its cross-output profile.
+/// session's output-expectation profiles, its alternating profile, and its cross-output
+/// profile.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -93,6 +94,7 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.push(session_roundtrip::SCENARIO);
     names.push(ASSIGNED_WORKSPACE_SCENARIO);
     names.extend(output_expectation::CASES.iter().map(|case| case.name()));
+    names.push(alternating_profile::SCENARIO);
     names.push(profile::CROSS_OUTPUT_SCENARIO);
     names
 }
@@ -102,7 +104,10 @@ pub fn output_setup(scenario_name: &str) -> OutputSetup {
     let expects_outputs = output_expectation::CASES
         .iter()
         .any(|case| case.name() == scenario_name);
-    if expects_outputs || scenario_name == profile::CROSS_OUTPUT_SCENARIO {
+    let needs_two_outputs = expects_outputs
+        || scenario_name == alternating_profile::SCENARIO
+        || scenario_name == profile::CROSS_OUTPUT_SCENARIO;
+    if needs_two_outputs {
         OutputSetup::TwoOutputs
     } else {
         OutputSetup::OneOutput
@@ -185,17 +190,46 @@ struct ExecEntry {
     launch_record_path: PathBuf,
 }
 
-/// One output-expectation case's checked profile and where its launches are recorded.
+/// One two-output profile's private files and where its launches are recorded.
 struct OutputProfile {
     name: &'static str,
     /// In entry order.
     layouts: Vec<Scenario>,
     layouts_directory: TemporaryConfigurations,
     profiles_directory: TemporaryConfigurations,
+    launch_script_path: PathBuf,
     launch_record_path: PathBuf,
 }
 
 impl OutputProfile {
+    /// Creates the profile's private directories and launch recorder; `write` adds the
+    /// layouts, which name the recorder, and the profile file.
+    fn create(directory: &TemporaryConfigurations, name: &'static str) -> Result<Self, String> {
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write profile launch recorder: {error}"))?;
+        Ok(Self {
+            name,
+            layouts: Vec::new(),
+            layouts_directory: files.subdirectory("layouts")?,
+            profiles_directory: files.subdirectory("profiles")?,
+            launch_script_path,
+            launch_record_path: files.path.join("launches"),
+        })
+    }
+
+    /// Writes `layouts`, in entry order, and the profile file `configuration`.
+    fn write(&mut self, layouts: Vec<Scenario>, configuration: &str) -> Result<(), String> {
+        for layout in &layouts {
+            self.layouts_directory
+                .write(layout.name, &configuration_yaml(layout))?;
+        }
+        self.profiles_directory.write(self.name, configuration)?;
+        self.layouts = layouts;
+        Ok(())
+    }
+
     /// `sway-stage profile OPERATION NAME` with the case's own directories, against the
     /// session's compositor.
     fn command(&self, binary: &Path, sway: &Swaymsg, operation: &str) -> Command {
@@ -490,9 +524,9 @@ impl Harness {
     }
 
     /// The two-output session: the same foreign fixture on workspace "1" of the first
-    /// output, then the selected scenarios in suite order. Each output-expectation case
-    /// starts from the two-output baseline and restores it; the cross-output profile removes
-    /// the second output's initial workspace, so it runs last.
+    /// output, then the selected scenarios in suite order. Each output-expectation case and
+    /// the alternating profile start from the two-output baseline and restore it. The
+    /// cross-output profile removes the second output's initial workspace, so it runs last.
     fn execute_two_outputs(&mut self, selected: &[&'static str]) -> Result<(), String> {
         self.stage = "fresh two-output compositor".into();
         let initial = snapshot(&self.sway, &mut self.events, None)?;
@@ -527,6 +561,10 @@ impl Harness {
                     self.run_existing_other_output(case, &directory, &second_output_workspace)?
                 }
             }
+        }
+        if selected.contains(&alternating_profile::SCENARIO) {
+            process::check_interruption()?;
+            self.run_alternating_profile(&directory, &second_output_workspace)?;
         }
         if selected.contains(&profile::CROSS_OUTPUT_SCENARIO) {
             process::check_interruption()?;
@@ -711,43 +749,31 @@ impl Harness {
     ) -> Result<OutputProfile, String> {
         let name = case.name();
         self.stage = format!("{name}: preparation");
-        let files = directory.subdirectory(name)?;
-        let layouts_directory = files.subdirectory("layouts")?;
-        let profiles_directory = files.subdirectory("profiles")?;
-        let launch_script_path = files.path.join("record-launch.sh");
-        let launch_record_path = files.path.join("launches");
-        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
-            .map_err(|error| format!("write profile launch recorder: {error}"))?;
-
+        let mut prepared = OutputProfile::create(directory, name)?;
         let layouts = output_expectation::layouts(
             case,
             &self.run_id,
             &self.foot,
             &self.sleep,
-            utf8_path(&launch_script_path)?,
-            utf8_path(&launch_record_path)?,
+            utf8_path(&prepared.launch_script_path)?,
+            utf8_path(&prepared.launch_record_path)?,
         );
-        for layout in &layouts {
-            layouts_directory.write(layout.name, &configuration_yaml(layout))?;
-        }
-        profiles_directory.write(name, &output_expectation::configuration(case))?;
-        let prepared = OutputProfile {
-            name,
-            layouts,
-            layouts_directory,
-            profiles_directory,
-            launch_record_path,
-        };
+        prepared.write(layouts, &output_expectation::configuration(case))?;
+        self.check_output_profile(&prepared)?;
+        Ok(prepared)
+    }
 
+    /// `profile check` must accept the whole profile and every layout it references.
+    fn check_output_profile(&self, prepared: &OutputProfile) -> Result<(), String> {
         let checked = process::run(
             prepared.command(&self.binary, &self.sway, "check"),
             &self.stage,
             IPC_TIMEOUT,
         )?;
-        if checked != format!("{name}: valid\n") {
+        if checked != format!("{}: valid\n", prepared.name) {
             return Err("unexpected profile check output".into());
         }
-        Ok(prepared)
+        Ok(())
     }
 
     /// Observes the two-output baseline: both outputs active, the fixture focused on the
@@ -1130,6 +1156,203 @@ impl Harness {
             from_id: target.workspace.id,
             to: &fixture.workspace,
         }];
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+
+        self.stage = format!("{name}: two-output baseline restored");
+        self.verify_two_output_baseline(second_output_workspace)?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// A profile of four entries that alternate between the outputs, loaded from the
+    /// fixture's workspace on the first: the second output's existing, empty initial
+    /// workspace, then workspaces that Sway's rules create on the first, the second, and the
+    /// first output. Each layout must be built between its own selection and the next, and
+    /// every completed one must keep its exact windows, arrangement, and selected window
+    /// while later entries select workspaces on both outputs. Verified cleanup then closes
+    /// the layouts from the last back to the first and returns to the fixture's workspace,
+    /// which restores the two-output baseline with the original second-output workspace.
+    fn run_alternating_profile(
+        &mut self,
+        directory: &TemporaryConfigurations,
+        second_output_workspace: &WorkspaceIdentity,
+    ) -> Result<(), String> {
+        let name = alternating_profile::SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let mut prepared = OutputProfile::create(directory, name)?;
+        let layouts = alternating_profile::layouts(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&prepared.launch_script_path)?,
+            utf8_path(&prepared.launch_record_path)?,
+        );
+        let configuration =
+            output_expectation::profile_configuration(&alternating_profile::ENTRIES);
+        prepared.write(layouts, &configuration)?;
+        self.check_output_profile(&prepared)?;
+
+        // Both outputs active, the fixture focused, the original second-output workspace
+        // empty and shown, every created target absent, and nothing launched yet.
+        self.stage = format!("{name}: fresh workspace baselines");
+        let (before, _, baseline) = self.verify_two_output_baseline(second_output_workspace)?;
+        verify_launch_record(&prepared.launch_record_path, &[])?;
+        let preexisting: HashSet<i64> = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        self.stage = format!("{name}: profile load");
+        process::check_interruption()?;
+        let completed = process::run_with_status(
+            prepared.command(&self.binary, &self.sway, "load"),
+            &self.stage,
+            prepared.load_timeout(),
+        )?;
+        process::check_interruption()?;
+        if !completed.status.success() || !completed.stdout.trim().is_empty() {
+            return Err(format!(
+                "profile success failed: {}: {}",
+                completed.status, completed.stderr
+            ));
+        }
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        let expected_switches = ExpectedSwitches {
+            from_id: fixture.workspace.id,
+            destination_names: alternating_profile::ENTRIES
+                .iter()
+                .map(|entry| entry.workspace.to_owned())
+                .collect(),
+        };
+        let (loaded, switch_indexes) =
+            snapshot_with_switches(&self.sway, &mut self.events, &expected_switches)?;
+
+        // Each target on its configured output: the original second-output workspace first,
+        // then a new workspace for every later entry.
+        self.stage = format!("{name}: independent verification");
+        let mut targets = Vec::new();
+        for entry in &alternating_profile::ENTRIES {
+            let target = profile::Target::record(&loaded, entry.workspace)?
+                .ok_or_else(|| format!("profile target {} missing", entry.workspace))?;
+            let existed_before = entry.workspace == SECOND_OUTPUT_INITIAL_WORKSPACE;
+            if existed_before && target.workspace != baseline.second_output_workspace {
+                return Err("the second output's initial workspace was replaced".into());
+            }
+            if !existed_before && preexisting.contains(&target.workspace.id) {
+                return Err("created workspace reused a preexisting ID".into());
+            }
+            baseline.require_on_output(&loaded, target.workspace.id, entry.expected_output)?;
+            targets.push(target);
+        }
+        let target_identities: Vec<WorkspaceIdentity> = targets
+            .iter()
+            .map(|target| target.workspace.clone())
+            .collect();
+
+        // Each selection once, in entry order, with no workspace removed.
+        let expected_events =
+            alternating_profile::load_events(&fixture.workspace, &target_identities);
+        profile::verify_workspace_events(&loaded.workspace_events, &expected_events)?;
+        let mut expected_workspace_names = vec![FIXTURE_WORKSPACE];
+        expected_workspace_names.extend(
+            alternating_profile::ENTRIES
+                .iter()
+                .map(|entry| entry.workspace),
+        );
+        session_roundtrip::require_workspace_names(&loaded, &expected_workspace_names)?;
+        let last_target = target_identities.last().expect("the profile has entries");
+        if loaded.focused_workspace_id != last_target.id {
+            return Err("the profile did not leave its last target focused".into());
+        }
+        alternating_profile::verify_shown_workspaces(&self.sway.get_outputs()?)?;
+        fixture.foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+
+        // Every window launched once, in entry order. Each layout's windows appeared between
+        // its own selection and the next, and nothing else happened to any window there.
+        verify_launch_record(&prepared.launch_record_path, &prepared.layouts)?;
+        let accepted_per_layout = profile::bind_sequential_launches(
+            &loaded.window_events,
+            &switch_indexes,
+            &prepared.layouts,
+            &preexisting,
+        )?;
+        let workspaces: Vec<SessionWorkspace> = targets
+            .into_iter()
+            .zip(prepared.layouts.iter().cloned())
+            .zip(accepted_per_layout)
+            .map(|((target, layout), accepted)| SessionWorkspace {
+                target,
+                layout,
+                accepted,
+            })
+            .collect();
+
+        // Every completed workspace, not only the last, still holds exactly its own new
+        // windows in its configured arrangement, sizes, and selection.
+        session_roundtrip::verify_session_ownership(&loaded.tree, &workspaces, &preexisting)?;
+        let observed_targets = workspaces
+            .iter()
+            .map(|workspace| workspace.target.verify(&loaded))
+            .collect::<Result<Vec<_>, _>>()?;
+        profile::require_distinct_new_containers(&observed_targets, &preexisting)?;
+        let last_index = workspaces.len() - 1;
+        for (index, (workspace, entry)) in workspaces
+            .iter()
+            .zip(&alternating_profile::ENTRIES)
+            .enumerate()
+        {
+            let measurements = verify_session_layout(&loaded, workspace, index == last_index)?;
+            for note in &measurements.sizing_notes {
+                println!("      {note}");
+            }
+            println!(
+                "      workspace {} id={} on {} received layout {:?} with new windows {:?}",
+                workspace.target.workspace.name,
+                workspace.target.workspace.id,
+                entry.expected_output,
+                workspace.layout.name,
+                workspace.accepted.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // Only an independently verified expected outcome enters cleanup. `chain` is the
+        // fixture's workspace, then the targets, so `workspaces[index]` is `chain[index + 1]`.
+        let mut chain = vec![fixture.workspace.clone()];
+        chain.extend(target_identities);
+        for index in (0..workspaces.len()).rev() {
+            let before_cleanup = if index == last_index {
+                let observed = snapshot(&self.sway, &mut self.events, None)?;
+                require_quiet(&observed.window_events, None)?;
+                observed
+            } else {
+                let expected_events = alternating_profile::cleanup_return_events(&chain, index + 1);
+                self.return_for_cleanup(
+                    name,
+                    &chain[index + 2],
+                    &workspaces[index],
+                    &expected_events,
+                )?
+            };
+            self.clean_session_workspace(name, &workspaces, index, &before_cleanup, &preexisting)?;
+        }
+
+        // The original second-output workspace stays shown on its own output; Sway removes
+        // the emptied workspace that the first output still showed.
+        self.stage = format!("{name}: return to the fixture's workspace");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        process::check_interruption()?;
+        self.sway.switch_workspace(&fixture.workspace.name)?;
+        let transition = ExpectedSwitch {
+            from_id: chain[1].id,
+            destination_name: fixture.workspace.name.clone(),
+        };
+        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_return_focus(&returned.window_events, &fixture.progress.accepted)?;
+        let expected_events = alternating_profile::cleanup_return_events(&chain, 0);
         profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
 
         self.stage = format!("{name}: two-output baseline restored");
@@ -1758,69 +1981,109 @@ impl Harness {
     ) -> Result<WorkspaceIdentity, String> {
         for index in (0..workspaces.len()).rev() {
             let workspace = &workspaces[index];
-            let identity = &workspace.target.workspace;
 
             let before_cleanup = if let Some(emptied) = workspaces.get(index + 1) {
-                self.stage = format!("{name}: return to workspace {} for cleanup", identity.name);
-                process::check_interruption()?;
-                self.sway.switch_workspace(&identity.name)?;
-                let transition = ExpectedSwitch {
-                    from_id: emptied.target.workspace.id,
-                    destination_name: identity.name.clone(),
-                };
-                let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
-                require_return_focus(&returned.window_events, &workspace.accepted)?;
-                let expected_events =
-                    session_roundtrip::return_events(&emptied.target.workspace, identity);
-                profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
-                returned
+                let expected_events = session_roundtrip::return_events(
+                    &emptied.target.workspace,
+                    &workspace.target.workspace,
+                );
+                self.return_for_cleanup(
+                    name,
+                    &emptied.target.workspace,
+                    workspace,
+                    &expected_events,
+                )?
             } else {
                 let observed = snapshot(&self.sway, &mut self.events, None)?;
                 require_quiet(&observed.window_events, None)?;
                 observed
             };
 
-            self.stage = format!("{name}: verified cleanup of workspace {}", identity.name);
-            if before_cleanup.focused_workspace_id != identity.id {
-                return Err(format!(
-                    "cleanup requires workspace {} focused",
-                    identity.name
-                ));
-            }
-            let remaining_workspaces = &workspaces[..=index];
-            session_roundtrip::verify_session_ownership(
-                &before_cleanup.tree,
-                remaining_workspaces,
-                preexisting,
-            )?;
-            verify_session_layout(&before_cleanup, workspace, true)?;
-            let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
-            let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
-            verify_fixture_state(&before_cleanup, fixture, fixture_signature)?;
-
-            let known_ids =
-                session_roundtrip::known_ids_besides(remaining_workspaces, index, preexisting);
-            let foreign = ForeignWindows::record(&before_cleanup, identity.id)?;
-            let context = CleanupContext {
-                target: identity,
-                layout: &workspace.layout.layout,
-                preexisting_ids: &known_ids,
-                foreign: &foreign,
-            };
-            cleanup(
-                &self.sway,
-                &mut self.events,
-                &context,
-                &workspace.accepted,
-                signature(before_cleanup.focused_workspace()),
-            )?;
-            let cleaned = snapshot(&self.sway, &mut self.events, None)?;
-            require_quiet(&cleaned.window_events, None)?;
-            foreign.verify(&cleaned)?;
-            workspace.target.verify(&cleaned)?;
-            require_empty(cleaned.focused_workspace())?;
+            self.clean_session_workspace(name, workspaces, index, &before_cleanup, preexisting)?;
         }
         Ok(workspaces[0].target.workspace.clone())
+    }
+
+    /// Selects `destination` from `emptied`, the focused workspace whose windows cleanup has
+    /// just closed. Sway's workspace events must be exactly `expected_events`, and focus
+    /// returning to the destination's own windows is the only window activity allowed.
+    fn return_for_cleanup(
+        &mut self,
+        name: &str,
+        emptied: &WorkspaceIdentity,
+        destination: &SessionWorkspace,
+        expected_events: &[profile::ExpectedWorkspaceEvent],
+    ) -> Result<Snapshot, String> {
+        let identity = &destination.target.workspace;
+        self.stage = format!("{name}: return to workspace {} for cleanup", identity.name);
+
+        process::check_interruption()?;
+        self.sway.switch_workspace(&identity.name)?;
+        let transition = ExpectedSwitch {
+            from_id: emptied.id,
+            destination_name: identity.name.clone(),
+        };
+        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+
+        require_return_focus(&returned.window_events, &destination.accepted)?;
+        profile::verify_workspace_events(&returned.workspace_events, expected_events)?;
+        Ok(returned)
+    }
+
+    /// The verified cleanup of `workspaces[index]`, focused in `before_cleanup`, after every
+    /// later workspace of the cycle was emptied. Every remaining workspace's ownership, this
+    /// workspace's layout, and the fixture are verified before only this workspace's own
+    /// windows close, each by exact ID; every other window must stay exactly as it was.
+    fn clean_session_workspace(
+        &mut self,
+        name: &str,
+        workspaces: &[SessionWorkspace],
+        index: usize,
+        before_cleanup: &Snapshot,
+        preexisting: &HashSet<i64>,
+    ) -> Result<(), String> {
+        let workspace = &workspaces[index];
+        let identity = &workspace.target.workspace;
+        self.stage = format!("{name}: verified cleanup of workspace {}", identity.name);
+        if before_cleanup.focused_workspace_id != identity.id {
+            return Err(format!(
+                "cleanup requires workspace {} focused",
+                identity.name
+            ));
+        }
+        let remaining_workspaces = &workspaces[..=index];
+        session_roundtrip::verify_session_ownership(
+            &before_cleanup.tree,
+            remaining_workspaces,
+            preexisting,
+        )?;
+        verify_session_layout(before_cleanup, workspace, true)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(before_cleanup, fixture, fixture_signature)?;
+
+        let known_ids =
+            session_roundtrip::known_ids_besides(remaining_workspaces, index, preexisting);
+        let foreign = ForeignWindows::record(before_cleanup, identity.id)?;
+        let context = CleanupContext {
+            target: identity,
+            layout: &workspace.layout.layout,
+            preexisting_ids: &known_ids,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &workspace.accepted,
+            signature(before_cleanup.focused_workspace()),
+        )?;
+
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        workspace.target.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())
     }
 
     /// Starts sway-stage's menu through Sway's own `exec` on the fixture's occupied

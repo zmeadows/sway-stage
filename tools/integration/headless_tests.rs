@@ -144,6 +144,9 @@ fn two_output_configuration_adds_the_second_output_and_sways_workspace_rules() {
             "workspace 1 output HEADLESS-1",
             "workspace 2 output HEADLESS-2",
             "workspace 3 output HEADLESS-2",
+            "workspace 6 output HEADLESS-1",
+            "workspace 7 output HEADLESS-2",
+            "workspace 8 output HEADLESS-1",
             "workspace --no-auto-back-and-forth 1",
         ]
     );

@@ -52,12 +52,20 @@ pub const FIRST_OUTPUT_INITIAL_WORKSPACE: &str = "1";
 pub const SECOND_OUTPUT_INITIAL_WORKSPACE: &str = "2";
 /// ...and create this one there when it is first selected.
 pub const SECOND_OUTPUT_ASSIGNED_WORKSPACE: &str = "3";
+/// The alternating profile's created targets. It selects each from a workspace on the other
+/// output, where Sway would otherwise create it, so each needs its own rule.
+pub const ALTERNATING_FIRST_OUTPUT_WORKSPACE: &str = "6";
+pub const ALTERNATING_SECOND_OUTPUT_WORKSPACE: &str = "7";
+pub const ALTERNATING_LAST_FIRST_OUTPUT_WORKSPACE: &str = "8";
 /// The two-output session's `workspace NAME output OUTPUT` rules. Sway creates any other
 /// workspace on the focused output.
-pub const TWO_OUTPUT_WORKSPACE_RULES: [(&str, &str); 3] = [
+pub const TWO_OUTPUT_WORKSPACE_RULES: [(&str, &str); 6] = [
     (FIRST_OUTPUT_INITIAL_WORKSPACE, OUTPUT_NAME),
     (SECOND_OUTPUT_INITIAL_WORKSPACE, SECOND_OUTPUT_NAME),
     (SECOND_OUTPUT_ASSIGNED_WORKSPACE, SECOND_OUTPUT_NAME),
+    (ALTERNATING_FIRST_OUTPUT_WORKSPACE, OUTPUT_NAME),
+    (ALTERNATING_SECOND_OUTPUT_WORKSPACE, SECOND_OUTPUT_NAME),
+    (ALTERNATING_LAST_FIRST_OUTPUT_WORKSPACE, OUTPUT_NAME),
 ];
 
 /// The virtual outputs of one session's compositor. Every scenario runs with one output,
@@ -398,7 +406,7 @@ focus_follows_mouse no
     }
 
     // Sway's own workspace rules, as a user would configure placement: each output starts
-    // with its own workspace, and Sway creates the assigned one on the second output.
+    // with its own workspace, and Sway creates each assigned one on its output.
     if setup == OutputSetup::TwoOutputs {
         for (workspace, output) in TWO_OUTPUT_WORKSPACE_RULES {
             configuration.push_str(&format!("workspace {workspace} output {output}\n"));

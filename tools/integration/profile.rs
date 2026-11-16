@@ -847,7 +847,7 @@ pub fn shows_initial_workspaces(outputs: &[Output]) -> bool {
 }
 
 /// Whether `get_outputs` reports `workspace_name` as the workspace shown on `output_name`.
-fn output_shows(outputs: &[Output], output_name: &str, workspace_name: &str) -> bool {
+pub fn output_shows(outputs: &[Output], output_name: &str, workspace_name: &str) -> bool {
     outputs.iter().any(|output| {
         output.name == output_name && output.current_workspace.as_deref() == Some(workspace_name)
     })

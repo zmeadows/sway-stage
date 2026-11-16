@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 58] = [
+const SUITE_ORDER: [&str; 59] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -103,6 +103,7 @@ const SUITE_ORDER: [&str; 58] = [
     "profile-created-output-mismatch",
     "profile-later-created-output-mismatch",
     "profile-existing-other-output",
+    "profile-alternating-outputs",
     "profile-cross-output",
 ];
 
@@ -158,6 +159,7 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "profile-created-output-mismatch",
             "profile-later-created-output-mismatch",
             "profile-existing-other-output",
+            "profile-alternating-outputs",
             "profile-cross-output"
         ]
     );
@@ -246,14 +248,16 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     }
 }
 
-/// The two-output session's scenarios, in suite order: the output-expectation profiles, then
-/// the cross-output profile, which removes the second output's initial workspace.
-const TWO_OUTPUT_ORDER: [&str; 6] = [
+/// The two-output session's scenarios, in suite order: the output-expectation profiles and
+/// the alternating profile, which restore the two-output baseline, then the cross-output
+/// profile, which removes the second output's initial workspace.
+const TWO_OUTPUT_ORDER: [&str; 7] = [
     "profile-output-mismatch-refusal",
     "profile-output-unavailable-refusal",
     "profile-created-output-mismatch",
     "profile-later-created-output-mismatch",
     "profile-existing-other-output",
+    "profile-alternating-outputs",
     "profile-cross-output",
 ];
 
@@ -269,7 +273,7 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
     }
 
     // The two-output scenarios end the suite, the cross-output profile last.
-    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 6..], TWO_OUTPUT_ORDER);
+    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 7..], TWO_OUTPUT_ORDER);
     assert_eq!(
         select_scenarios(Some("cross-output")).unwrap(),
         ["profile-cross-output"]
@@ -291,6 +295,10 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
     assert_eq!(
         select_scenarios(Some("existing-other-output")).unwrap(),
         ["profile-existing-other-output"]
+    );
+    assert_eq!(
+        select_scenarios(Some("alternating")).unwrap(),
+        ["profile-alternating-outputs"]
     );
 }
 

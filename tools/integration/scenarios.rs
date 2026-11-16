@@ -555,6 +555,16 @@ fn use_shared_foot_app_id(scenario: &mut Scenario, run_id: &str, foot: &str, sle
     }
 }
 
+/// Gives every Foot window `shared_app_id`, so each window's selector matches every other
+/// window given it, including those of other layouts. Only the order of new-window events
+/// then binds each window to its leaf, as sway-stage binds it.
+pub fn use_one_foot_app_id(scenario: &mut Scenario, shared_app_id: &str, foot: &str, sleep: &str) {
+    for leaf in scenario.layout.leaves_mut() {
+        leaf.command = foot_command(foot, Some(shared_app_id), None, sleep);
+        leaf.app_id = shared_app_id.to_owned();
+    }
+}
+
 /// Leaves every window with Foot's default app ID, which this run's other windows never
 /// use. As with a shared app ID, a distinct literal `--title` argument per leaf, unique to
 /// the run, scenario, and leaf, is the independent launch evidence.

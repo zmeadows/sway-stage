@@ -11,6 +11,7 @@
     reason = "launcher, session, IPC, process, and runner code runs only in the harness executable"
 )]
 
+mod alternating_profile;
 mod capture;
 mod fixtures;
 mod floating_refusal;

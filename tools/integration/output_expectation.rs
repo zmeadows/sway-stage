@@ -65,7 +65,7 @@ pub struct OutputEntry {
     /// The layout name the profile references.
     pub layout_name: &'static str,
     /// The standard scenario whose layout that is.
-    standard_layout: &'static str,
+    pub standard_layout: &'static str,
 }
 
 /// Valid wherever it appears: an absent workspace that Sway creates on the focused first
@@ -183,10 +183,15 @@ pub fn layouts(
     layouts
 }
 
-/// The profile file: each entry's numeric target, layout, and expected output.
+/// The case's profile file.
 pub fn configuration(case: Case) -> String {
+    profile_configuration(case.entries())
+}
+
+/// A profile file with each entry's numeric target, layout, and expected output.
+pub fn profile_configuration(entries: &[OutputEntry]) -> String {
     let mut yaml = "version: 1\nworkspaces:\n".to_owned();
-    for entry in case.entries() {
+    for entry in entries {
         yaml.push_str(&format!(
             "  - workspace: {}\n    layout: {}\n    output: {}\n",
             entry.workspace, entry.layout_name, entry.expected_output

@@ -11,6 +11,7 @@
 //! - `process::PROBE_FLAG`: a terminal child used by process-execution. It never connects
 //!   to Sway.
 
+mod alternating_profile;
 mod capture;
 mod floating_refusal;
 mod headless;
