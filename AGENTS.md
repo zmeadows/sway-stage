@@ -11,8 +11,8 @@ workspace numbers or exact non-numeric names. Prioritize, in order:
 3. Readable, straightforward Rust that is easy to debug and change.
 4. A small executable and little ongoing maintenance cost.
 
-Read the affected code and [specification](docs/SPECIFICATION.md) before editing.
-Use [the roadmap](docs/PLAN.md) for outstanding release work.
+Read the affected code and [user reference](docs/REFERENCE.md) before editing.
+Use the [release-readiness checklist](docs/DEVELOPMENT.md#release-readiness) for outstanding release work.
 Do not add session restoration, existing-window reuse, a daemon, automatic enforcement,
 other compositors, or a graphical editor unless explicitly requested.
 
@@ -157,18 +157,19 @@ as necessary guards; do not promise atomic isolation against concurrent user act
 Each kind of information has one home:
 
 - `README.md`: concise introduction, installation, quick start, and links.
-- `docs/SPECIFICATION.md`: authoritative implemented behavior, configuration contract,
+- `docs/REFERENCE.md`: authoritative observable behavior, YAML/configuration contract,
   capture workflow, and troubleshooting.
-- `docs/DEVELOPMENT.md`: contributor verification, the headless integration harness, and
-  user-only manual acceptance procedures.
-- `docs/PLAN.md`: outstanding release work and explicitly undecided ideas only.
-- `examples/`: user-facing illustrative YAML configurations, linked to the specification.
+- `docs/DEVELOPMENT.md`: contributor verification, the isolated headless harness,
+  user-only manual acceptance, and release readiness.
+- `docs/INTERNALS.md`: architectural rationale and non-obvious implementation
+  constraints; avoid duplicating code, tests, or the user reference.
+- `examples/`: user-facing illustrative YAML configurations, linked to the user reference.
 - `tools/`: development-only Rust diagnostics and the integration harness, registered in
   `Cargo.toml` as Cargo examples. The harness runs only through `tools/integration/run.sh`;
   its offline tests are a separate `integration_harness` test target.
 - `AGENTS.md`: durable engineering standards and safety constraints.
 - Source and comments: implementation details; CLI help describes current commands.
-  Keep it consistent with the specification.
+  Keep it consistent with the user reference.
 
 Inspect callers and failure paths before editing. Test behavior at meaningful boundaries:
 configuration fixtures, pure tree/weight calculations, and recorded IPC trees/events.

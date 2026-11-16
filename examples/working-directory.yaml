@@ -1,4 +1,4 @@
-# Reusable project terminals; requires Foot. See ../docs/SPECIFICATION.md.
+# Reusable project terminals; requires Foot. See ../docs/REFERENCE.md.
 # Customize ~/projects to an existing directory containing the desired project subdirectories.
 version: 1  # ← Required; do not remove
 cwd: ~/projects
