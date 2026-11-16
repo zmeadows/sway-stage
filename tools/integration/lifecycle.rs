@@ -2605,8 +2605,36 @@ impl Harness {
             fixture.loaded_signature.as_ref().expect("fixture verified"),
         )?;
         session_roundtrip::verify_session_ownership(&before.tree, populated, preexisting)?;
-        if let Some(empty) = empty {
-            require_empty(empty.verify(&before)?)?;
+
+        // Which workspace each output shows: the fixture's `1` on the first output, and on the
+        // second, the populated `3`, unless the empty workspace now hides it there. `3` keeps
+        // its identity, number, output, and windows either way.
+        let [named, second_output] = populated;
+        let second_output_node = second_output.target.verify(&before)?;
+        if second_output_node.nodes.is_empty() {
+            return Err("the second output's numeric workspace is no longer populated".into());
+        }
+        let shown_on_second_output = match empty {
+            Some(empty) => {
+                require_empty(empty.verify(&before)?)?;
+                output_migration::single_output(&before, empty.workspace.id, SECOND_OUTPUT_NAME)?;
+                &empty.workspace.name
+            }
+            None => &second_output.target.workspace.name,
+        };
+        let shows_expected_workspaces =
+            profile::output_shows(&outputs_before, OUTPUT_NAME, &fixture.workspace.name)
+                && profile::output_shows(
+                    &outputs_before,
+                    SECOND_OUTPUT_NAME,
+                    shown_on_second_output,
+                );
+        if !shows_expected_workspaces {
+            return Err(format!(
+                "expected {OUTPUT_NAME} to show {} and {SECOND_OUTPUT_NAME} to show \
+                 {shown_on_second_output} before the capture",
+                fixture.workspace.name
+            ));
         }
 
         // Profile order, from the harness's own reading of the populated workspaces: the
@@ -2624,7 +2652,6 @@ impl Harness {
             layout: fixture.progress.scenario.clone(),
             accepted: fixture.progress.accepted.clone(),
         };
-        let [named, second_output] = populated;
         let captured = [&fixture_workspace, second_output, named];
         for (workspace, target) in captured.iter().zip(&targets) {
             if workspace.target.workspace.name != *target {
@@ -2659,9 +2686,20 @@ impl Harness {
         let completed = process::run_with_status(command, &self.stage, CAPTURE_TIMEOUT)?;
         process::check_interruption()?;
 
-        // Read-only: no event, and the same tree, workspaces, and shown workspaces.
+        // Read-only: no event at all, not even the title, urgency, or mark events that
+        // `require_quiet` tolerates elsewhere, and the same tree, workspaces, and shown
+        // workspaces.
         let after = snapshot(&self.sway, &mut self.events, None)?;
-        require_quiet(&after.window_events, None)?;
+        if !after.window_events.is_empty() {
+            return Err(format!(
+                "window events during the read-only capture: {:?}",
+                after
+                    .window_events
+                    .iter()
+                    .map(|event| (event.change, event.container.id))
+                    .collect::<Vec<_>>()
+            ));
+        }
         let workspace_states = |observed: &Snapshot| {
             observed
                 .workspaces

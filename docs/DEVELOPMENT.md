@@ -647,9 +647,10 @@ tools/integration/run.sh --filter capture-all
    `notes`, which Sway removes (`focus`, `empty`). The scenario ends on `1`, with the emptied
    `3` shown on `HEADLESS-2`, a starting point that it and the migration both accept.
 
-Before each capture, the harness requires the expected workspaces, focus on `1`, the shown
-workspaces, both populated workspaces' ownership, the unchanged fixture, and, for the second
-capture, `2` empty. Its own reading of the populated workspaces, those with any tiled or
+Before each capture, the harness requires the expected workspaces, focus on `1`,
+`HEADLESS-1` showing `1` and `HEADLESS-2` showing `3` or, for the second capture, the empty
+`2`, `3` populated with its identity on `HEADLESS-2`, both populated workspaces' ownership,
+and the unchanged fixture. Its own reading of the populated workspaces, those with any tiled or
 floating child, ordered by number and then by name, must be exactly `1`, `3`, `notes`. The
 harness created `notes` first, and the tree lists `HEADLESS-1`'s workspaces first, so neither
 creation nor tree order is the profile's. Each capture must then:
@@ -666,8 +667,8 @@ creation nor tree order is the profile's. Each capture must then:
   `command: null` per window, tab selections, and final `focus`. Keyboard focus decides only
   `1`'s; the harness verifies the selections of `3` and `notes` through Sway's child-focus
   histories, so a guessed first window fails;
-- change nothing: no workspace event, only harmless window events, and the same tree
-  signature, including identities, geometry, and focus histories, the same workspace list
+- change nothing: no workspace or window event at all, not even a title, urgency, or mark
+  change, and the same tree signature, including identities, geometry, and focus histories, the same workspace list
   and shown workspaces, unchanged foreign windows, and an unchanged launch record.
 
 The two captures' profiles and drafts must be identical. A private copy of the first, with
