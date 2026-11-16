@@ -23,8 +23,9 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   applications other than Foot, which is the only application the headless suite launches.
   Also complete the optional unified-menu acceptance procedure, keybinding launch-context
   and loader interference checks (including in-workspace focus restoration), and additional
-  manual profile variants. Real multi-monitor verification remains incomplete;
-  output-migration safeguards are implemented and covered offline. Hardware checks are
+  manual profile variants. Real multi-monitor verification remains incomplete; the
+  output-migration safeguard is covered offline and in the headless two-output suite.
+  Hardware checks are
   additional acceptance evidence, not a prerequisite for continued development.
 - **Publish v0.1.0.** After acceptance, tag and publish the validated archives, checksums,
   installation instructions, and release notes.

@@ -685,3 +685,54 @@ fn disposable_rename_accepts_only_exact_focused_identity_and_true_workspace_numb
         );
     }
 }
+
+#[test]
+fn requested_output_move_accepts_only_the_focused_workspace_keeping_its_identity() {
+    let moved = target_identity();
+    let event_value = json!({"change": "move", "old": null, "current": {
+        "type": "workspace", "id": TARGET_WORKSPACE_ID, "name": "9", "num": 9
+    }});
+    let event = serde_json::from_value(event_value.clone()).unwrap();
+    accept_requested_output_move(&event, &moved, Some(&moved)).unwrap();
+
+    for scenario in [
+        "id",
+        "name",
+        "num",
+        "type",
+        "old",
+        "change",
+        "unfocused",
+        "other focus",
+    ] {
+        let mut value = event_value.clone();
+        let mut focused = Some(moved.clone());
+        match scenario {
+            "id" => value["current"]["id"] = json!(80),
+            "name" => value["current"]["name"] = json!("10"),
+            "num" => value["current"]["num"] = json!(10),
+            "type" => value["current"]["type"] = json!("con"),
+            "old" => value["old"] = value["current"].clone(),
+            "change" => value["change"] = json!("rename"),
+            "unfocused" => focused = None,
+            _ => {
+                focused = Some(WorkspaceIdentity {
+                    id: OTHER_WORKSPACE_ID,
+                    name: "1".into(),
+                })
+            }
+        }
+        let event = serde_json::from_value(value).unwrap();
+        assert!(
+            accept_requested_output_move(&event, &moved, focused.as_ref()).is_err(),
+            "{scenario}"
+        );
+    }
+
+    // Without the request, an ordinary fence still refuses every move.
+    let mut current = Some(moved.clone());
+    assert_contains(
+        &apply_workspace_event(&event, None, &mut Vec::new(), 0, &mut current).unwrap_err(),
+        "Move",
+    );
+}

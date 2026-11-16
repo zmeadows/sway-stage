@@ -53,6 +53,26 @@ impl From<&ExpectedSwitch> for ExpectedSwitches {
     }
 }
 
+/// A workspace identity or placement change that one fence may accept because the harness
+/// itself just requested it, by exact identity, on its success path.
+#[derive(Clone, Copy)]
+enum RequestedChange<'a> {
+    /// A disposable rename of the focused workspace; no other workspace activity may occur.
+    Rename(&'a WorkspaceIdentity),
+    /// The focused workspace moved to another output, keeping its identity. Every other
+    /// workspace event is judged as in any fence.
+    OutputMove(&'a WorkspaceIdentity),
+}
+
+impl RequestedChange<'_> {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Rename(_) => "workspace rename",
+            Self::OutputMove(_) => "workspace output move",
+        }
+    }
+}
+
 /// Everything one fence read before its own tick, apart from other ticks.
 struct FencedEvents {
     window_events: Vec<WindowEvent>,
@@ -134,13 +154,13 @@ impl Events {
         &mut self,
         swaymsg: &Swaymsg,
         expected_switches: Option<&ExpectedSwitches>,
-        expected_rename: Option<&WorkspaceIdentity>,
+        requested_change: Option<RequestedChange>,
     ) -> Result<FencedEvents, String> {
         if !self.focus_history_trusted {
             return Err("event history is no longer trusted; refusing another fence".into());
         }
 
-        let result = self.read_through_fence(swaymsg, expected_switches, expected_rename);
+        let result = self.read_through_fence(swaymsg, expected_switches, requested_change);
         if result.is_err() {
             self.focus_history_trusted = false;
         }
@@ -151,7 +171,7 @@ impl Events {
         &mut self,
         swaymsg: &Swaymsg,
         expected_switches: Option<&ExpectedSwitches>,
-        expected_rename: Option<&WorkspaceIdentity>,
+        requested_change: Option<RequestedChange>,
     ) -> Result<FencedEvents, String> {
         // The tick request counts against the same deadline as the events before it.
         let deadline = Instant::now() + IPC_TIMEOUT;
@@ -161,7 +181,7 @@ impl Events {
         let mut window_events = Vec::new();
         let mut workspace_events = Vec::new();
         let mut switch_window_indexes = Vec::new();
-        let mut observed_rename = false;
+        let mut observed_requested_change = false;
         for _ in 0..MAX_FENCE_EVENTS {
             let workspace_event = match self.subscription.next_event(deadline)? {
                 Event::Tick(tick) => {
@@ -172,8 +192,13 @@ impl Events {
                         if switch_window_indexes.len() != expected_switch_count {
                             return Err("workspace switch produced no expected focus event".into());
                         }
-                        if expected_rename.is_some() && !observed_rename {
-                            return Err("workspace rename produced no expected event".into());
+                        if let Some(change) = requested_change
+                            && !observed_requested_change
+                        {
+                            return Err(format!(
+                                "{} produced no expected event",
+                                change.description()
+                            ));
                         }
                         return Ok(FencedEvents {
                             window_events,
@@ -193,18 +218,38 @@ impl Events {
                 continue;
             }
             self.workspace_revision += 1;
-            if let Some(renamed) = expected_rename {
-                if workspace_event.change == WorkspaceChange::Rename && !observed_rename {
-                    accept_disposable_rename(
+            match requested_change {
+                Some(RequestedChange::Rename(renamed)) => {
+                    if workspace_event.change == WorkspaceChange::Rename
+                        && !observed_requested_change
+                    {
+                        accept_disposable_rename(
+                            &workspace_event,
+                            renamed,
+                            &mut self.current_workspace,
+                        )?;
+                        observed_requested_change = true;
+                        workspace_events.push(workspace_event);
+                        continue;
+                    }
+                    return Err("unexpected workspace activity during disposable rename".into());
+                }
+                // Only the first move event can be the requested one; any other move still
+                // fails below.
+                Some(RequestedChange::OutputMove(moved))
+                    if workspace_event.change == WorkspaceChange::Move
+                        && !observed_requested_change =>
+                {
+                    accept_requested_output_move(
                         &workspace_event,
-                        renamed,
-                        &mut self.current_workspace,
+                        moved,
+                        self.current_workspace.as_ref(),
                     )?;
-                    observed_rename = true;
+                    observed_requested_change = true;
                     workspace_events.push(workspace_event);
                     continue;
                 }
-                return Err("unexpected workspace activity during disposable rename".into());
+                _ => {}
             }
             apply_workspace_event(
                 &workspace_event,
@@ -355,6 +400,23 @@ pub fn snapshot(
         .map(|(observed, _)| observed)
 }
 
+/// Only the harness's own exact-ID move of the focused workspace `moved` to another output
+/// may produce a move event, and this fence requires exactly one, for that workspace. Every
+/// other workspace event is judged as in any fence; the caller verifies the exact sequence.
+pub fn snapshot_after_output_move(
+    swaymsg: &Swaymsg,
+    events: &mut Events,
+    moved: &WorkspaceIdentity,
+) -> Result<Snapshot, String> {
+    synchronized_snapshot(
+        swaymsg,
+        events,
+        None,
+        Some(RequestedChange::OutputMove(moved)),
+    )
+    .map(|(observed, _)| observed)
+}
+
 /// Most profile loads have one switch. Retain its position among window events so launches
 /// on the two targets cannot be reordered or interleaved and still pass verification.
 pub fn snapshot_with_switch(
@@ -392,7 +454,37 @@ pub fn snapshot_after_rename(
     events: &mut Events,
     renamed: &WorkspaceIdentity,
 ) -> Result<Snapshot, String> {
-    synchronized_snapshot(swaymsg, events, None, Some(renamed)).map(|(observed, _)| observed)
+    synchronized_snapshot(
+        swaymsg,
+        events,
+        None,
+        Some(RequestedChange::Rename(renamed)),
+    )
+    .map(|(observed, _)| observed)
+}
+
+/// The move keeps the workspace's identity, and it must be the workspace that history has
+/// established as focused: the harness moves only the workspace it controls.
+fn accept_requested_output_move(
+    event: &WorkspaceEvent,
+    moved: &WorkspaceIdentity,
+    focused: Option<&WorkspaceIdentity>,
+) -> Result<(), String> {
+    let expected_number = moved.name.parse::<i32>().unwrap_or(-1);
+    let is_moved_workspace = event.current.as_ref().is_some_and(|node| {
+        node.node_type == Some(NodeType::Workspace)
+            && node.id == moved.id
+            && node.name.as_ref() == Some(&moved.name)
+            && node.num == Some(expected_number)
+    });
+    if event.change != WorkspaceChange::Move
+        || focused != Some(moved)
+        || !is_moved_workspace
+        || event.old.is_some()
+    {
+        return Err("workspace move event has an unexpected identity".into());
+    }
+    Ok(())
 }
 
 fn accept_disposable_rename(
@@ -423,11 +515,11 @@ fn synchronized_snapshot(
     swaymsg: &Swaymsg,
     events: &mut Events,
     expected_switches: Option<&ExpectedSwitches>,
-    expected_rename: Option<&WorkspaceIdentity>,
+    requested_change: Option<RequestedChange>,
 ) -> Result<(Snapshot, Vec<usize>), String> {
     let workspaces = swaymsg.get_workspaces()?;
     let tree = swaymsg.get_tree()?;
-    let fenced = events.fence(swaymsg, expected_switches, expected_rename)?;
+    let fenced = events.fence(swaymsg, expected_switches, requested_change)?;
 
     let focused_workspace_id = validate_snapshot(&tree, &workspaces, events.current_workspace())
         .map_err(|error| events.distrust_focus_history(error))?;

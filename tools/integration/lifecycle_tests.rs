@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 59] = [
+const SUITE_ORDER: [&str; 60] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -105,6 +105,7 @@ const SUITE_ORDER: [&str; 59] = [
     "profile-existing-other-output",
     "profile-alternating-outputs",
     "profile-cross-output",
+    "interference-output-migration",
 ];
 
 #[test]
@@ -208,7 +209,8 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
             "interference-focus-unstable",
             "interference-accepted-window-closed",
             "profile-second-entry-interference",
-            "profile-completion-interference"
+            "profile-completion-interference",
+            "interference-output-migration"
         ]
     );
     assert_eq!(
@@ -249,9 +251,10 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
 }
 
 /// The two-output session's scenarios, in suite order: the output-expectation profiles and
-/// the alternating profile, which restore the two-output baseline, then the cross-output
-/// profile, which removes the second output's initial workspace.
-const TWO_OUTPUT_ORDER: [&str; 7] = [
+/// the alternating profile, which restore the two-output baseline; the cross-output profile,
+/// which removes the second output's initial workspace; and the output migration, which
+/// removes whichever empty workspace the second output shows and leaves its own there.
+const TWO_OUTPUT_ORDER: [&str; 8] = [
     "profile-output-mismatch-refusal",
     "profile-output-unavailable-refusal",
     "profile-created-output-mismatch",
@@ -259,6 +262,7 @@ const TWO_OUTPUT_ORDER: [&str; 7] = [
     "profile-existing-other-output",
     "profile-alternating-outputs",
     "profile-cross-output",
+    "interference-output-migration",
 ];
 
 #[test]
@@ -272,8 +276,9 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
         assert_eq!(output_setup(name), expected, "{name}");
     }
 
-    // The two-output scenarios end the suite, the cross-output profile last.
-    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 7..], TWO_OUTPUT_ORDER);
+    // The two-output scenarios end the suite: the output migration last, after the
+    // cross-output profile, which follows every scenario that restores the baseline.
+    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 8..], TWO_OUTPUT_ORDER);
     assert_eq!(
         select_scenarios(Some("cross-output")).unwrap(),
         ["profile-cross-output"]
@@ -296,9 +301,14 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
         select_scenarios(Some("existing-other-output")).unwrap(),
         ["profile-existing-other-output"]
     );
+    // Each new two-output scenario is selectable alone.
     assert_eq!(
         select_scenarios(Some("alternating")).unwrap(),
         ["profile-alternating-outputs"]
+    );
+    assert_eq!(
+        select_scenarios(Some("migration")).unwrap(),
+        ["interference-output-migration"]
     );
 }
 

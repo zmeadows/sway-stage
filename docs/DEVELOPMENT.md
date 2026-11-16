@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 59 scenarios
+tools/integration/run.sh                  # all 60 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -57,7 +57,7 @@ twenty-four profile scenarios. Any other argument, a missing or empty TEXT, or a
 matches no scenario exits with status 2 before anything starts.
 
 Each run starts and stops its own Sway on the wlroots headless backend, with one 2560×1440
-`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the seven
+`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the eight
 [two-output scenarios](#two-output-scenarios) is selected does a second, separate compositor
 start afterwards, with a 1920×1080 `HEADLESS-2` to the right of `HEADLESS-1`;
 `--filter output` starts only that one. Its sockets and private home,
@@ -261,6 +261,10 @@ Only after that verification does the harness, not sway-stage, select `2` again 
 switch-away case, with its own expected-switch fence. It then closes only the first window,
 and in the unexpected-window case the injected window, through the ordinary verified cleanup.
 
+`--filter interference` also selects `interference-output-migration`, which runs in the
+second compositor and is described with the
+[two-output scenarios](#output-migration-during-construction).
+
 Two negative checks, with the production loader's focus-event check temporarily disabled,
 showed that the scenarios discriminate (2026-11-15):
 
@@ -415,14 +419,18 @@ empty and shown on `HEADLESS-2`, and no other workspace.
 | `3` | Created on `HEADLESS-2` by its rule for `profile-cross-output`. |
 | `4`, `5` | No rule places them, so Sway creates them on the focused `HEADLESS-1`. |
 | `6`, `7`, `8` | `profile-alternating-outputs`' created targets. Each is selected from a workspace on the other output, where Sway would otherwise create it, so each has its own rule. |
+| `9` | No rule places it; `interference-output-migration` creates it on the focused `HEADLESS-1`. |
 
 The runner selects the two-output scenarios with the same `--filter` match and runs them in
 suite order, stopping at the first failure. The five output-expectation profiles and
 `profile-alternating-outputs` verify the baseline before their loads and restore and
 reverify it afterwards, so any selection of them runs independently, before the rest.
-`profile-cross-output` consumes `2`, so it always runs last; nothing runs after it except
-the final fixture check. `--filter output` selects all seven; `--filter output-mismatch` the
-three mismatch scenarios; `--filter alternating` one.
+`profile-cross-output` consumes `2`, so only the output migration runs after it. That
+migration consumes whichever empty workspace `HEADLESS-2` shows, the original `2` or the
+cross-output profile's `3`, and leaves its own `9` there, so it always runs last. Instead of
+the baseline, it establishes its own starting point (see below). `--filter output` selects
+all eight; `--filter output-mismatch` the three mismatch scenarios; `--filter alternating`
+and `--filter migration` one each.
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -433,6 +441,7 @@ three mismatch scenarios; `--filter alternating` one.
 | `profile-existing-other-output` | One entry: the existing `2` expecting `HEADLESS-2`. Require success, `2`'s unchanged ID, number, and output, the switch from `1` as the only workspace event (no creation or removal), both outputs still showing their initial workspaces, launches only after the switch and each exactly once, and the ownership, hierarchy, order, sizing, and final focus of `uneven-siblings` on the smaller output. Cleanup closes those windows and returns to `1`; `2` stays shown on `HEADLESS-2`, so Sway keeps it. |
 | `profile-alternating-outputs` | Four entries, each naming its output, alternate between the outputs (below). Require success, each target selected once in entry order, the original `2` kept and `6`, `7`, `8` new, every target on its configured output, each output showing its last target, every window launched once in entry order and bound between its own entry's selection and the next, and every layout, not only the last, intact. Cleanup restores the baseline with the original `2`. |
 | `profile-cross-output` | Load a one-entry profile for `3` with `output: HEADLESS-2`; Sway's rule creates `3` there. Require exactly the creation of `3`, the switch from `1`, and Sway's removal of `2`, matched by its exact identity: without that removal the regression is not demonstrated. Verify `2` is gone, `3` is new, focused, and on `HEADLESS-2`, `1` and the fixture are unchanged on `HEADLESS-1`, and the layout's launch order, ownership, hierarchy, and sizing. |
+| `interference-output-migration` | A standalone load on the new `9` whose target the harness moves to `HEADLESS-2` during the second window's wait (below). Require sway-stage's output-change failure, not a focus loss or timeout, with the moved workspace and its one accepted window left in place. |
 
 The refusals differ in what they may change. A preflight refusal happens before any
 selection, so the whole desktop must stay exactly as it was, even with a valid first entry.
@@ -440,7 +449,8 @@ A post-selection refusal follows Sway's creation of the target, so that empty wo
 any completed earlier layout must remain where sway-stage left them: the harness requires
 no repair, move, rollback, or focus change, then cleans up only after verifying that. The
 successful cases instead require an existing workspace's identity to survive selection and
-construction. The harness never moves a workspace, assigns an output, or recreates `2`.
+construction. Outside the output migration's one deliberate move, the harness never moves a
+workspace, assigns an output, or recreates `2`.
 
 ##### Alternating multi-output profile
 
@@ -485,6 +495,63 @@ ownership of every remaining layout, its hierarchy, and the fixture. Its returns
 
 The harness then reverifies the complete two-output baseline, including the original
 identity of `2`.
+
+##### Output migration during construction
+
+`interference-output-migration` first establishes its own starting point, whatever ran
+before: exactly the fixture's `1` on `HEADLESS-1` and one empty workspace shown on
+`HEADLESS-2`, either the original `2` or, after `profile-cross-output`, its `3`. If focus is
+on that empty workspace, as the cross-output profile leaves it, the harness selects `1`; the
+only event allowed is that focus change. It then selects the absent `9`, which Sway creates
+on the focused `HEADLESS-1`, and requires exactly `init 9` and `focus 1→9`, a new ID, an
+empty `9`, and the destination workspace still shown.
+
+The layout is `uneven-siblings`, whose second window's command runs the
+[held-launch](#held-launch-interference) hold script. Once the launch record shows the held
+launch, sway-stage has accepted `window1` and is waiting with nothing able to map. The harness
+binds `window1` by its new-window event and verifies its ownership and layout on the focused
+`9` on `HEADLESS-1`. It then sends `[con_id=WINDOW1] move workspace to output HEADLESS-2`
+over its own connection to the private socket: Sway runs a command with `con_id` criteria in
+that window's context, so this moves exactly `9`, never whatever happens to be focused. The
+reply must be one success. A fence that accepts one move event, for the exact focused `9`,
+must then show exactly `empty` of the destination's shown workspace, followed by `move 9`.
+Every other move event still fails any fence.
+
+In Sway 1.10.1 (`workspace_move_to_output` in `sway/commands/move.c`), the move removes the
+destination output's previously shown empty workspace, which the moved workspace replaces,
+and then refocuses the moved workspace's focus-inactive child. That child is `window1`, which
+is already the seat's focus, so Sway emits no window or workspace focus event. The original
+output keeps `1`, so Sway creates no replacement there. sway-stage's target therefore stays
+focused, and only its output changes: this is not a focus loss.
+
+After sway-stage exits, the harness stops the hold, whose record must say that `window2`
+never started, and requires:
+
+- exit 1, with `window2`'s wait stopped by the target's output change: either the move
+  event for `9`'s ID or a snapshot showing `9` move from the original to the destination
+  output's container ID. Neither a focus loss, a window timeout, nor a preflight refusal is
+  accepted, even beside the right report. The run prints which report sway-stage made;
+  every run so far reported the move event;
+- a launch record of exactly `window1` and `window2`, so `window3` never launched;
+- no window activity after the move, and no workspace event after the move's two;
+- `9` still focused with its identity, now under `HEADLESS-2`'s container, `HEADLESS-1`
+  showing `1` and `HEADLESS-2` showing `9`, and no other workspace, so nothing moved it back
+  or recreated anything;
+- `window1` still the one owned window on `9`, with its layout and focus. Its coordinates
+  and size are not compared with the pre-move values, because Sway reflows the workspace to
+  the smaller output;
+- an unchanged fixture on `1`, still on `HEADLESS-1`.
+
+Only then does cleanup close `window1` by its exact ID where the move left it, and select
+`1`. `9` stays shown on `HEADLESS-2`, so Sway keeps it, and the scenario ends with `1`
+focused. Nothing moves `9` back.
+
+A negative check on 2026-11-15, with both of sway-stage's output-change checks temporarily
+disabled, ended in `window2`'s 20-second window timeout, with no focus loss reported, and
+the harness rejected it. The scenario is therefore a deterministic test of the output-change
+safeguard, not of focus loss. Its event expectations follow Sway 1.10.1's source and were
+confirmed by repeated headless runs; another Sway release may order these events differently or
+emit a focus event, which the scenario would report as a failure rather than accept.
 
 The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and

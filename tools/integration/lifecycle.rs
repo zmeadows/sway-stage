@@ -32,7 +32,7 @@ use crate::layout::{
 };
 use crate::observation::{
     Events, ExpectedSwitch, ExpectedSwitches, Snapshot, WorkspaceIdentity, snapshot,
-    snapshot_with_switch, snapshot_with_switches, walk,
+    snapshot_after_output_move, snapshot_with_switch, snapshot_with_switches, walk,
 };
 use crate::ownership::{
     AcceptedWindows, ExpectedClose, bind_launches, require_quiet, verify_ownership,
@@ -46,7 +46,7 @@ use crate::scenarios::{
 use crate::session_roundtrip::{self, SessionWorkspace};
 use crate::{
     alternating_profile, floating_refusal, held_launch, interference, launch_context, load_failure,
-    output_expectation, process, profile,
+    output_expectation, output_migration, process, profile,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -75,8 +75,8 @@ const ASSIGNED_WORKSPACE: &str = "4";
 /// floating-occupancy refusals, the interfered loads, the held-launch interference, the
 /// interfered profiles, the profile cases, the sequentially verified profiles, the Sway exec
 /// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
-/// session's output-expectation profiles, its alternating profile, and its cross-output
-/// profile.
+/// session's output-expectation profiles, its alternating profile, its cross-output profile,
+/// and the output migration.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -96,17 +96,20 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.extend(output_expectation::CASES.iter().map(|case| case.name()));
     names.push(alternating_profile::SCENARIO);
     names.push(profile::CROSS_OUTPUT_SCENARIO);
+    names.push(output_migration::SCENARIO);
     names
 }
 
-/// The session a scenario runs in. Only the profiles that name outputs need a second one.
+/// The session a scenario runs in. Only the profiles that name outputs and the output
+/// migration need a second one.
 pub fn output_setup(scenario_name: &str) -> OutputSetup {
     let expects_outputs = output_expectation::CASES
         .iter()
         .any(|case| case.name() == scenario_name);
     let needs_two_outputs = expects_outputs
         || scenario_name == alternating_profile::SCENARIO
-        || scenario_name == profile::CROSS_OUTPUT_SCENARIO;
+        || scenario_name == profile::CROSS_OUTPUT_SCENARIO
+        || scenario_name == output_migration::SCENARIO;
     if needs_two_outputs {
         OutputSetup::TwoOutputs
     } else {
@@ -526,7 +529,10 @@ impl Harness {
     /// The two-output session: the same foreign fixture on workspace "1" of the first
     /// output, then the selected scenarios in suite order. Each output-expectation case and
     /// the alternating profile start from the two-output baseline and restore it. The
-    /// cross-output profile removes the second output's initial workspace, so it runs last.
+    /// cross-output profile removes the second output's initial workspace, so it runs after
+    /// them. The output migration removes whichever empty workspace the second output shows
+    /// and leaves its own target there, so it runs last; it establishes its own starting
+    /// point with or without the cross-output profile before it.
     fn execute_two_outputs(&mut self, selected: &[&'static str]) -> Result<(), String> {
         self.stage = "fresh two-output compositor".into();
         let initial = snapshot(&self.sway, &mut self.events, None)?;
@@ -569,6 +575,10 @@ impl Harness {
         if selected.contains(&profile::CROSS_OUTPUT_SCENARIO) {
             process::check_interruption()?;
             self.run_cross_output_profile(&directory, &second_output_workspace)?;
+        }
+        if selected.contains(&output_migration::SCENARIO) {
+            process::check_interruption()?;
+            self.run_output_migration(&directory)?;
         }
         self.verify_fixture_survived()
     }
@@ -1361,6 +1371,411 @@ impl Harness {
         self.passed += 1;
         println!("PASS  {name} (independent verification; success-path cleanup only)");
         Ok(())
+    }
+
+    /// A standalone layout on a new workspace on the first output. While sway-stage waits for
+    /// the held second window, after accepting the first, the harness moves that workspace
+    /// to the second output. sway-stage must stop for the output change, launch nothing
+    /// more, and leave the moved workspace and its window where the move put them. The
+    /// outcome counts only after sway-stage's report, the launch and hold records, the move's
+    /// exact events, and the final desktop are verified independently. Only then does the
+    /// harness close the accepted window by exact ID and return to the fixture's workspace;
+    /// it never moves the workspace back.
+    fn run_output_migration(&mut self, directory: &TemporaryConfigurations) -> Result<(), String> {
+        let name = output_migration::SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let hold_script_path = files.path.join("hold.sh");
+        let hold = HeldLaunchFiles {
+            launch_record: files.path.join("launches"),
+            release: files.path.join("release"),
+            stop: files.path.join("stop"),
+            outcome: files.path.join("hold-outcome"),
+        };
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        fs::write(&hold_script_path, held_launch::HOLD_SCRIPT)
+            .map_err(|error| format!("write launch hold: {error}"))?;
+        let hold_prefix = held_launch::hold_command(
+            utf8_path(&hold_script_path)?,
+            utf8_path(&hold.release)?,
+            utf8_path(&hold.stop)?,
+            utf8_path(&hold.outcome)?,
+            &self.sleep,
+            WINDOW_TIMEOUT_MS,
+        );
+        let migrating = output_migration::migrating_load(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&hold.launch_record)?,
+            &hold_prefix,
+        );
+        directory.write(name, &configuration_yaml(&migrating.layout))?;
+        check_configuration(&self.binary, &directory.path, name, &self.stage)?;
+
+        let (baseline, target, preexisting) = self.create_migration_target()?;
+        let shown_workspace = &baseline.destination_shown_workspace;
+
+        self.stage = format!("{name}: load with a held launch");
+        process::check_interruption()?;
+        let mut load = configured_command(&self.binary, &directory.path, "load", name);
+        self.sway.select_socket(&mut load);
+        let load_stage = self.stage.clone();
+        let timeout = load_timeout(&migrating.layout);
+        let running_load =
+            thread::spawn(move || process::run_with_status(load, &load_stage, timeout));
+
+        // sway-stage starts the held launch only after accepting the first window, which must
+        // appear within its window timeout. Only then does the harness move the target.
+        self.stage = format!("{name}: wait for the held launch");
+        let deadline = Instant::now()
+            + Duration::from_millis(migrating.layout.window_timeout_ms)
+            + IPC_TIMEOUT;
+        let mut window_events = Vec::new();
+        let interference = wait_for_held_launch(
+            &hold.launch_record,
+            &migrating.launch_record_through_hold,
+            &running_load,
+            deadline,
+        )
+        .and_then(|()| {
+            self.move_target_after_first_window(
+                &migrating,
+                &target,
+                &baseline,
+                &preexisting,
+                &mut window_events,
+            )
+        });
+        // The hold is never released. Stop it after a failed interference too, so sway-stage's
+        // wait ends without a window, by its own deadline if nothing else stops it.
+        let stop_error = match &interference {
+            Err(_) => request_hold_stop(&hold.stop).err(),
+            Ok(_) => None,
+        };
+        let load_result = running_load
+            .join()
+            .map_err(|_| "the load thread panicked".to_owned())?;
+        let completed = load_result?;
+        process::check_interruption()?;
+        let (accepted, moved_at) = interference.map_err(|error| {
+            let mut message = format!(
+                "{error}; sway-stage {}: {}",
+                completed.status,
+                completed.stderr.trim()
+            );
+            if let Some(stop_error) = &stop_error {
+                message.push_str(&format!("; {stop_error}"));
+            }
+            message
+        })?;
+
+        // sway-stage has exited, so the held application can no longer become a layout
+        // window: only now does the harness stop the hold.
+        self.stage = format!("{name}: stop the held launch");
+        request_hold_stop(&hold.stop)?;
+        wait_for_hold_outcome(&hold.outcome, "stopped\n")?;
+        let loaded = self.observe_held_load(&mut window_events)?;
+
+        self.stage = format!("{name}: independent verification");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        let report = output_migration::verify_failure_report(
+            &completed,
+            target.id,
+            baseline.original_output_id,
+            baseline.destination_output_id,
+        )?;
+        let observed_record = fs::read_to_string(&hold.launch_record)
+            .map_err(|error| format!("read launch record: {error}"))?;
+        if observed_record != migrating.launch_record_through_hold {
+            return Err(format!(
+                "launch order/count differs: expected {:?}, observed {observed_record:?}",
+                migrating.launch_record_through_hold
+            ));
+        }
+        // Since the move, no window opened, closed, moved, or took focus.
+        require_quiet(&window_events[moved_at..], None)?;
+
+        // The same workspace, still focused, now on the destination output, with nothing
+        // moved back or recreated; the first window is still its only, owned window.
+        if loaded.focused_workspace_id != target.id {
+            return Err("the moved target is no longer focused".into());
+        }
+        let current_output_id = output_migration::single_output(
+            &loaded,
+            target.id,
+            output_migration::DESTINATION_OUTPUT,
+        )?;
+        if current_output_id != baseline.destination_output_id {
+            return Err("the target is not on the destination output".into());
+        }
+        session_roundtrip::require_workspace_names(
+            &loaded,
+            &[FIXTURE_WORKSPACE, output_migration::TARGET_WORKSPACE],
+        )?;
+        let outputs = self.sway.get_outputs()?;
+        let shows_expected_workspaces = profile::output_shows(
+            &outputs,
+            output_migration::ORIGINAL_OUTPUT,
+            &fixture.workspace.name,
+        ) && profile::output_shows(
+            &outputs,
+            output_migration::DESTINATION_OUTPUT,
+            output_migration::TARGET_WORKSPACE,
+        );
+        if !shows_expected_workspaces {
+            return Err("the outputs do not show the fixture's workspace and the target".into());
+        }
+        verify_ownership(
+            &loaded.tree,
+            target.id,
+            &migrating.accepted_before_move.layout,
+            &preexisting,
+            &accepted,
+        )?;
+        verify_layout(
+            loaded.focused_workspace(),
+            &migrating.accepted_before_move,
+            &accepted,
+        )?;
+        fixture.foreign.verify(&loaded)?;
+        verify_fixture_state(&loaded, fixture, fixture_signature)?;
+        println!(
+            "      moved workspace {} id={} from output id={} to id={} during window2's wait; \
+             Sway removed workspace {} id={}; sway-stage stopped for the output change \
+             ({report:?}) with window {:?} in place; window3 never launched",
+            target.name,
+            target.id,
+            baseline.original_output_id,
+            baseline.destination_output_id,
+            shown_workspace.name,
+            shown_workspace.id,
+            accepted.keys().collect::<Vec<_>>()
+        );
+
+        // Only an independently verified failure enters cleanup, which the harness performs
+        // where the move left the target.
+        self.stage = format!("{name}: verified cleanup");
+        let foreign = ForeignWindows::record(&loaded, target.id)?;
+        let context = CleanupContext {
+            target: &target,
+            layout: &migrating.accepted_before_move.layout,
+            preexisting_ids: &preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &accepted,
+            signature(loaded.focused_workspace()),
+        )?;
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        require_empty(cleaned.focused_workspace())?;
+
+        // The emptied target stays shown on the destination output as focus leaves it, so
+        // Sway keeps it.
+        self.stage = format!("{name}: return to the fixture's workspace");
+        process::check_interruption()?;
+        self.sway.switch_workspace(&fixture.workspace.name)?;
+        let transition = ExpectedSwitch {
+            from_id: target.id,
+            destination_name: fixture.workspace.name.clone(),
+        };
+        let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_return_focus(&returned.window_events, &fixture.progress.accepted)?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: target.id,
+            to: &fixture.workspace,
+        }];
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+        verify_fixture_state(&returned, fixture, fixture_signature)?;
+        output_migration::single_output(
+            &returned,
+            target.id,
+            output_migration::DESTINATION_OUTPUT,
+        )?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Establishes the output migration's starting point whatever ran before it: the
+    /// fixture's workspace focused on the first output and one empty workspace shown on the
+    /// second. After the cross-output profile, focus is still on that empty workspace, so the
+    /// harness first selects the fixture's. It then creates the empty target on the first
+    /// output. Returns the starting point, the target, and every container ID before the load.
+    fn create_migration_target(
+        &mut self,
+    ) -> Result<
+        (
+            output_migration::MigrationBaseline,
+            WorkspaceIdentity,
+            HashSet<i64>,
+        ),
+        String,
+    > {
+        let name = output_migration::SCENARIO;
+        self.stage = format!("{name}: starting point");
+        let observed = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&observed.window_events, None)?;
+        let outputs = self.sway.get_outputs()?;
+        verify_virtual_outputs(&outputs, OutputSetup::TwoOutputs)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let fixture_signature = fixture.loaded_signature.as_ref().expect("fixture verified");
+        verify_fixture_state(&observed, fixture, fixture_signature)?;
+        let baseline =
+            output_migration::MigrationBaseline::record(&observed, &outputs, &fixture.workspace)?;
+        let shown_workspace = &baseline.destination_shown_workspace;
+        if observed.focused_workspace_id != fixture.workspace.id {
+            process::check_interruption()?;
+            self.sway.switch_workspace(&fixture.workspace.name)?;
+            let transition = ExpectedSwitch {
+                from_id: shown_workspace.id,
+                destination_name: fixture.workspace.name.clone(),
+            };
+            let returned = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+            require_return_focus(&returned.window_events, &fixture.progress.accepted)?;
+            // The empty workspace stays shown on its own output.
+            let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+                from_id: shown_workspace.id,
+                to: &fixture.workspace,
+            }];
+            profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+        }
+
+        // No rule places the target, so Sway creates it on the focused first output.
+        self.stage = format!(
+            "{name}: create workspace {}",
+            output_migration::TARGET_WORKSPACE
+        );
+        process::check_interruption()?;
+        self.sway
+            .switch_workspace(output_migration::TARGET_WORKSPACE)?;
+        let transition = ExpectedSwitch {
+            from_id: fixture.workspace.id,
+            destination_name: output_migration::TARGET_WORKSPACE.into(),
+        };
+        let created = snapshot(&self.sway, &mut self.events, Some(&transition))?;
+        require_quiet(&created.window_events, None)?;
+        let target = WorkspaceIdentity {
+            id: created.focused_workspace_id,
+            name: output_migration::TARGET_WORKSPACE.into(),
+        };
+        let expected_events = [
+            profile::ExpectedWorkspaceEvent::Init(&target),
+            profile::ExpectedWorkspaceEvent::Focus {
+                from_id: fixture.workspace.id,
+                to: &target,
+            },
+        ];
+        profile::verify_workspace_events(&created.workspace_events, &expected_events)?;
+        if walk(&observed.tree)
+            .iter()
+            .any(|placed| placed.node.id == target.id)
+        {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        require_empty(created.focused_workspace())?;
+        let original_output_id = output_migration::single_output(
+            &created,
+            target.id,
+            output_migration::ORIGINAL_OUTPUT,
+        )?;
+        if original_output_id != baseline.original_output_id {
+            return Err("the target is not on the fixture's output".into());
+        }
+        if !profile::output_shows(
+            &self.sway.get_outputs()?,
+            output_migration::DESTINATION_OUTPUT,
+            &shown_workspace.name,
+        ) {
+            return Err("the destination output no longer shows its empty workspace".into());
+        }
+        verify_fixture_state(&created, fixture, fixture_signature)?;
+        let preexisting: HashSet<i64> = walk(&created.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+
+        Ok((baseline, target, preexisting))
+    }
+
+    /// Once the held second launch has started, binds and verifies the first window that
+    /// sway-stage accepted before it, then moves the target workspace, named by that window's
+    /// exact ID, to the destination output and observes the move's exact events. Every
+    /// fenced snapshot's window events are appended to `window_events` in order. Returns the
+    /// accepted window and the position among those events of the move.
+    fn move_target_after_first_window(
+        &mut self,
+        migrating: &output_migration::MigratingLoad,
+        target: &WorkspaceIdentity,
+        baseline: &output_migration::MigrationBaseline,
+        preexisting: &HashSet<i64>,
+        window_events: &mut Vec<WindowEvent>,
+    ) -> Result<(AcceptedWindows, usize), String> {
+        let name = output_migration::SCENARIO;
+
+        // Bind and verify the first window, on the focused target on its original output,
+        // from fresh evidence.
+        let held_at = self.observe_held_load(window_events)?;
+        let accepted = bind_launches(
+            window_events,
+            &migrating.accepted_before_move.layout,
+            preexisting,
+        )?;
+        verify_ownership(
+            &held_at.tree,
+            target.id,
+            &migrating.accepted_before_move.layout,
+            preexisting,
+            &accepted,
+        )?;
+        if held_at.focused_workspace_id != target.id {
+            return Err("the target is not focused before the move".into());
+        }
+        verify_layout(
+            held_at.focused_workspace(),
+            &migrating.accepted_before_move,
+            &accepted,
+        )?;
+        let output_id = output_migration::single_output(
+            &held_at,
+            target.id,
+            output_migration::ORIGINAL_OUTPUT,
+        )?;
+        if output_id != baseline.original_output_id {
+            return Err("the target left its original output before the move".into());
+        }
+        let [window_id] = accepted.keys().copied().collect::<Vec<_>>()[..] else {
+            return Err("expected exactly one accepted window before the move".into());
+        };
+
+        self.stage = format!(
+            "{name}: move workspace {} id={} to {}",
+            target.name,
+            target.id,
+            output_migration::DESTINATION_OUTPUT
+        );
+        let moved_at = window_events.len();
+        // A deliberate harness mutation, named by the exact ID of the window this run has just
+        // verified as its own on the focused target: Sway moves that window's workspace.
+        process::check_interruption()?;
+        self.sway
+            .move_workspace_of_owned_window(window_id, output_migration::DESTINATION_OUTPUT)?;
+        let mut moved = snapshot_after_output_move(&self.sway, &mut self.events, target)?;
+        let expected_events =
+            output_migration::move_events(&baseline.destination_shown_workspace, target);
+        profile::verify_workspace_events(&moved.workspace_events, &expected_events)?;
+        window_events.append(&mut moved.window_events);
+        Ok((accepted, moved_at))
     }
 
     /// Writes the case's layout, its one-entry profile, a menu case's Fuzzel substitute,
@@ -3472,23 +3887,12 @@ impl Harness {
         let deadline = Instant::now()
             + Duration::from_millis(held.layout.window_timeout_ms) * accepted_count
             + IPC_TIMEOUT;
-        loop {
-            process::check_interruption()?;
-            let observed_record = read_optional_record(&hold.launch_record)?;
-            if held_launch::held_launch_started(&observed_record, &held.launch_record_through_hold)?
-            {
-                break;
-            }
-            if running_load.is_finished() {
-                return Err("sway-stage exited before the held launch started".into());
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "the held launch did not start; launch record {observed_record:?}"
-                ));
-            }
-            thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
-        }
+        wait_for_held_launch(
+            &hold.launch_record,
+            &held.launch_record_through_hold,
+            running_load,
+            deadline,
+        )?;
 
         // sway-stage starts the held launch only after accepting every earlier window. Bind
         // and verify those windows from fresh evidence before acting on any of them.
@@ -5854,6 +6258,32 @@ enum HeldLaunchInterference {
         closed_window_id: i64,
         close_requested_at: usize,
     },
+}
+
+/// Polls sway-stage's launch record until it shows the held launch started. Fails if the
+/// record ever shows another launch order, sway-stage exits first, or `deadline` passes.
+fn wait_for_held_launch(
+    launch_record: &Path,
+    launch_record_through_hold: &str,
+    running_load: &thread::JoinHandle<Result<process::CompletedProcess, String>>,
+    deadline: Instant,
+) -> Result<(), String> {
+    loop {
+        process::check_interruption()?;
+        let observed_record = read_optional_record(launch_record)?;
+        if held_launch::held_launch_started(&observed_record, launch_record_through_hold)? {
+            return Ok(());
+        }
+        if running_load.is_finished() {
+            return Err("sway-stage exited before the held launch started".into());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the held launch did not start; launch record {observed_record:?}"
+            ));
+        }
+        thread::sleep(HELD_LAUNCH_POLL_INTERVAL);
+    }
 }
 
 /// Tells the held script to exit without starting its application.

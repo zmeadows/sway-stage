@@ -3,6 +3,7 @@ use crate::fixtures::{FOOT, RUN_ID, SLEEP, assert_contains, two_output_outputs};
 use crate::headless::{FIRST_OUTPUT_INITIAL_WORKSPACE, TWO_OUTPUT_WORKSPACE_RULES};
 use crate::ipc::WorkspaceEvent;
 use crate::output_expectation::{self, SECOND_UNPLACED_WORKSPACE, UNPLACED_WORKSPACE};
+use crate::output_migration;
 use crate::profile::verify_workspace_events;
 use crate::scenarios::ConfiguredNode;
 use serde_json::json;
@@ -81,6 +82,7 @@ fn entries_alternate_outputs_and_sway_rules_place_every_created_target() {
         crate::headless::SECOND_OUTPUT_ASSIGNED_WORKSPACE,
         UNPLACED_WORKSPACE,
         SECOND_UNPLACED_WORKSPACE,
+        output_migration::TARGET_WORKSPACE,
     ] {
         assert!(!targets.contains(other_scenario_workspace));
     }

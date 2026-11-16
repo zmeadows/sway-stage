@@ -268,3 +268,26 @@ fn assign_rules_name_one_exact_plain_app_id_and_a_safe_workspace() {
         );
     }
 }
+
+#[test]
+fn workspace_moves_name_one_owned_window_and_a_plain_output() {
+    assert_eq!(
+        move_workspace_command(42, "HEADLESS-2").unwrap(),
+        "[con_id=42] move workspace to output HEADLESS-2"
+    );
+    assert!(move_workspace_command(0, "HEADLESS-2").is_err());
+    assert!(move_workspace_command(-1, "HEADLESS-2").is_err());
+    // A direction or `current` would be relative to the window's output, never an output name.
+    for invalid in [
+        "",
+        "-1",
+        "2HEADLESS",
+        "HEADLESS 2",
+        "HEADLESS-2; kill",
+        "\"HEADLESS-2\"",
+        "HEADLESS_2",
+        "é",
+    ] {
+        assert!(move_workspace_command(42, invalid).is_err(), "{invalid:?}");
+    }
+}

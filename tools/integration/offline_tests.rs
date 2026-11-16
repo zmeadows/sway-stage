@@ -26,6 +26,7 @@ mod lifecycle;
 mod load_failure;
 mod observation;
 mod output_expectation;
+mod output_migration;
 mod ownership;
 mod preservation;
 mod process;

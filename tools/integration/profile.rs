@@ -641,6 +641,8 @@ pub enum ExpectedWorkspaceEvent<'a> {
         to: &'a WorkspaceIdentity,
     },
     Empty(&'a WorkspaceIdentity),
+    /// The workspace moved to another output, keeping its identity.
+    Move(&'a WorkspaceIdentity),
 }
 
 /// A fence's non-urgent workspace events must be exactly `expected`, in order. A missing,
@@ -686,6 +688,11 @@ fn workspace_event_matches(event: &WorkspaceEvent, expected: &ExpectedWorkspaceE
         }
         ExpectedWorkspaceEvent::Empty(workspace) => {
             event.change == WorkspaceChange::Empty
+                && is_workspace(current, workspace)
+                && event.old.is_none()
+        }
+        ExpectedWorkspaceEvent::Move(workspace) => {
+            event.change == WorkspaceChange::Move
                 && is_workspace(current, workspace)
                 && event.old.is_none()
         }

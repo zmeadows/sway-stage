@@ -95,6 +95,18 @@ impl Swaymsg {
         self.command(&float_command(container_id)?)
     }
 
+    /// Moves the workspace that holds exactly this window, keeping its identity, to the
+    /// output named `output_name`. The caller must have just verified that this run opened
+    /// the window, on the workspace it means to move, and observes the result with a fence
+    /// that expects that move.
+    pub fn move_workspace_of_owned_window(
+        &self,
+        container_id: i64,
+        output_name: &str,
+    ) -> Result<(), String> {
+        self.command(&move_workspace_command(container_id, output_name)?)
+    }
+
     /// Starts `/bin/sh SCRIPT` through Sway's own `exec`, as a keybinding would, so Sway
     /// records a launch context for the focused workspace. The process inherits the
     /// compositor's environment, never the harness's, and is not our child: it is observed
@@ -311,6 +323,30 @@ fn float_command(container_id: i64) -> Result<String, String> {
         return Err("owned window must have a positive container ID".into());
     }
     Ok(format!("[con_id={container_id}] floating enable"))
+}
+
+/// Sway runs a command with `con_id` criteria in the context of the matched window, so
+/// `move workspace` moves exactly that window's workspace, never the focused one. Only an
+/// output name of ASCII letters, digits, and `-`, such as `HEADLESS-2`, is sent.
+fn move_workspace_command(container_id: i64, output_name: &str) -> Result<String, String> {
+    if container_id <= 0 {
+        return Err("owned window must have a positive container ID".into());
+    }
+    let is_plain_output_name = output_name
+        .bytes()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && output_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !is_plain_output_name {
+        return Err(format!(
+            "output name {output_name:?} cannot be safely represented in a Sway command"
+        ));
+    }
+    Ok(format!(
+        "[con_id={container_id}] move workspace to output {output_name}"
+    ))
 }
 
 /// Sway's command parser and the `sh -c` that `exec` runs would both interpret quotes,
