@@ -46,7 +46,7 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 60 scenarios
+tools/integration/run.sh                  # all 62 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
@@ -57,7 +57,7 @@ twenty-four profile scenarios. Any other argument, a missing or empty TEXT, or a
 matches no scenario exits with status 2 before anything starts.
 
 Each run starts and stops its own Sway on the wlroots headless backend, with one 2560×1440
-`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the eight
+`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the ten
 [two-output scenarios](#two-output-scenarios) is selected does a second, separate compositor
 start afterwards, with a 1920×1080 `HEADLESS-2` to the right of `HEADLESS-1`;
 `--filter output` starts only that one. Its sockets and private home,
@@ -93,8 +93,8 @@ close may complete. A few seconds after each run, this must print nothing:
 grep -l sway-stage-headless /proc/[0-9]*/environ 2>/dev/null
 ```
 
-The suite exercises sway-stage against a real Sway, but only with Foot, one virtual output,
-and no input devices or desktop services. Other applications, physical outputs, real
+The suite exercises sway-stage against a real Sway, but only with Foot, one or two virtual
+outputs, and no input devices or desktop services. Other applications, physical outputs, real
 keybindings, and visual rendering need the occasional user-run checks under
 [manual application acceptance](#manual-application-acceptance).
 
@@ -414,23 +414,23 @@ empty and shown on `HEADLESS-2`, and no other workspace.
 
 | Workspace | Role |
 | --- | --- |
-| `1` | The fixture's workspace on `HEADLESS-1`. Every scenario starts its load here. |
-| `2` | `HEADLESS-2`'s initial workspace. Every scenario before `profile-cross-output` requires its original identity; that scenario removes it. |
+| `1` | The fixture's workspace on `HEADLESS-1`. Every scenario starts here. |
+| `2` | `HEADLESS-2`'s initial workspace. Every scenario before `profile-cross-output` requires its original identity, and the two [second-output loads](#loads-on-the-second-output) build on it; that profile removes it. |
 | `3` | Created on `HEADLESS-2` by its rule for `profile-cross-output`. |
 | `4`, `5` | No rule places them, so Sway creates them on the focused `HEADLESS-1`. |
 | `6`, `7`, `8` | `profile-alternating-outputs`' created targets. Each is selected from a workspace on the other output, where Sway would otherwise create it, so each has its own rule. |
 | `9` | No rule places it; `interference-output-migration` creates it on the focused `HEADLESS-1`. |
 
 The runner selects the two-output scenarios with the same `--filter` match and runs them in
-suite order, stopping at the first failure. The five output-expectation profiles and
-`profile-alternating-outputs` verify the baseline before their loads and restore and
-reverify it afterwards, so any selection of them runs independently, before the rest.
-`profile-cross-output` consumes `2`, so only the output migration runs after it. That
-migration consumes whichever empty workspace `HEADLESS-2` shows, the original `2` or the
-cross-output profile's `3`, and leaves its own `9` there, so it always runs last. Instead of
-the baseline, it establishes its own starting point (see below). `--filter output` selects
-all eight; `--filter output-mismatch` the three mismatch scenarios; `--filter alternating`
-and `--filter migration` one each.
+suite order, stopping at the first failure. The five output-expectation profiles, the two
+second-output loads, and `profile-alternating-outputs` verify the baseline before they
+start and restore and reverify it afterwards, so any selection of them runs independently,
+before the rest. `profile-cross-output` consumes `2`, so only the output migration runs after
+it. That migration consumes whichever empty workspace `HEADLESS-2` shows, the original `2` or
+the cross-output profile's `3`, and leaves its own `9` there, so it always runs last. Instead
+of the baseline, it establishes its own starting point (see below). `--filter output` selects
+all ten; `--filter output-mismatch` the three mismatch scenarios; `--filter second-output`
+the two second-output loads; `--filter alternating` and `--filter migration` one each.
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -439,6 +439,8 @@ and `--filter migration` one each.
 | `profile-created-output-mismatch` | One entry: the absent `4` expecting `HEADLESS-2`, which passes preflight because that output exists. Sway creates `4` on the focused `HEADLESS-1`. Require exactly the creation of `4` and the switch from `1`, a new ID on `HEADLESS-1`, `4` focused and empty, no launches, and the post-selection output-mismatch diagnostic (stage `workspace selection`, not preflight). `2` keeps its identity, emptiness, and visibility, and the fixture is unchanged. Cleanup returns to `1`, and Sway removes the empty `4`. |
 | `profile-later-created-output-mismatch` | Entry 1 builds `horizontal-pair` on the created `4` (`HEADLESS-1`, as expected); entry 2 targets the absent `5` expecting `HEADLESS-2`, which Sway also creates on `HEADLESS-1`. Require the creations and switches `1`→`4`→`5` in order and nothing removed; entry 1's windows bound only between the two switches, its final focus selected before the second; nothing launched before the first switch or after the second; `completed 1 workspaces [(4, ID)]`; entry 1's ownership, hierarchy, sizing, and inactive selection intact; `5` empty and focused. Cleanup returns to `4` (Sway removes `5`), closes only entry 1's windows, and returns to `1` (Sway removes `4`). |
 | `profile-existing-other-output` | One entry: the existing `2` expecting `HEADLESS-2`. Require success, `2`'s unchanged ID, number, and output, the switch from `1` as the only workspace event (no creation or removal), both outputs still showing their initial workspaces, launches only after the switch and each exactly once, and the ownership, hierarchy, order, sizing, and final focus of `uneven-siblings` on the smaller output. Cleanup closes those windows and returns to `1`; `2` stays shown on `HEADLESS-2`, so Sway keeps it. |
+| `layout-second-output-direct` | `sway-stage load` of the weighted, nested `mixed-nesting` on the original `2`, which the harness selects from `1` (below). Require silent success, no workspace event, each window launched once in order and owned only on `2`, `2`'s identity and output, the hierarchy, order, sizing, and final focus, and the root split tiling `HEADLESS-2`'s actual area. Cleanup restores the baseline. |
+| `layout-second-output-menu` | The same for `uneven-siblings` through `sway-stage menu`, started by Sway's `exec` on `2`. The Fuzzel substitute must receive the prompt with `--output=HEADLESS-2` and exactly the specified rows; its selected index must have loaded the selected layout, not the decoy beside it. |
 | `profile-alternating-outputs` | Four entries, each naming its output, alternate between the outputs (below). Require success, each target selected once in entry order, the original `2` kept and `6`, `7`, `8` new, every target on its configured output, each output showing its last target, every window launched once in entry order and bound between its own entry's selection and the next, and every layout, not only the last, intact. Cleanup restores the baseline with the original `2`. |
 | `profile-cross-output` | Load a one-entry profile for `3` with `output: HEADLESS-2`; Sway's rule creates `3` there. Require exactly the creation of `3`, the switch from `1`, and Sway's removal of `2`, matched by its exact identity: without that removal the regression is not demonstrated. Verify `2` is gone, `3` is new, focused, and on `HEADLESS-2`, `1` and the fixture are unchanged on `HEADLESS-1`, and the layout's launch order, ownership, hierarchy, and sizing. |
 | `interference-output-migration` | A standalone load on the new `9` whose target the harness moves to `HEADLESS-2` during the second window's wait (below). Require sway-stage's output-change failure, not a focus loss or timeout, with the moved workspace and its one accepted window left in place. |
@@ -451,6 +453,56 @@ no repair, move, rollback, or focus change, then cleans up only after verifying 
 successful cases instead require an existing workspace's identity to survive selection and
 construction. Outside the output migration's one deliberate move, the harness never moves a
 workspace, assigns an output, or recreates `2`.
+
+##### Loads on the second output
+
+`layout-second-output-direct` and `layout-second-output-menu` load a standalone layout on
+the second output, where the ordinary loader must use the focused workspace as it is:
+
+```sh
+tools/integration/run.sh --filter second-output
+```
+
+From the verified baseline, the harness selects `2` from the fixture's `1` with its own
+fenced switch. The only workspace event must be that focus change: `2` keeps its original ID
+and number and stays empty and shown on `HEADLESS-2`, `1` stays shown on `HEADLESS-1`,
+nothing is created or removed, and the fixture is unchanged. sway-stage then loads on the
+focused `2`:
+
+| Scenario | Entry point | Layout |
+| --- | --- | --- |
+| `layout-second-output-direct` | `sway-stage load`, run by the harness | `mixed-nesting`: a 4:3:3 split whose middle column holds the final focus |
+| `layout-second-output-menu` | `sway-stage menu`, started by Sway's `exec` with the [Fuzzel substitute](#sway-exec-entry-points) | `uneven-siblings`: a 5:3:2 split |
+
+Each requires exit 0 with empty stdout and stderr; no workspace event at all, so `2` stayed
+focused and nothing was selected, created, removed, or moved; a launch record of each window
+exactly once, in layout order; one new window per leaf, bound by ordered new-window events,
+owned and placed only on `2`, which keeps its identity and stays under `HEADLESS-2`; the
+configured hierarchy, order, shares, and final focus; and unchanged foreign windows and
+fixture. Shares are relative, so sizing is also tied to the output: `2`'s rectangle must equal
+the logical area that `get_outputs` reports for `HEADLESS-2` (1920×1080 at 2560,0), and the
+layout's root split, through any single-child wrapper, must tile exactly that area along its
+axis, without gaps or overlap. The private compositor has no bar, gaps, or borders. Runs
+print the measured root extents, 768, 576, and 576 pixels and 960, 576, and 384 pixels.
+
+The menu case's private directories also hold a valid one-window decoy layout,
+`layout-second-output-decoy`, which records its launches in the same file and sorts first,
+and a valid profile named after the case. The entry script must confirm Sway's exported
+launch context. The substitute must receive exactly `--dmenu`,
+`--no-exit-on-keyboard-focus-loss`, `--no-sort`, `--index`, `--output=HEADLESS-2`, and
+`--prompt=> `, and be offered exactly `Capture session profile…`,
+`Layout: layout-second-output-decoy`, `Layout: layout-second-output-menu`, and
+`Profile: layout-second-output-menu`: the focused workspace is empty, and the fixture's
+workspace is capturable. It answers with index 2. Only the launch record and the verified
+windows on `2` prove that this index loaded the selected layout; another index would have
+launched the decoy or nothing.
+
+Verified cleanup closes only the layout's windows by exact ID and returns to `1`. The only
+workspace event is that focus change, because `2` stays shown on its own output, and the
+complete baseline with the original `2` is reverified.
+
+A negative check on 2026-11-15, with sway-stage temporarily passing `--output=HEADLESS-1` to
+Fuzzel, failed the menu case on its prompt arguments.
 
 ##### Alternating multi-output profile
 
@@ -725,7 +777,8 @@ opens no window. The substitute records its arguments and the rows sway-stage wr
 prints the 0-based index of the one row equal to the scenario's selection, as Fuzzel's
 `--index` does, and exits 0. A missing or repeated row, or a second prompt, makes it exit 1,
 which sway-stage reports as a Fuzzel failure. The harness then requires the prompt's exact
-arguments, including `--index` and `--output=HEADLESS-1`, and exactly the rows
+arguments, including `--index` and `--output=HEADLESS-1` (the two-output session's
+[menu load](#loads-on-the-second-output) requires `--output=HEADLESS-2`), and exactly the rows
 `Capture session profile…`, `Layout: NAME`, and `Profile: NAME`, in that order: the focused
 workspace is empty and the fixture's workspace is capturable. The selected index must be
 the scenario's row. Fuzzel itself, keyboard selection, and rendering remain

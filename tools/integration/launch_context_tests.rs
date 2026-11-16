@@ -246,6 +246,41 @@ fn menu_evidence_requires_the_prompt_the_rows_and_the_case_selection() {
 }
 
 #[test]
+fn explicit_rows_require_the_prompt_on_the_expected_output() {
+    let rows = crate::secondary_output::menu_rows();
+    let selection = crate::secondary_output::menu_selection();
+    let offered_rows = rows.join("\n") + "\n";
+    let second_output_arguments = MENU_ARGUMENTS.replace("HEADLESS-1", "HEADLESS-2");
+
+    menu_evidence(&second_output_arguments, &offered_rows, "2\n")
+        .verify_rows(&rows, &selection, "HEADLESS-2")
+        .unwrap();
+
+    // The prompt must name exactly the expected output, whichever output the caller expects.
+    let error = menu_evidence(MENU_ARGUMENTS, &offered_rows, "2\n")
+        .verify_rows(&rows, &selection, "HEADLESS-2")
+        .unwrap_err();
+    assert_contains(&error, "menu prompt arguments differ");
+    assert!(
+        menu_evidence(&second_output_arguments, &offered_rows, "2\n")
+            .verify_rows(&rows, &selection, OUTPUT_NAME)
+            .is_err()
+    );
+    let without_output = second_output_arguments.replace("--output=HEADLESS-2\n", "");
+    assert!(
+        menu_evidence(&without_output, &offered_rows, "2\n")
+            .verify_rows(&rows, &selection, "HEADLESS-2")
+            .is_err()
+    );
+
+    // Selecting the decoy's row, the row before the case's, is not the case's selection.
+    let error = menu_evidence(&second_output_arguments, &offered_rows, "1\n")
+        .verify_rows(&rows, &selection, "HEADLESS-2")
+        .unwrap_err();
+    assert_contains(&error, "menu selection differs");
+}
+
+#[test]
 fn the_profile_has_one_entry_for_the_target() {
     assert_eq!(
         profile_configuration(Case::AncestryOnly, "3"),

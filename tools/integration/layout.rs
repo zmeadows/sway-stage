@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::ipc::{Floating, Layout, NodeType, Rect, ScratchpadState, Shell, TreeNode};
+use crate::ipc::{Floating, Layout, NodeType, Output, Rect, ScratchpadState, Shell, TreeNode};
 use crate::observation::walk;
 use crate::ownership::AcceptedWindows;
 use crate::scenarios::{ConfiguredNode, Scenario, describe_path, diagnostic_yaml};
@@ -502,12 +502,94 @@ fn measure_split(
     Ok(())
 }
 
+/// Requires `workspace` to fill exactly the logical area that `get_outputs` reports for
+/// `output_name`, and its root split's children to tile that area along the split axis,
+/// without gaps or overlap. Shares are relative, so this is what ties a layout's sizing to
+/// the dimensions of the output it was actually built on. The private compositor has no
+/// bar, gaps, or borders. Returns the root children's extents in pixels, in visual order.
+pub fn verify_fills_output(
+    workspace: &TreeNode,
+    outputs: &[Output],
+    output_name: &str,
+) -> Result<Vec<i32>, String> {
+    let output = outputs
+        .iter()
+        .find(|output| output.name == output_name)
+        .ok_or_else(|| format!("get_outputs reports no {output_name}"))?;
+    if !output.active {
+        return Err(format!("{output_name} is not active"));
+    }
+    if workspace.rect != output.rect {
+        return Err(format!(
+            "workspace {:?} has {:?}, but {output_name} reports {:?}",
+            workspace.name, workspace.rect, output.rect
+        ));
+    }
+
+    // sway-stage may wrap the root group in single-child containers, which fill the
+    // workspace too.
+    let mut root = workspace;
+    while let [only_child] = root.nodes.as_slice()
+        && !is_window(only_child)
+    {
+        if only_child.rect != workspace.rect {
+            return Err(format!(
+                "container id={} at {:?} does not fill workspace {:?}",
+                only_child.id, only_child.rect, workspace.name
+            ));
+        }
+        root = only_child;
+    }
+    if !matches!(root.layout, Layout::SplitH | Layout::SplitV) {
+        return Err(format!(
+            "workspace {:?} has no root split: {}",
+            workspace.name,
+            outline(workspace)
+        ));
+    }
+
+    let (area_start, area_extent) = span(&workspace.rect, root.layout);
+    let area_cross_span = cross_span(&workspace.rect, root.layout);
+    let mut next_start = area_start;
+    let mut extents = Vec::new();
+    for child in &root.nodes {
+        let (start, extent) = span(&child.rect, root.layout);
+        let continues_tiling = start == next_start
+            && extent > 0
+            && cross_span(&child.rect, root.layout) == area_cross_span;
+        if !continues_tiling {
+            return Err(format!(
+                "container id={} at {:?} does not continue tiling {output_name}'s {:?}",
+                child.id, child.rect, output.rect
+            ));
+        }
+        next_start += extent;
+        extents.push(extent);
+    }
+    if next_start != area_start + area_extent {
+        return Err(format!(
+            "root children {extents:?} do not span {output_name}'s {:?}",
+            output.rect
+        ));
+    }
+    Ok(extents)
+}
+
 /// A rectangle's position and extent along a split axis.
 fn span(rect: &Rect, layout: Layout) -> (i32, i32) {
     match layout {
         Layout::SplitH => (rect.x, rect.width),
         Layout::SplitV => (rect.y, rect.height),
-        _ => unreachable!("measure_split is only called for splits"),
+        _ => unreachable!("spans are measured only along splits"),
+    }
+}
+
+/// A rectangle's position and extent across a split axis.
+fn cross_span(rect: &Rect, layout: Layout) -> (i32, i32) {
+    match layout {
+        Layout::SplitH => (rect.y, rect.height),
+        Layout::SplitV => (rect.x, rect.width),
+        _ => unreachable!("spans are measured only along splits"),
     }
 }
 

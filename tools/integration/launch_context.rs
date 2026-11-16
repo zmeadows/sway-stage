@@ -426,11 +426,11 @@ impl MenuEvidence {
         })
     }
 
-    /// Requires the menu's one selection prompt, on the virtual output that its snapshot
-    /// recorded, offering exactly the rows the specification orders, with the case's row
-    /// selected by its index. The empty focused workspace offers layouts rather than
-    /// workspace capture, and the fixture's capturable workspace makes profile capture
-    /// eligible.
+    /// Requires the menu's one selection prompt, on the one-output session's virtual output
+    /// that its snapshot recorded, offering exactly the rows the specification orders, with
+    /// the case's row selected by its index. The empty focused workspace offers layouts
+    /// rather than workspace capture, and the fixture's capturable workspace makes profile
+    /// capture eligible.
     pub fn verify(&self, case: Case) -> Result<(), String> {
         let selection = case
             .menu_selection()
@@ -440,14 +440,20 @@ impl MenuEvidence {
             format!("Layout: {}", case.name()),
             format!("Profile: {}", case.name()),
         ];
-        self.verify_rows(&expected_rows, &selection)
+        self.verify_rows(&expected_rows, &selection, OUTPUT_NAME)
     }
 
-    /// Requires the menu's one selection prompt on the virtual output, offering exactly
-    /// `expected_rows` in order, with `selection` selected by its index.
-    pub fn verify_rows(&self, expected_rows: &[String], selection: &str) -> Result<(), String> {
+    /// Requires the menu's one selection prompt on `output_name`, the output that holds the
+    /// workspace focused when the menu started, offering exactly `expected_rows` in order,
+    /// with `selection` selected by its index.
+    pub fn verify_rows(
+        &self,
+        expected_rows: &[String],
+        selection: &str,
+        output_name: &str,
+    ) -> Result<(), String> {
         let expected_arguments = format!(
-            "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output={OUTPUT_NAME}\n--prompt=> \n"
+            "--dmenu\n--no-exit-on-keyboard-focus-loss\n--no-sort\n--index\n--output={output_name}\n--prompt=> \n"
         );
         if self.arguments != expected_arguments {
             return Err(format!(

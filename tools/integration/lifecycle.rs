@@ -28,7 +28,7 @@ use crate::ipc::{
 };
 use crate::layout::{
     LayoutMeasurements, Shape, Signature, is_window, outline, remove_from_shape, shape, signature,
-    verify_layout,
+    verify_fills_output, verify_layout,
 };
 use crate::observation::{
     Events, ExpectedSwitch, ExpectedSwitches, Snapshot, WorkspaceIdentity, snapshot,
@@ -46,7 +46,7 @@ use crate::scenarios::{
 use crate::session_roundtrip::{self, SessionWorkspace};
 use crate::{
     alternating_profile, floating_refusal, held_launch, interference, launch_context, load_failure,
-    output_expectation, output_migration, process, profile,
+    output_expectation, output_migration, process, profile, secondary_output,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -75,8 +75,8 @@ const ASSIGNED_WORKSPACE: &str = "4";
 /// floating-occupancy refusals, the interfered loads, the held-launch interference, the
 /// interfered profiles, the profile cases, the sequentially verified profiles, the Sway exec
 /// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
-/// session's output-expectation profiles, its alternating profile, its cross-output profile,
-/// and the output migration.
+/// session's output-expectation profiles, its standalone loads on the second output, its
+/// alternating profile, its cross-output profile, and the output migration.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -94,19 +94,24 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.push(session_roundtrip::SCENARIO);
     names.push(ASSIGNED_WORKSPACE_SCENARIO);
     names.extend(output_expectation::CASES.iter().map(|case| case.name()));
+    names.extend(secondary_output::CASES.iter().map(|case| case.name()));
     names.push(alternating_profile::SCENARIO);
     names.push(profile::CROSS_OUTPUT_SCENARIO);
     names.push(output_migration::SCENARIO);
     names
 }
 
-/// The session a scenario runs in. Only the profiles that name outputs and the output
-/// migration need a second one.
+/// The session a scenario runs in. Only the profiles that name outputs, the loads on the
+/// second output, and the output migration need a second one.
 pub fn output_setup(scenario_name: &str) -> OutputSetup {
     let expects_outputs = output_expectation::CASES
         .iter()
         .any(|case| case.name() == scenario_name);
+    let loads_on_second_output = secondary_output::CASES
+        .iter()
+        .any(|case| case.name() == scenario_name);
     let needs_two_outputs = expects_outputs
+        || loads_on_second_output
         || scenario_name == alternating_profile::SCENARIO
         || scenario_name == profile::CROSS_OUTPUT_SCENARIO
         || scenario_name == output_migration::SCENARIO;
@@ -251,6 +256,21 @@ impl OutputProfile {
     fn load_timeout(&self) -> Duration {
         self.layouts.iter().map(load_timeout).sum()
     }
+}
+
+/// What a standalone load on its focused, empty target must leave alone: every container
+/// that existed before it, and every window outside the target.
+struct FocusedLoadBaseline {
+    preexisting: HashSet<i64>,
+    foreign: ForeignWindows,
+}
+
+/// A standalone load that the harness has verified independently on its target.
+struct VerifiedFocusedLoad {
+    loaded: Snapshot,
+    accepted: AcceptedWindows,
+    /// The extents, in pixels and visual order, of the root split's children along its axis.
+    root_extents: Vec<i32>,
 }
 
 struct ForeignFixture {
@@ -527,12 +547,13 @@ impl Harness {
     }
 
     /// The two-output session: the same foreign fixture on workspace "1" of the first
-    /// output, then the selected scenarios in suite order. Each output-expectation case and
-    /// the alternating profile start from the two-output baseline and restore it. The
-    /// cross-output profile removes the second output's initial workspace, so it runs after
-    /// them. The output migration removes whichever empty workspace the second output shows
-    /// and leaves its own target there, so it runs last; it establishes its own starting
-    /// point with or without the cross-output profile before it.
+    /// output, then the selected scenarios in suite order. Each output-expectation case, the
+    /// loads on the second output, and the alternating profile start from the two-output
+    /// baseline and restore it. The cross-output profile removes the second output's initial
+    /// workspace, so it runs after them. The output migration removes whichever empty
+    /// workspace the second output shows and leaves its own target there, so it runs last;
+    /// it establishes its own starting point with or without the cross-output profile before
+    /// it.
     fn execute_two_outputs(&mut self, selected: &[&'static str]) -> Result<(), String> {
         self.stage = "fresh two-output compositor".into();
         let initial = snapshot(&self.sway, &mut self.events, None)?;
@@ -566,6 +587,12 @@ impl Harness {
                 output_expectation::Outcome::Success => {
                     self.run_existing_other_output(case, &directory, &second_output_workspace)?
                 }
+            }
+        }
+        for case in secondary_output::CASES {
+            if selected.contains(&case.name()) {
+                process::check_interruption()?;
+                self.run_second_output_load(case, &directory, &second_output_workspace)?;
             }
         }
         if selected.contains(&alternating_profile::SCENARIO) {
@@ -1778,6 +1805,405 @@ impl Harness {
         Ok((accepted, moved_at))
     }
 
+    /// Loads a weighted layout on the second output's empty initial workspace, which the
+    /// harness first selects from the fixture's workspace: with `sway-stage load`, or through
+    /// the menu that Sway's `exec` starts there with a Fuzzel substitute. sway-stage must build
+    /// it on that exact workspace, sized for the second output's own area, and select, create,
+    /// remove, or move no workspace. Verified cleanup then closes only its windows and returns
+    /// to the fixture's workspace, which restores the two-output baseline.
+    fn run_second_output_load(
+        &mut self,
+        case: secondary_output::Case,
+        directory: &TemporaryConfigurations,
+        second_output_workspace: &WorkspaceIdentity,
+    ) -> Result<(), String> {
+        let name = case.name();
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        let layout = secondary_output::layout(
+            case,
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+        );
+        layouts_directory.write(layout.name, &configuration_yaml(&layout))?;
+        check_configuration(
+            &self.binary,
+            &layouts_directory.path,
+            layout.name,
+            &self.stage,
+        )?;
+        let menu_entry = match case {
+            secondary_output::Case::Direct => None,
+            secondary_output::Case::Menu => Some(self.prepare_second_output_menu(
+                &files,
+                &layouts_directory,
+                &layout,
+                &launch_script_path,
+                &launch_record_path,
+            )?),
+        };
+
+        self.stage = format!(
+            "{name}: select workspace {SECOND_OUTPUT_INITIAL_WORKSPACE} on {SECOND_OUTPUT_NAME}"
+        );
+        let target = self.select_second_output_workspace(second_output_workspace)?;
+        self.stage = format!("{name}: fresh workspace baseline");
+        let load_baseline = self.record_focused_load_baseline(&target)?;
+
+        match &menu_entry {
+            None => {
+                self.stage = format!("{name}: load");
+                self.run_standalone_load(&layouts_directory.path, &layout)?;
+            }
+            Some(entry) => {
+                // Sway records the focused second-output workspace in the exec's launch context.
+                self.stage = format!("{name}: menu through Sway's exec");
+                let outcome = exec_sway_stage(&self.sway, entry)?;
+                if !outcome.stderr.is_empty() {
+                    return Err(format!(
+                        "the menu reported unexpected diagnostics: {}",
+                        outcome.stderr.trim()
+                    ));
+                }
+            }
+        }
+
+        self.stage = format!("{name}: independent verification");
+        let verified =
+            self.verify_focused_load(&target, SECOND_OUTPUT_NAME, &layout, &load_baseline)?;
+        // Each window of the layout launched once, in order, and nothing else: in the menu
+        // case, never the decoy, which records its launches in the same file.
+        verify_launch_record(&launch_record_path, std::slice::from_ref(&layout))?;
+        if let Some(entry) = &menu_entry {
+            launch_context::MenuEvidence::read(&entry.evidence_directory)?.verify_rows(
+                &secondary_output::menu_rows(),
+                &secondary_output::menu_selection(),
+                SECOND_OUTPUT_NAME,
+            )?;
+            println!(
+                "      Fuzzel prompt on {SECOND_OUTPUT_NAME} offered {:?}; the row index of {:?} \
+                 loaded it",
+                secondary_output::menu_rows(),
+                secondary_output::menu_selection()
+            );
+        }
+        println!(
+            "      workspace {} id={} on {SECOND_OUTPUT_NAME} received layout {:?} with new \
+             windows {:?}; its root children span {:?} px of the output",
+            target.workspace.name,
+            target.workspace.id,
+            layout.name,
+            verified.accepted.keys().collect::<Vec<_>>(),
+            verified.root_extents
+        );
+
+        self.stage = format!("{name}: verified cleanup");
+        self.clean_focused_load(&target, &layout, &load_baseline, &verified)?;
+
+        // The emptied workspace stays shown on its own output as focus leaves it, so Sway
+        // keeps it.
+        self.stage = format!("{name}: return to the fixture's workspace");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let returned = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &target.workspace,
+            &fixture.workspace.name,
+            &fixture.progress.accepted,
+        )?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: target.workspace.id,
+            to: &fixture.workspace,
+        }];
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+
+        self.stage = format!("{name}: two-output baseline restored");
+        self.verify_two_output_baseline(second_output_workspace)?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Writes the menu's other offered configurations, a decoy layout and a profile, the
+    /// Fuzzel substitute that selects the case's layout, and the script that Sway's `exec`
+    /// runs. Returns the menu's exec entry for `layout`.
+    fn prepare_second_output_menu(
+        &self,
+        files: &TemporaryConfigurations,
+        layouts_directory: &TemporaryConfigurations,
+        layout: &Scenario,
+        launch_script_path: &Path,
+        launch_record_path: &Path,
+    ) -> Result<ExecEntry, String> {
+        let decoy = secondary_output::menu_decoy_layout(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(launch_script_path)?,
+            utf8_path(launch_record_path)?,
+        );
+        layouts_directory.write(decoy.name, &configuration_yaml(&decoy))?;
+        check_configuration(
+            &self.binary,
+            &layouts_directory.path,
+            decoy.name,
+            &self.stage,
+        )?;
+
+        // The profile check also validates the layout that the profile references.
+        let profiles_directory = files.subdirectory("profiles")?;
+        profiles_directory.write(layout.name, &secondary_output::menu_profile_configuration())?;
+        let mut check = Command::new(&self.binary);
+        check
+            .arg("--layouts-dir")
+            .arg(&layouts_directory.path)
+            .arg("--profiles-dir")
+            .arg(&profiles_directory.path)
+            .args(["profile", "check", layout.name]);
+        self.sway.select_socket(&mut check);
+        if process::run(check, &self.stage, IPC_TIMEOUT)? != format!("{}: valid\n", layout.name) {
+            return Err("unexpected profile check output".into());
+        }
+
+        // The entry script puts this substitute first on the PATH that the menu searches.
+        let evidence_directory = files.subdirectory("evidence")?;
+        let substitute_directory = files.subdirectory("fuzzel-substitute")?;
+        let substitute = launch_context::fuzzel_substitute_script(
+            &secondary_output::menu_selection(),
+            utf8_path(&evidence_directory.path)?,
+        );
+        substitute_directory.create_executable("fuzzel", &substitute)?;
+        let sway_stage_command = vec![
+            utf8_path(&self.binary)?.to_owned(),
+            "--layouts-dir".to_owned(),
+            utf8_path(&layouts_directory.path)?.to_owned(),
+            "--profiles-dir".to_owned(),
+            utf8_path(&profiles_directory.path)?.to_owned(),
+            "menu".to_owned(),
+        ];
+        let entry_script = launch_context::entry_script(
+            launch_context::EntryMode::Inherited,
+            utf8_path(&evidence_directory.path)?,
+            Some(utf8_path(&substitute_directory.path)?),
+            &sway_stage_command,
+        );
+        let entry_script_path = files.path.join("exec-entry.sh");
+        fs::write(&entry_script_path, entry_script)
+            .map_err(|error| format!("write exec entry script: {error}"))?;
+
+        Ok(ExecEntry {
+            layout: layout.clone(),
+            entry_script_path,
+            evidence_directory: evidence_directory.path,
+            launch_record_path: launch_record_path.to_owned(),
+        })
+    }
+
+    /// From the two-output baseline, selects the second output's empty initial workspace.
+    /// Sway only moves focus there: nothing is created or removed, and each output still
+    /// shows its initial workspace. Returns that workspace as a target with its original
+    /// identity, number, and output.
+    fn select_second_output_workspace(
+        &mut self,
+        second_output_workspace: &WorkspaceIdentity,
+    ) -> Result<profile::Target, String> {
+        let (_, _, baseline) = self.verify_two_output_baseline(second_output_workspace)?;
+
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &fixture.workspace,
+            SECOND_OUTPUT_INITIAL_WORKSPACE,
+            &AcceptedWindows::new(),
+        )?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: fixture.workspace.id,
+            to: second_output_workspace,
+        }];
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        session_roundtrip::require_workspace_names(
+            &selected,
+            &[FIXTURE_WORKSPACE, SECOND_OUTPUT_INITIAL_WORKSPACE],
+        )?;
+
+        let target = profile::Target::record(&selected, SECOND_OUTPUT_INITIAL_WORKSPACE)?
+            .ok_or("the second output's initial workspace is missing")?;
+        if target.workspace != *second_output_workspace {
+            return Err("the second output's initial workspace was replaced".into());
+        }
+        if selected.focused_workspace_id != target.workspace.id {
+            return Err("the second output's initial workspace is not focused".into());
+        }
+        require_empty(target.verify(&selected)?)?;
+        baseline.require_on_output(&selected, target.workspace.id, SECOND_OUTPUT_NAME)?;
+        if !profile::shows_initial_workspaces(&self.sway.get_outputs()?) {
+            return Err("an output stopped showing its initial workspace".into());
+        }
+        fixture.foreign.verify(&selected)?;
+        verify_fixture_state(
+            &selected,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        Ok(target)
+    }
+
+    /// Records what a standalone load on the focused, empty `target` must leave alone.
+    fn record_focused_load_baseline(
+        &mut self,
+        target: &profile::Target,
+    ) -> Result<FocusedLoadBaseline, String> {
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        if before.focused_workspace_id != target.workspace.id {
+            return Err(format!(
+                "workspace {} must be focused before the load",
+                target.workspace.name
+            ));
+        }
+        require_empty(target.verify(&before)?)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        verify_fixture_state(
+            &before,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+
+        let preexisting = walk(&before.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        let foreign = ForeignWindows::record(&before, target.workspace.id)?;
+        Ok(FocusedLoadBaseline {
+            preexisting,
+            foreign,
+        })
+    }
+
+    /// Runs `sway-stage load` for `layout`, found in `layouts_directory`, against the
+    /// session's compositor, and requires success with no output and no diagnostics.
+    fn run_standalone_load(
+        &self,
+        layouts_directory: &Path,
+        layout: &Scenario,
+    ) -> Result<(), String> {
+        let mut load = configured_command(&self.binary, layouts_directory, "load", layout.name);
+        self.sway.select_socket(&mut load);
+
+        process::check_interruption()?;
+        let completed = process::run_with_status(load, &self.stage, load_timeout(layout))?;
+        process::check_interruption()?;
+        let silent_success = completed.status.success()
+            && completed.stdout.is_empty()
+            && completed.stderr.is_empty();
+        if !silent_success {
+            return Err(format!(
+                "load {} did not succeed silently: {}: {}",
+                layout.name,
+                completed.status,
+                completed.stderr.trim()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verifies a completed standalone load of `layout` on the focused `target` from a fresh
+    /// snapshot, independently of sway-stage. There is no workspace event at all, so the
+    /// target stayed focused and nothing was selected, created, removed, or moved. The foreign
+    /// windows and the fixture are unchanged. Each leaf has one new window, owned and placed
+    /// only on the target, which keeps its identity and stays on `output_name`. The layout's
+    /// hierarchy, order, sizing, and final focus are as configured, and its root split tiles
+    /// that output's actual area.
+    fn verify_focused_load(
+        &mut self,
+        target: &profile::Target,
+        output_name: &str,
+        layout: &Scenario,
+        baseline: &FocusedLoadBaseline,
+    ) -> Result<VerifiedFocusedLoad, String> {
+        let loaded = snapshot(&self.sway, &mut self.events, None)?;
+        profile::verify_workspace_events(&loaded.workspace_events, &[])?;
+        baseline.foreign.verify(&loaded)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        verify_fixture_state(
+            &loaded,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        if loaded.focused_workspace_id != target.workspace.id {
+            return Err(format!(
+                "workspace {} is no longer focused after the load",
+                target.workspace.name
+            ));
+        }
+
+        let accepted = bind_launches(&loaded.window_events, &layout.layout, &baseline.preexisting)?;
+        verify_ownership(
+            &loaded.tree,
+            target.workspace.id,
+            &layout.layout,
+            &baseline.preexisting,
+            &accepted,
+        )?;
+        let target_node = target.verify(&loaded)?;
+        output_migration::single_output(&loaded, target.workspace.id, output_name)?;
+        let measurements = verify_layout(target_node, layout, &accepted)?;
+        for note in &measurements.sizing_notes {
+            println!("      {note}");
+        }
+        let root_extents =
+            verify_fills_output(target_node, &self.sway.get_outputs()?, output_name)?;
+
+        Ok(VerifiedFocusedLoad {
+            loaded,
+            accepted,
+            root_extents,
+        })
+    }
+
+    /// Closes only a verified load's windows, by exact ID, through the guarded cleanup, and
+    /// requires its target left empty and focused with its identity and output.
+    fn clean_focused_load(
+        &mut self,
+        target: &profile::Target,
+        layout: &Scenario,
+        baseline: &FocusedLoadBaseline,
+        verified: &VerifiedFocusedLoad,
+    ) -> Result<(), String> {
+        let foreign = ForeignWindows::record(&verified.loaded, target.workspace.id)?;
+        let context = CleanupContext {
+            target: &target.workspace,
+            layout: &layout.layout,
+            preexisting_ids: &baseline.preexisting,
+            foreign: &foreign,
+        };
+        cleanup(
+            &self.sway,
+            &mut self.events,
+            &context,
+            &verified.accepted,
+            signature(verified.loaded.focused_workspace()),
+        )?;
+
+        let cleaned = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&cleaned.window_events, None)?;
+        foreign.verify(&cleaned)?;
+        if cleaned.focused_workspace_id != target.workspace.id {
+            return Err("cleanup left another workspace focused".into());
+        }
+        require_empty(target.verify(&cleaned)?)
+    }
+
     /// Writes the case's layout, its one-entry profile, a menu case's Fuzzel substitute,
     /// and the script that Sway's `exec` runs. The configuration is checked directly, as in
     /// every other scenario; only the load goes through Sway's exec.
@@ -2582,8 +3008,11 @@ impl Harness {
             snapshot_with_switches(&self.sway, &mut self.events, &expected_switches)?;
 
         self.stage = format!("{name}: independent reload verification");
-        launch_context::MenuEvidence::read(&evidence_directory.path)?
-            .verify_rows(&session_roundtrip::menu_rows(), &selection)?;
+        launch_context::MenuEvidence::read(&evidence_directory.path)?.verify_rows(
+            &session_roundtrip::menu_rows(),
+            &selection,
+            OUTPUT_NAME,
+        )?;
         let mut targets = Vec::new();
         for workspace_name in session_roundtrip::WORKSPACES {
             let target = profile::Target::record(&loaded, workspace_name)?
@@ -5548,8 +5977,12 @@ impl Harness {
 
 /// Runs the entry script through Sway's `exec`, which records the focused workspace in a
 /// launch context, and waits for sway-stage to exit. A failure reports sway-stage's own
-/// diagnostic before any observation that it would make misleading.
-fn exec_sway_stage(sway: &Swaymsg, entry: &ExecEntry) -> Result<(), String> {
+/// diagnostic before any observation that it would make misleading. Returns what the entry
+/// script recorded.
+fn exec_sway_stage(
+    sway: &Swaymsg,
+    entry: &ExecEntry,
+) -> Result<launch_context::ExecOutcome, String> {
     process::check_interruption()?;
     sway.exec_script(&entry.entry_script_path)?;
     let outcome =
@@ -5557,7 +5990,8 @@ fn exec_sway_stage(sway: &Swaymsg, entry: &ExecEntry) -> Result<(), String> {
     process::check_interruption()?;
 
     outcome.require_launch_context()?;
-    outcome.require_success()
+    outcome.require_success()?;
+    Ok(outcome)
 }
 
 /// Verifies one round-trip workspace's arrangement. Only the workspace that is
@@ -5963,6 +6397,28 @@ fn verify_profile_launch_record(
         ));
     }
     Ok(())
+}
+
+/// Selects `destination_name` from the focused `origin` as the one switch a fence expects,
+/// and returns the fresh snapshot. Focus returning to one of the destination's own
+/// `refocused` windows is the only window activity allowed. The caller verifies the exact
+/// workspace events, which may name a workspace that the selection created.
+fn select_workspace(
+    sway: &Swaymsg,
+    events: &mut Events,
+    origin: &WorkspaceIdentity,
+    destination_name: &str,
+    refocused: &AcceptedWindows,
+) -> Result<Snapshot, String> {
+    process::check_interruption()?;
+    sway.switch_workspace(destination_name)?;
+    let transition = ExpectedSwitch {
+        from_id: origin.id,
+        destination_name: destination_name.into(),
+    };
+    let selected = snapshot(sway, events, Some(&transition))?;
+    require_return_focus(&selected.window_events, refocused)?;
+    Ok(selected)
 }
 
 fn require_return_focus(

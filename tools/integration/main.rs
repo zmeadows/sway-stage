@@ -31,6 +31,7 @@ mod preservation;
 mod process;
 mod profile;
 mod scenarios;
+mod secondary_output;
 mod session_roundtrip;
 
 use std::env;

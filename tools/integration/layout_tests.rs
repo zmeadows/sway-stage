@@ -892,3 +892,89 @@ fn inactive_profile_layout_requires_the_saved_focus_path_and_full_layout() {
         );
     }
 }
+
+/// A workspace on HEADLESS-2, as `get_outputs` reports that output in the two-output
+/// session, holding `children` inside one horizontal wrapper that fills it.
+fn second_output_workspace(workspace_rect: Value, children: Vec<Value>) -> TreeNode {
+    let wrapper = group(40, "splith", workspace_rect.clone(), children);
+    let mut workspace =
+        crate::fixtures::container(11, "workspace", "splith", workspace_rect, vec![wrapper]);
+    workspace["name"] = json!("2");
+    workspace["num"] = json!(2);
+    parse_tree(workspace)
+}
+
+#[test]
+fn a_layout_fills_the_area_that_its_own_output_reports() {
+    let outputs = crate::fixtures::two_output_outputs();
+    let window = |id: i64, x: i32, width: i32| wayland_window(id, "foot", rect(x, 0, width, 1080));
+    // uneven-siblings' 5:3:2 on HEADLESS-2's 1920 logical pixels, which start at x=2560.
+    let tiled = vec![
+        window(41, 2560, 960),
+        window(42, 3520, 576),
+        window(43, 4096, 384),
+    ];
+    let workspace = second_output_workspace(rect(2560, 0, 1920, 1080), tiled.clone());
+    assert_eq!(
+        verify_fills_output(&workspace, &outputs, "HEADLESS-2").unwrap(),
+        [960, 576, 384]
+    );
+
+    // The same workspace is not HEADLESS-1's area, and an output must exist and be active.
+    assert_contains(
+        &verify_fills_output(&workspace, &outputs, "HEADLESS-1").unwrap_err(),
+        "but HEADLESS-1 reports",
+    );
+    assert!(verify_fills_output(&workspace, &outputs, "HEADLESS-9").is_err());
+    let mut inactive_outputs = crate::fixtures::two_output_outputs();
+    inactive_outputs[1].active = false;
+    assert!(verify_fills_output(&workspace, &inactive_outputs, "HEADLESS-2").is_err());
+
+    // Sized for the first output's dimensions, though placed at the second's position.
+    let first_output_sized = second_output_workspace(rect(2560, 0, 2560, 1440), tiled);
+    assert!(verify_fills_output(&first_output_sized, &outputs, "HEADLESS-2").is_err());
+}
+
+#[test]
+fn the_root_children_must_tile_the_output_without_gaps_or_overlap() {
+    let outputs = crate::fixtures::two_output_outputs();
+    let area = || rect(2560, 0, 1920, 1080);
+    let window = |id: i64, x: i32, y: i32, width: i32, height: i32| {
+        wayland_window(id, "foot", rect(x, y, width, height))
+    };
+
+    let untiled_children = [
+        // A gap between the first and second child.
+        vec![
+            window(41, 2560, 0, 900, 1080),
+            window(42, 3480, 0, 1000, 1080),
+        ],
+        // Overlapping children.
+        vec![
+            window(41, 2560, 0, 1000, 1080),
+            window(42, 3500, 0, 980, 1080),
+        ],
+        // Short of the output's right edge.
+        vec![
+            window(41, 2560, 0, 960, 1080),
+            window(42, 3520, 0, 900, 1080),
+        ],
+        // Short of the output's full height.
+        vec![
+            window(41, 2560, 0, 960, 1080),
+            window(42, 3520, 0, 960, 1000),
+        ],
+    ];
+    for children in untiled_children {
+        let workspace = second_output_workspace(area(), children);
+        assert!(verify_fills_output(&workspace, &outputs, "HEADLESS-2").is_err());
+    }
+
+    // A wrapper that does not fill the workspace fails before its children are measured.
+    let mut workspace = second_output_workspace(area(), vec![window(41, 2560, 0, 1920, 1080)]);
+    workspace.nodes[0].rect.width = 1900;
+    assert_contains(
+        &verify_fills_output(&workspace, &outputs, "HEADLESS-2").unwrap_err(),
+        "does not fill workspace",
+    );
+}

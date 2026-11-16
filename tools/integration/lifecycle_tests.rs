@@ -45,7 +45,7 @@ fn find_and_rename(tree: &mut TreeNode, id: i64, name: &str) {
 }
 
 /// Every registered scenario, in the order a run executes them.
-const SUITE_ORDER: [&str; 60] = [
+const SUITE_ORDER: [&str; 62] = [
     "single-window",
     "horizontal-pair",
     "vertical-pair",
@@ -103,6 +103,8 @@ const SUITE_ORDER: [&str; 60] = [
     "profile-created-output-mismatch",
     "profile-later-created-output-mismatch",
     "profile-existing-other-output",
+    "layout-second-output-direct",
+    "layout-second-output-menu",
     "profile-alternating-outputs",
     "profile-cross-output",
     "interference-output-migration",
@@ -250,16 +252,19 @@ fn filters_select_matching_standard_and_profile_scenarios_in_suite_order() {
     }
 }
 
-/// The two-output session's scenarios, in suite order: the output-expectation profiles and
-/// the alternating profile, which restore the two-output baseline; the cross-output profile,
-/// which removes the second output's initial workspace; and the output migration, which
-/// removes whichever empty workspace the second output shows and leaves its own there.
-const TWO_OUTPUT_ORDER: [&str; 8] = [
+/// The two-output session's scenarios, in suite order: the output-expectation profiles, the
+/// loads on the second output, and the alternating profile, which restore the two-output
+/// baseline; the cross-output profile, which removes the second output's initial workspace;
+/// and the output migration, which removes whichever empty workspace the second output shows
+/// and leaves its own there.
+const TWO_OUTPUT_ORDER: [&str; 10] = [
     "profile-output-mismatch-refusal",
     "profile-output-unavailable-refusal",
     "profile-created-output-mismatch",
     "profile-later-created-output-mismatch",
     "profile-existing-other-output",
+    "layout-second-output-direct",
+    "layout-second-output-menu",
     "profile-alternating-outputs",
     "profile-cross-output",
     "interference-output-migration",
@@ -278,7 +283,10 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
 
     // The two-output scenarios end the suite: the output migration last, after the
     // cross-output profile, which follows every scenario that restores the baseline.
-    assert_eq!(SUITE_ORDER[SUITE_ORDER.len() - 8..], TWO_OUTPUT_ORDER);
+    assert_eq!(
+        SUITE_ORDER[SUITE_ORDER.len() - TWO_OUTPUT_ORDER.len()..],
+        TWO_OUTPUT_ORDER
+    );
     assert_eq!(
         select_scenarios(Some("cross-output")).unwrap(),
         ["profile-cross-output"]
@@ -309,6 +317,19 @@ fn only_the_profiles_that_name_outputs_need_the_two_output_session() {
     assert_eq!(
         select_scenarios(Some("migration")).unwrap(),
         ["interference-output-migration"]
+    );
+    assert_eq!(
+        select_scenarios(Some("second-output")).unwrap(),
+        ["layout-second-output-direct", "layout-second-output-menu"]
+    );
+    // The second output's menu load joins the exec'd menu cases of the one-output session.
+    assert_eq!(
+        select_scenarios(Some("-menu")).unwrap(),
+        [
+            "layout-exec-menu",
+            "profile-exec-menu",
+            "layout-second-output-menu"
+        ]
     );
 }
 
