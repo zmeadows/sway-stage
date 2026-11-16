@@ -25,7 +25,8 @@ Behavior is defined in the [specification](SPECIFICATION.md); verification proce
   and loader interference checks (including in-workspace focus restoration), and additional
   manual profile variants. Real multi-monitor verification remains incomplete; the
   output-migration safeguard is covered offline and in the headless two-output suite, which
-  also covers standalone and menu loading on a second output.
+  also covers standalone and menu loading on a second output and profile capture across
+  both outputs.
   Hardware checks are
   additional acceptance evidence, not a prerequisite for continued development.
 - **Publish v0.1.0.** After acceptance, tag and publish the validated archives, checksums,

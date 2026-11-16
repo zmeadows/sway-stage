@@ -46,18 +46,18 @@ only application the harness launches, and it cannot be replaced or configured. 
 not needed: the menu scenarios use a private substitute. From the repository root:
 
 ```sh
-tools/integration/run.sh                  # all 62 scenarios
+tools/integration/run.sh                  # all 63 scenarios
 tools/integration/run.sh --filter TEXT    # only scenarios whose names contain TEXT
 ```
 
 `run.sh` builds `sway-stage` and the harness in release mode, then runs the selected
 scenarios. `--filter` is a case-sensitive substring match over every scenario name and keeps
 suite order: `--filter single-window` runs one scenario and `--filter profile` the
-twenty-four profile scenarios. Any other argument, a missing or empty TEXT, or a filter that
+twenty-five profile scenarios. Any other argument, a missing or empty TEXT, or a filter that
 matches no scenario exits with status 2 before anything starts.
 
 Each run starts and stops its own Sway on the wlroots headless backend, with one 2560×1440
-`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the ten
+`HEADLESS-1` output and no Xwayland, bar, or input devices. Only when one of the eleven
 [two-output scenarios](#two-output-scenarios) is selected does a second, separate compositor
 start afterwards, with a 1920×1080 `HEADLESS-2` to the right of `HEADLESS-1`;
 `--filter output` starts only that one. Its sockets and private home,
@@ -370,8 +370,10 @@ unexpected result or interruption stops the run without renaming the workspace b
 closing windows. It never renames an occupied workspace.
 
 The four success cases capture with inference disabled into additional private directories,
-using only the two explicit targets; the harness never runs `--all`. All eight use private
-layout/profile directories, explicit directory overrides, and the pinned Sway socket.
+using only the two explicit targets; only the two-output
+[`profile-capture-all-outputs`](#profile-capture-across-both-outputs) runs `--all`. All eight
+use private layout/profile directories, explicit directory overrides, and the pinned Sway
+socket.
 Private launch records cover commands that produce no windows; ordered window events on
 either side of the single expected transition independently establish launch bindings. The
 inactive first workspace is checked through its saved child-focus path. The foreign fixture
@@ -415,22 +417,26 @@ empty and shown on `HEADLESS-2`, and no other workspace.
 | Workspace | Role |
 | --- | --- |
 | `1` | The fixture's workspace on `HEADLESS-1`. Every scenario starts here. |
-| `2` | `HEADLESS-2`'s initial workspace. Every scenario before `profile-cross-output` requires its original identity, and the two [second-output loads](#loads-on-the-second-output) build on it; that profile removes it. |
-| `3` | Created on `HEADLESS-2` by its rule for `profile-cross-output`. |
+| `2` | `HEADLESS-2`'s initial workspace. Every scenario before `profile-cross-output` requires its original identity, and the two [second-output loads](#loads-on-the-second-output) build on it; that profile removes it. `profile-capture-all-outputs` later creates a new, empty `2` for its second capture, which Sway removes during its cleanup. |
+| `3` | Created on `HEADLESS-2` by its rule for `profile-cross-output`. `profile-capture-all-outputs` populates it, or the cross-output profile's empty `3`, and leaves it empty and shown there. |
 | `4`, `5` | No rule places them, so Sway creates them on the focused `HEADLESS-1`. |
 | `6`, `7`, `8` | `profile-alternating-outputs`' created targets. Each is selected from a workspace on the other output, where Sway would otherwise create it, so each has its own rule. |
-| `9` | No rule places it; `interference-output-migration` creates it on the focused `HEADLESS-1`. |
+| `9` | No rule places it; `interference-output-migration` creates it on the focused `HEADLESS-1` and leaves it shown on `HEADLESS-2`. |
+| `notes` | An exact name, which no rule places: `profile-capture-all-outputs` creates and populates it on the focused `HEADLESS-1`, and Sway removes it after cleanup. |
 
 The runner selects the two-output scenarios with the same `--filter` match and runs them in
 suite order, stopping at the first failure. The five output-expectation profiles, the two
 second-output loads, and `profile-alternating-outputs` verify the baseline before they
 start and restore and reverify it afterwards, so any selection of them runs independently,
-before the rest. `profile-cross-output` consumes `2`, so only the output migration runs after
-it. That migration consumes whichever empty workspace `HEADLESS-2` shows, the original `2` or
-the cross-output profile's `3`, and leaves its own `9` there, so it always runs last. Instead
-of the baseline, it establishes its own starting point (see below). `--filter output` selects
-all ten; `--filter output-mismatch` the three mismatch scenarios; `--filter second-output`
-the two second-output loads; `--filter alternating` and `--filter migration` one each.
+before the rest. `profile-cross-output` consumes `2`, so only the output migration and the
+capture across both outputs run after it. Each of those two consumes whichever empty
+workspace `HEADLESS-2` shows, the original `2`, the cross-output profile's `3`, or the
+migration's `9`, and leaves another there: the migration its `9`, the capture its emptied
+`3`. Instead of the baseline, each establishes its own starting point (see below) from any
+of these, so they run last, the capture after the migration. `--filter output` selects all
+eleven; `--filter output-mismatch` the three mismatch scenarios; `--filter second-output`
+the two second-output loads; `--filter alternating`, `--filter migration`, and
+`--filter capture-all` one each.
 
 | Scenario | Independent expectations |
 | --- | --- |
@@ -444,6 +450,7 @@ the two second-output loads; `--filter alternating` and `--filter migration` one
 | `profile-alternating-outputs` | Four entries, each naming its output, alternate between the outputs (below). Require success, each target selected once in entry order, the original `2` kept and `6`, `7`, `8` new, every target on its configured output, each output showing its last target, every window launched once in entry order and bound between its own entry's selection and the next, and every layout, not only the last, intact. Cleanup restores the baseline with the original `2`. |
 | `profile-cross-output` | Load a one-entry profile for `3` with `output: HEADLESS-2`; Sway's rule creates `3` there. Require exactly the creation of `3`, the switch from `1`, and Sway's removal of `2`, matched by its exact identity: without that removal the regression is not demonstrated. Verify `2` is gone, `3` is new, focused, and on `HEADLESS-2`, `1` and the fixture are unchanged on `HEADLESS-1`, and the layout's launch order, ownership, hierarchy, and sizing. |
 | `interference-output-migration` | A standalone load on the new `9` whose target the harness moves to `HEADLESS-2` during the second window's wait (below). Require sway-stage's output-change failure, not a focus loss or timeout, with the moved workspace and its one accepted window left in place. |
+| `profile-capture-all-outputs` | `profile capture --all` of `1`, `notes` on `HEADLESS-1`, and `3` on `HEADLESS-2`, once with `3` shown there while focus stays on `1`, and once beside the empty `2` (below). Require the targets `1`, `3`, `notes` in that order, each draft matching its measured workspace, the empty workspace skipped, and an unchanged desktop. |
 
 The refusals differ in what they may change. A preflight refusal happens before any
 selection, so the whole desktop must stay exactly as it was, even with a valid first entry.
@@ -452,7 +459,8 @@ any completed earlier layout must remain where sway-stage left them: the harness
 no repair, move, rollback, or focus change, then cleans up only after verifying that. The
 successful cases instead require an existing workspace's identity to survive selection and
 construction. Outside the output migration's one deliberate move, the harness never moves a
-workspace, assigns an output, or recreates `2`.
+workspace or assigns an output. It never recreates `2` to restore the baseline; the capture
+creates a new `2` only as its empty workspace, after Sway has removed the original.
 
 ##### Loads on the second output
 
@@ -604,6 +612,72 @@ the harness rejected it. The scenario is therefore a deterministic test of the o
 safeguard, not of focus loss. Its event expectations follow Sway 1.10.1's source and were
 confirmed by repeated headless runs; another Sway release may order these events differently or
 emit a focus event, which the scenario would report as a failure rather than accept.
+
+##### Profile capture across both outputs
+
+`profile-capture-all-outputs` runs the read-only
+`profile capture captured-all --all --no-infer-commands` against a desktop that spans both
+outputs, each time into new private directories:
+
+```sh
+tools/integration/run.sh --filter capture-all
+```
+
+1. **Starting point.** Like the output migration, it requires exactly the fixture's `1` on
+   `HEADLESS-1` and one empty workspace shown on `HEADLESS-2`: the original `2`, the
+   cross-output profile's `3`, or the migration's `9`. If focus is on that workspace, the
+   harness selects `1`, which emits only that focus change.
+2. **Populated workspaces.** The harness selects `notes`, which Sway creates on the focused
+   `HEADLESS-1` (`init`, `focus`), and `sway-stage load` builds `sibling-nested-groups`
+   there, focused on `window3`, the first window of its second column. It then selects `3`:
+   Sway's rule creates it on `HEADLESS-2` and removes the empty workspace it hides there
+   (`init`, `focus`, `empty`), or, after the cross-output profile, only moves focus to that
+   existing `3`. `mixed-native-nesting` is built there, focused on `window3` inside the
+   tabbed group's second tab. Each load is verified like a
+   [second-output load](#loads-on-the-second-output), including the output area it fills,
+   and one launch record holds each window once. Returning to `1` emits only the focus
+   change: `3` stays shown on `HEADLESS-2`, and `notes` is hidden on `HEADLESS-1`.
+3. **Capture while shown.** With `1` focused, `3` is shown on its output but not focused.
+4. **Capture beside an empty workspace.** The harness selects the absent `2`, which Sway's
+   rule creates on `HEADLESS-2`, hiding the populated `3`, which Sway keeps (`init`,
+   `focus`), and returns to `1` (only `focus`). `2` stays shown there, and empty.
+5. **Cleanup.** Selecting `3` from `1` hides the empty `2`, which Sway removes (`focus`,
+   `empty`); verified cleanup closes `3`'s windows by exact ID. Selecting `notes` emits only
+   `focus`, since `3` stays shown; its windows close. Returning to `1` hides the emptied
+   `notes`, which Sway removes (`focus`, `empty`). The scenario ends on `1`, with the emptied
+   `3` shown on `HEADLESS-2`, a starting point that it and the migration both accept.
+
+Before each capture, the harness requires the expected workspaces, focus on `1`, the shown
+workspaces, both populated workspaces' ownership, the unchanged fixture, and, for the second
+capture, `2` empty. Its own reading of the populated workspaces, those with any tiled or
+floating child, ordered by number and then by name, must be exactly `1`, `3`, `notes`. The
+harness created `notes` first, and the tree lists `HEADLESS-1`'s workspaces first, so neither
+creation nor tree order is the profile's. Each capture must then:
+
+- exit 0 with empty stdout, and report on stderr exactly
+  `sway-stage: captured profile "captured-all". Command inference disabled; unresolved commands: 9. Manual editing required.`
+  followed by the paths of the three drafts and the profile, in publication order;
+- write exactly `captured-all-001.yaml` to `captured-all-003.yaml` and `captured-all.yaml`;
+- write a profile that decodes to exactly version 1 and the targets `1`, `3`, and `notes`,
+  as integers and a string, each referencing its ordinal draft, with no output expectation,
+  so the fixture's workspace is included like any other;
+- write drafts that match, line by line, each workspace as the harness measures it: groups,
+  child order, `app_id` selectors, weights within 0.02 of the measured shares, a
+  `command: null` per window, tab selections, and final `focus`. Keyboard focus decides only
+  `1`'s; the harness verifies the selections of `3` and `notes` through Sway's child-focus
+  histories, so a guessed first window fails;
+- change nothing: no workspace event, only harmless window events, and the same tree
+  signature, including identities, geometry, and focus histories, the same workspace list
+  and shown workspaces, unchanged foreign windows, and an unchanged launch record.
+
+The two captures' profiles and drafts must be identical. A private copy of the first, with
+each `command: null` replaced by `["true"]`, must also pass `profile check`; the captured drafts
+themselves stay unresolved and are never checked.
+
+Negative checks on 2026-11-15, each with production temporarily changed, showed that the
+scenario discriminates: ordering `--all` targets by container ID, which is creation order,
+failed on the captured profile's references, and guessing each unfocused workspace's first
+window instead of following its focus history failed on the draft of the shown `3`.
 
 The process-execution case uses a private absolute cwd and a bounded harness helper as
 Foot's direct child. Linux `/proc` checks the child's exact literal arguments, cwd, and

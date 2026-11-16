@@ -45,8 +45,8 @@ use crate::scenarios::{
 };
 use crate::session_roundtrip::{self, SessionWorkspace};
 use crate::{
-    alternating_profile, floating_refusal, held_launch, interference, launch_context, load_failure,
-    output_expectation, output_migration, process, profile, secondary_output,
+    alternating_profile, capture_all, floating_refusal, held_launch, interference, launch_context,
+    load_failure, output_expectation, output_migration, process, profile, secondary_output,
 };
 
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -76,7 +76,8 @@ const ASSIGNED_WORKSPACE: &str = "4";
 /// interfered profiles, the profile cases, the sequentially verified profiles, the Sway exec
 /// entry points, the session round-trip, the assigned-workspace refusal, then the two-output
 /// session's output-expectation profiles, its standalone loads on the second output, its
-/// alternating profile, its cross-output profile, and the output migration.
+/// alternating profile, its cross-output profile, the output migration, and the profile
+/// capture of every populated workspace.
 pub fn suite_scenario_names() -> Vec<&'static str> {
     // Scenario definitions are pure, so placeholder executables suffice for their names.
     let standard = standard_scenarios("names-only", "foot", "sleep");
@@ -98,11 +99,12 @@ pub fn suite_scenario_names() -> Vec<&'static str> {
     names.push(alternating_profile::SCENARIO);
     names.push(profile::CROSS_OUTPUT_SCENARIO);
     names.push(output_migration::SCENARIO);
+    names.push(capture_all::SCENARIO);
     names
 }
 
 /// The session a scenario runs in. Only the profiles that name outputs, the loads on the
-/// second output, and the output migration need a second one.
+/// second output, the output migration, and the capture across both outputs need a second.
 pub fn output_setup(scenario_name: &str) -> OutputSetup {
     let expects_outputs = output_expectation::CASES
         .iter()
@@ -114,7 +116,8 @@ pub fn output_setup(scenario_name: &str) -> OutputSetup {
         || loads_on_second_output
         || scenario_name == alternating_profile::SCENARIO
         || scenario_name == profile::CROSS_OUTPUT_SCENARIO
-        || scenario_name == output_migration::SCENARIO;
+        || scenario_name == output_migration::SCENARIO
+        || scenario_name == capture_all::SCENARIO;
     if needs_two_outputs {
         OutputSetup::TwoOutputs
     } else {
@@ -271,6 +274,14 @@ struct VerifiedFocusedLoad {
     accepted: AcceptedWindows,
     /// The extents, in pixels and visual order, of the root split's children along its axis.
     root_extents: Vec<i32>,
+}
+
+/// What one verified `profile capture --all` wrote: the profile, and each workspace's
+/// draft in profile order, also with its null commands filled for `profile check`.
+struct CapturedProfile {
+    profile_yaml: String,
+    drafts: Vec<String>,
+    filled_drafts: Vec<String>,
 }
 
 struct ForeignFixture {
@@ -550,10 +561,10 @@ impl Harness {
     /// output, then the selected scenarios in suite order. Each output-expectation case, the
     /// loads on the second output, and the alternating profile start from the two-output
     /// baseline and restore it. The cross-output profile removes the second output's initial
-    /// workspace, so it runs after them. The output migration removes whichever empty
-    /// workspace the second output shows and leaves its own target there, so it runs last;
-    /// it establishes its own starting point with or without the cross-output profile before
-    /// it.
+    /// workspace, so it runs after them. The output migration and the capture of every
+    /// populated workspace each remove whichever empty workspace the second output shows and
+    /// leave another there, so they run last; each establishes its own starting point,
+    /// whichever scenarios ran before it.
     fn execute_two_outputs(&mut self, selected: &[&'static str]) -> Result<(), String> {
         self.stage = "fresh two-output compositor".into();
         let initial = snapshot(&self.sway, &mut self.events, None)?;
@@ -606,6 +617,10 @@ impl Harness {
         if selected.contains(&output_migration::SCENARIO) {
             process::check_interruption()?;
             self.run_output_migration(&directory)?;
+        }
+        if selected.contains(&capture_all::SCENARIO) {
+            process::check_interruption()?;
+            self.run_capture_all(&directory)?;
         }
         self.verify_fixture_survived()
     }
@@ -2202,6 +2217,623 @@ impl Harness {
             return Err("cleanup left another workspace focused".into());
         }
         require_empty(target.verify(&cleaned)?)
+    }
+
+    /// `profile capture --all` of a desktop that spans both outputs. From whatever empty
+    /// workspace the second output shows, the harness creates and populates `notes` on the
+    /// first output and then `3` on the second, and returns to the fixture's workspace, so
+    /// that the second output shows the populated `3` while focus stays on `1`. One capture
+    /// runs there. Another runs after the harness has created the empty `2` on the second
+    /// output, hiding `3`, and returned to `1` again. Each must list exactly `1`, `3`, and
+    /// `notes` in that order, with drafts that match the measured workspaces, and change
+    /// nothing. Verified cleanup closes only the populated workspaces' windows. The scenario
+    /// ends on the fixture's workspace with the emptied `3` shown on the second output.
+    fn run_capture_all(&mut self, directory: &TemporaryConfigurations) -> Result<(), String> {
+        let name = capture_all::SCENARIO;
+        self.stage = format!("{name}: preparation");
+        let files = directory.subdirectory(name)?;
+        let layouts_directory = files.subdirectory("layouts")?;
+        let launch_script_path = files.path.join("record-launch.sh");
+        let launch_record_path = files.path.join("launches");
+        fs::write(&launch_script_path, profile::LAUNCH_SCRIPT)
+            .map_err(|error| format!("write launch recorder: {error}"))?;
+        let layouts = capture_all::layouts(
+            &self.run_id,
+            &self.foot,
+            &self.sleep,
+            utf8_path(&launch_script_path)?,
+            utf8_path(&launch_record_path)?,
+        );
+        for layout in &layouts {
+            layouts_directory.write(layout.name, &configuration_yaml(layout))?;
+            check_configuration(
+                &self.binary,
+                &layouts_directory.path,
+                layout.name,
+                &self.stage,
+            )?;
+        }
+        let [named_layout, second_output_layout] = &layouts;
+
+        let (shown_at_start, preexisting) = self.establish_capture_all_start()?;
+
+        // No rule places the named workspace, so Sway creates it on the focused first output.
+        // The fixture's workspace that it hides there holds the fixture, so Sway keeps it.
+        self.stage = format!("{name}: create workspace {}", capture_all::NAMED_WORKSPACE);
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &fixture.workspace,
+            capture_all::NAMED_WORKSPACE,
+            &AcceptedWindows::new(),
+        )?;
+        let named_target = profile::Target::record(&selected, capture_all::NAMED_WORKSPACE)?
+            .ok_or("the named workspace was not created")?;
+        if preexisting.contains(&named_target.workspace.id) {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        let expected_events =
+            session_roundtrip::selection_events(&fixture.workspace, &named_target.workspace, false);
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        output_migration::single_output(&selected, named_target.workspace.id, OUTPUT_NAME)?;
+        if !profile::output_shows(
+            &self.sway.get_outputs()?,
+            SECOND_OUTPUT_NAME,
+            &shown_at_start.name,
+        ) {
+            return Err("the second output stopped showing its empty workspace".into());
+        }
+        let named = self.populate_capture_all_workspace(
+            named_target,
+            &layouts_directory.path,
+            named_layout,
+            OUTPUT_NAME,
+        )?;
+        verify_launch_record(&launch_record_path, &layouts[..1])?;
+
+        // Sway's rule creates the numeric workspace on the second output, unless an earlier
+        // cross-output profile left it as the empty workspace shown there.
+        self.stage = format!(
+            "{name}: select workspace {} on {SECOND_OUTPUT_NAME}",
+            capture_all::SECOND_OUTPUT_WORKSPACE
+        );
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &named.target.workspace,
+            capture_all::SECOND_OUTPUT_WORKSPACE,
+            &AcceptedWindows::new(),
+        )?;
+        let second_output_target =
+            profile::Target::record(&selected, capture_all::SECOND_OUTPUT_WORKSPACE)?
+                .ok_or("the second output's numeric workspace is missing")?;
+        let created = second_output_target.workspace != shown_at_start;
+        if created && preexisting.contains(&second_output_target.workspace.id) {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        let expected_events = capture_all::second_output_selection_events(
+            &named.target.workspace,
+            &second_output_target.workspace,
+            &shown_at_start,
+        );
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        output_migration::single_output(
+            &selected,
+            second_output_target.workspace.id,
+            SECOND_OUTPUT_NAME,
+        )?;
+        if !profile::output_shows(
+            &self.sway.get_outputs()?,
+            OUTPUT_NAME,
+            capture_all::NAMED_WORKSPACE,
+        ) {
+            return Err("the first output stopped showing the named workspace".into());
+        }
+        let second_output = self.populate_capture_all_workspace(
+            second_output_target,
+            &layouts_directory.path,
+            second_output_layout,
+            SECOND_OUTPUT_NAME,
+        )?;
+        verify_launch_record(&launch_record_path, &layouts)?;
+
+        // The populated workspace stays shown on its own output as focus returns to the
+        // fixture's workspace, which hides the named workspace on the first.
+        self.stage = format!("{name}: return to the fixture's workspace");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let returned = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &second_output.target.workspace,
+            &fixture.workspace.name,
+            &fixture.progress.accepted,
+        )?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: second_output.target.workspace.id,
+            to: &fixture.workspace,
+        }];
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+        let second_output_origin = if created {
+            format!(
+                "created; Sway removed the hidden empty {} id={}",
+                shown_at_start.name, shown_at_start.id
+            )
+        } else {
+            "already the shown empty workspace".to_owned()
+        };
+        println!(
+            "      populated workspace {} id={} on {OUTPUT_NAME}, then {} id={} on \
+             {SECOND_OUTPUT_NAME} ({second_output_origin}); focus is back on {}",
+            named.target.workspace.name,
+            named.target.workspace.id,
+            second_output.target.workspace.name,
+            second_output.target.workspace.id,
+            fixture.workspace.name
+        );
+
+        // In creation order, which is also cleanup's reverse order.
+        let populated = [named, second_output];
+
+        self.stage = format!(
+            "{name}: capture with {} shown on {SECOND_OUTPUT_NAME} and unfocused",
+            capture_all::SECOND_OUTPUT_WORKSPACE
+        );
+        let shown_capture = self.capture_all_and_verify(
+            &files,
+            "capture-while-shown",
+            &populated,
+            &preexisting,
+            None,
+        )?;
+        println!(
+            "      capture 1: targets {:?}; workspace {} was shown on {SECOND_OUTPUT_NAME} \
+             without focus, and its draft selects its window from Sway's focus history",
+            capture_all::EXPECTED_TARGETS,
+            capture_all::SECOND_OUTPUT_WORKSPACE
+        );
+
+        self.stage = format!("{name}: filled private copy check");
+        self.check_filled_capture_copy(&files, &shown_capture)?;
+
+        // Selecting the absent `2` creates it on the second output, where it hides the
+        // populated `3`, which Sway keeps. Back on the fixture's workspace, `2` stays shown,
+        // so Sway keeps it too, empty.
+        self.stage = format!(
+            "{name}: create the empty workspace {} on {SECOND_OUTPUT_NAME}",
+            capture_all::EMPTY_WORKSPACE
+        );
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &fixture.workspace,
+            capture_all::EMPTY_WORKSPACE,
+            &AcceptedWindows::new(),
+        )?;
+        let empty_target = profile::Target::record(&selected, capture_all::EMPTY_WORKSPACE)?
+            .ok_or("the empty workspace was not created")?;
+        if preexisting.contains(&empty_target.workspace.id) {
+            return Err("created workspace reused a preexisting ID".into());
+        }
+        let expected_events =
+            session_roundtrip::selection_events(&fixture.workspace, &empty_target.workspace, false);
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        output_migration::single_output(&selected, empty_target.workspace.id, SECOND_OUTPUT_NAME)?;
+        require_empty(empty_target.verify(&selected)?)?;
+
+        let returned = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &empty_target.workspace,
+            &fixture.workspace.name,
+            &fixture.progress.accepted,
+        )?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: empty_target.workspace.id,
+            to: &fixture.workspace,
+        }];
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+
+        self.stage = format!(
+            "{name}: capture beside the empty {}",
+            capture_all::EMPTY_WORKSPACE
+        );
+        let capture_beside_empty = self.capture_all_and_verify(
+            &files,
+            "capture-beside-empty",
+            &populated,
+            &preexisting,
+            Some(&empty_target),
+        )?;
+        // Both captures saw the same populated workspaces, layouts, and selections, so they
+        // must agree. The capture format omits identities, names, and outputs.
+        if capture_beside_empty.profile_yaml != shown_capture.profile_yaml
+            || capture_beside_empty.drafts != shown_capture.drafts
+        {
+            return Err("the two captures of the same populated workspaces differ".into());
+        }
+        verify_launch_record(&launch_record_path, &layouts)?;
+        println!(
+            "      capture 2: the empty {} id={} on {SECOND_OUTPUT_NAME} was skipped; profile and \
+             drafts equal capture 1's",
+            empty_target.workspace.name, empty_target.workspace.id
+        );
+
+        self.clean_capture_all_workspaces(&populated, &empty_target.workspace, &preexisting)?;
+
+        self.passed += 1;
+        println!("PASS  {name} (independent verification; success-path cleanup only)");
+        Ok(())
+    }
+
+    /// Fills every placeholder of `captured` in a private copy, which `profile check` must
+    /// then accept with the captured profile unchanged. The captured drafts stay unresolved;
+    /// this checks only that their structure is a valid configuration.
+    fn check_filled_capture_copy(
+        &self,
+        files: &TemporaryConfigurations,
+        captured: &CapturedProfile,
+    ) -> Result<(), String> {
+        let filled_copy = files.subdirectory("filled-copy")?;
+        let filled_layouts = filled_copy.subdirectory("layouts")?;
+        let filled_profiles = filled_copy.subdirectory("profiles")?;
+        for (entry_index, filled_draft) in captured.filled_drafts.iter().enumerate() {
+            filled_layouts.write(
+                &profile::captured_layout_name(capture_all::PROFILE_NAME, entry_index),
+                filled_draft,
+            )?;
+        }
+        filled_profiles.write(capture_all::PROFILE_NAME, &captured.profile_yaml)?;
+
+        let mut check = Command::new(&self.binary);
+        check
+            .arg("--layouts-dir")
+            .arg(&filled_layouts.path)
+            .arg("--profiles-dir")
+            .arg(&filled_profiles.path)
+            .args(["profile", "check", capture_all::PROFILE_NAME]);
+        self.sway.select_socket(&mut check);
+        let checked = process::run(check, &self.stage, IPC_TIMEOUT)?;
+        if checked != format!("{}: valid\n", capture_all::PROFILE_NAME) {
+            return Err("the filled copy of the capture is not a valid profile".into());
+        }
+        Ok(())
+    }
+
+    /// Establishes the capture's starting point, whatever ran before it: exactly the
+    /// fixture's workspace on the first output and one empty workspace shown on the second,
+    /// which is the original `2`, the cross-output profile's `3`, or the output migration's
+    /// `9`. If focus is on that empty workspace, the harness selects the fixture's. Returns
+    /// the empty workspace and every container ID that exists before the capture's setup.
+    fn establish_capture_all_start(&mut self) -> Result<(WorkspaceIdentity, HashSet<i64>), String> {
+        let name = capture_all::SCENARIO;
+        self.stage = format!("{name}: starting point");
+        let observed = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&observed.window_events, None)?;
+        let outputs = self.sway.get_outputs()?;
+        verify_virtual_outputs(&outputs, OutputSetup::TwoOutputs)?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        verify_fixture_state(
+            &observed,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        let start =
+            output_migration::MigrationBaseline::record(&observed, &outputs, &fixture.workspace)?;
+        let shown_at_start = start.destination_shown_workspace;
+        if shown_at_start.name == capture_all::NAMED_WORKSPACE {
+            return Err("the named workspace must not exist before the capture creates it".into());
+        }
+
+        let mut started = observed;
+        if started.focused_workspace_id != fixture.workspace.id {
+            // The empty workspace stays shown on its own output.
+            let returned = select_workspace(
+                &self.sway,
+                &mut self.events,
+                &shown_at_start,
+                &fixture.workspace.name,
+                &fixture.progress.accepted,
+            )?;
+            let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+                from_id: shown_at_start.id,
+                to: &fixture.workspace,
+            }];
+            profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+            started = returned;
+        }
+
+        let preexisting = walk(&started.tree)
+            .iter()
+            .map(|placed| placed.node.id)
+            .collect();
+        Ok((shown_at_start, preexisting))
+    }
+
+    /// Loads `layout` with `sway-stage load` on the focused, empty `target` on `output_name`
+    /// and verifies it independently. Returns the populated workspace.
+    fn populate_capture_all_workspace(
+        &mut self,
+        target: profile::Target,
+        layouts_directory: &Path,
+        layout: &Scenario,
+        output_name: &str,
+    ) -> Result<SessionWorkspace, String> {
+        let name = capture_all::SCENARIO;
+        self.stage = format!("{name}: populate workspace {}", target.workspace.name);
+        let load_baseline = self.record_focused_load_baseline(&target)?;
+        self.run_standalone_load(layouts_directory, layout)?;
+        let verified = self.verify_focused_load(&target, output_name, layout, &load_baseline)?;
+
+        Ok(SessionWorkspace {
+            target,
+            layout: layout.clone(),
+            accepted: verified.accepted,
+        })
+    }
+
+    /// Runs `profile capture --all --no-infer-commands` into new private directories under
+    /// `subdirectory` from the fixture's focused workspace, and verifies it independently.
+    ///
+    /// First it verifies the desktop the capture reads: the fixture, `populated` exactly as
+    /// built, with selections only in Sway's focus histories, and `empty`, if given, still
+    /// empty; the expected targets are its populated workspaces in profile order. Then the
+    /// capture must report a silent success naming exactly the files it wrote, which are one
+    /// profile listing those targets, each referencing its ordinal draft, and those drafts,
+    /// each matching its measured workspace. The desktop must stay exactly as it was, with no
+    /// workspace or window event. Returns what the capture wrote.
+    fn capture_all_and_verify(
+        &mut self,
+        files: &TemporaryConfigurations,
+        subdirectory: &str,
+        populated: &[SessionWorkspace; 2],
+        preexisting: &HashSet<i64>,
+        empty: Option<&profile::Target>,
+    ) -> Result<CapturedProfile, String> {
+        let before = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&before.window_events, None)?;
+        let outputs_before = self.sway.get_outputs()?;
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        if before.focused_workspace_id != fixture.workspace.id {
+            return Err("the capture must start on the fixture's focused workspace".into());
+        }
+        fixture.foreign.verify(&before)?;
+        verify_fixture_state(
+            &before,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )?;
+        session_roundtrip::verify_session_ownership(&before.tree, populated, preexisting)?;
+        if let Some(empty) = empty {
+            require_empty(empty.verify(&before)?)?;
+        }
+
+        // Profile order, from the harness's own reading of the populated workspaces: the
+        // fixture's `1`, the second output's `3`, then `notes`.
+        let targets = capture_all::expected_capture_targets(&before)?;
+        if targets != capture_all::EXPECTED_TARGETS {
+            return Err(format!(
+                "populated workspaces in profile order are {targets:?}, expected {:?}",
+                capture_all::EXPECTED_TARGETS
+            ));
+        }
+        let fixture_workspace = SessionWorkspace {
+            target: profile::Target::record(&before, FIXTURE_WORKSPACE)?
+                .ok_or("the fixture's workspace is missing")?,
+            layout: fixture.progress.scenario.clone(),
+            accepted: fixture.progress.accepted.clone(),
+        };
+        let [named, second_output] = populated;
+        let captured = [&fixture_workspace, second_output, named];
+        for (workspace, target) in captured.iter().zip(&targets) {
+            if workspace.target.workspace.name != *target {
+                return Err(format!(
+                    "expected workspace {target} in profile order, found {}",
+                    workspace.target.workspace.name
+                ));
+            }
+        }
+        let workspace_revision = self.events.workspace_revision();
+
+        let capture_files = files.subdirectory(subdirectory)?;
+        let capture = CaptureDirectories {
+            layouts: capture_files.subdirectory("layouts")?,
+            profiles: capture_files.subdirectory("profiles")?,
+        };
+        let mut command = Command::new(&self.binary);
+        command
+            .arg("--layouts-dir")
+            .arg(&capture.layouts.path)
+            .arg("--profiles-dir")
+            .arg(&capture.profiles.path)
+            .args([
+                "profile",
+                "capture",
+                capture_all::PROFILE_NAME,
+                "--all",
+                "--no-infer-commands",
+            ]);
+        self.sway.select_socket(&mut command);
+        process::check_interruption()?;
+        let completed = process::run_with_status(command, &self.stage, CAPTURE_TIMEOUT)?;
+        process::check_interruption()?;
+
+        // Read-only: no event, and the same tree, workspaces, and shown workspaces.
+        let after = snapshot(&self.sway, &mut self.events, None)?;
+        require_quiet(&after.window_events, None)?;
+        let workspace_states = |observed: &Snapshot| {
+            observed
+                .workspaces
+                .iter()
+                .map(|workspace| {
+                    (
+                        workspace.id,
+                        workspace.name.clone(),
+                        workspace.num,
+                        workspace.focused,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let shown_workspaces = |outputs: &[Output]| {
+            outputs
+                .iter()
+                .map(|output| (output.name.clone(), output.current_workspace.clone()))
+                .collect::<Vec<_>>()
+        };
+        let unchanged = workspace_revision == self.events.workspace_revision()
+            && signature(&before.tree) == signature(&after.tree)
+            && workspace_states(&before) == workspace_states(&after)
+            && shown_workspaces(&outputs_before) == shown_workspaces(&self.sway.get_outputs()?);
+        if !unchanged {
+            return Err("profile capture changed the observed desktop".into());
+        }
+        fixture.foreign.verify(&after)?;
+
+        // Exactly the reported files: one ordinal draft per target, then the profile.
+        let layout_names: Vec<String> = (0..captured.len())
+            .map(|entry_index| {
+                profile::captured_layout_name(capture_all::PROFILE_NAME, entry_index)
+            })
+            .collect();
+        let published_paths = capture_all::captured_file_paths(
+            &capture.layouts.path,
+            &capture.profiles.path,
+            &layout_names,
+        );
+        let unresolved_commands = captured
+            .iter()
+            .map(|workspace| workspace.layout.layout.leaves().len())
+            .sum();
+        capture_all::verify_capture_report(&completed, &published_paths, unresolved_commands)?;
+        let layout_file_names: Vec<String> = layout_names
+            .iter()
+            .map(|layout_name| format!("{layout_name}.yaml"))
+            .collect();
+        session_roundtrip::require_directory_files(&capture.layouts.path, &layout_file_names)?;
+        session_roundtrip::require_directory_files(
+            &capture.profiles.path,
+            &[format!("{}.yaml", capture_all::PROFILE_NAME)],
+        )?;
+
+        let read_capture = |path: PathBuf| {
+            fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))
+        };
+        let (draft_paths, profile_path) = published_paths.split_at(layout_names.len());
+        let profile_yaml = read_capture(profile_path[0].clone())?;
+        profile::verify_captured_references(
+            &profile_yaml,
+            capture_all::PROFILE_NAME,
+            &capture_all::EXPECTED_TARGETS,
+        )?;
+
+        // Each draft against its own workspace, measured independently. Only the fixture's
+        // workspace holds keyboard focus; the others select through Sway's focus history.
+        let mut drafts = Vec::new();
+        let mut filled_drafts = Vec::new();
+        for (workspace, draft_path) in captured.iter().zip(draft_paths) {
+            let globally_focused = workspace.target.workspace.id == after.focused_workspace_id;
+            let measurements = verify_session_layout(&after, workspace, globally_focused)?;
+            let draft = read_capture(draft_path.clone())?;
+            let filled_draft =
+                verify_capture(&draft, &workspace.layout, &measurements).map_err(|error| {
+                    format!("workspace {}: {error}", workspace.target.workspace.name)
+                })?;
+            drafts.push(draft);
+            filled_drafts.push(filled_draft);
+        }
+
+        Ok(CapturedProfile {
+            profile_yaml,
+            drafts,
+            filled_drafts,
+        })
+    }
+
+    /// Closes only the populated workspaces' verified windows: first the second output's,
+    /// which the harness selects from the fixture's workspace, hiding the empty workspace
+    /// there, which Sway removes; then the named workspace's, selected from the emptied one,
+    /// which stays shown on its own output. Returning to the fixture's workspace then hides
+    /// the emptied named workspace, which Sway removes. The fixture's workspace ends focused,
+    /// with the emptied numeric workspace shown on the second output.
+    fn clean_capture_all_workspaces(
+        &mut self,
+        populated: &[SessionWorkspace; 2],
+        empty: &WorkspaceIdentity,
+        preexisting: &HashSet<i64>,
+    ) -> Result<(), String> {
+        let name = capture_all::SCENARIO;
+        let [named, second_output] = populated;
+
+        self.stage = format!(
+            "{name}: return to workspace {} for cleanup",
+            second_output.target.workspace.name
+        );
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &fixture.workspace,
+            &second_output.target.workspace.name,
+            &second_output.accepted,
+        )?;
+        let expected_events = capture_all::cleanup_selection_events(
+            &fixture.workspace,
+            &second_output.target.workspace,
+            empty,
+        );
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        self.clean_session_workspace(name, populated, 1, &selected, preexisting)?;
+
+        self.stage = format!(
+            "{name}: return to workspace {} for cleanup",
+            named.target.workspace.name
+        );
+        let selected = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &second_output.target.workspace,
+            &named.target.workspace.name,
+            &named.accepted,
+        )?;
+        let expected_events = [profile::ExpectedWorkspaceEvent::Focus {
+            from_id: second_output.target.workspace.id,
+            to: &named.target.workspace,
+        }];
+        profile::verify_workspace_events(&selected.workspace_events, &expected_events)?;
+        self.clean_session_workspace(name, populated, 0, &selected, preexisting)?;
+
+        self.stage = format!("{name}: return to the fixture's workspace");
+        let fixture = self.fixture.as_ref().expect("foreign fixture prepared");
+        let returned = select_workspace(
+            &self.sway,
+            &mut self.events,
+            &named.target.workspace,
+            &fixture.workspace.name,
+            &fixture.progress.accepted,
+        )?;
+        let expected_events =
+            session_roundtrip::return_events(&named.target.workspace, &fixture.workspace);
+        profile::verify_workspace_events(&returned.workspace_events, &expected_events)?;
+
+        // The starting point that a later two-output scenario establishes for itself.
+        let end = output_migration::MigrationBaseline::record(
+            &returned,
+            &self.sway.get_outputs()?,
+            &fixture.workspace,
+        )?;
+        if end.destination_shown_workspace != second_output.target.workspace {
+            return Err(format!(
+                "expected the emptied {} shown on {SECOND_OUTPUT_NAME}",
+                second_output.target.workspace.name
+            ));
+        }
+        verify_fixture_state(
+            &returned,
+            fixture,
+            fixture.loaded_signature.as_ref().expect("fixture verified"),
+        )
     }
 
     /// Writes the case's layout, its one-entry profile, a menu case's Fuzzel substitute,

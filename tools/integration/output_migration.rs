@@ -92,7 +92,7 @@ pub fn migrating_load(
 /// The two outputs' container IDs and the empty workspace the destination output shows, as
 /// a well-defined starting point that does not depend on earlier scenarios: an earlier
 /// cross-output profile may have replaced the second output's initial workspace and left
-/// focus on its replacement.
+/// focus on its replacement. The capture across both outputs starts from the same point.
 pub struct MigrationBaseline {
     pub original_output_id: i64,
     pub destination_output_id: i64,
@@ -126,8 +126,7 @@ impl MigrationBaseline {
             .collect();
         let [other] = others.as_slice() else {
             return Err(format!(
-                "the output migration starts with the fixture's workspace and one other, \
-                 found {workspace_names:?}"
+                "expected the fixture's workspace and one other, found {workspace_names:?}"
             ));
         };
         if !has_fixture {

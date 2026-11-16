@@ -13,6 +13,7 @@
 
 mod alternating_profile;
 mod capture;
+mod capture_all;
 mod fixtures;
 mod floating_refusal;
 mod headless;
