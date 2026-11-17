@@ -434,6 +434,54 @@ fn fresh_two_output_snapshot(tree: Value, focused_name: &str, focused_id: i64) -
 }
 
 #[test]
+fn two_output_startup_preflight_accepts_either_focus_but_requires_empty_placements() {
+    for (focused_name, focused_id) in [("1", OTHER_WORKSPACE_ID), ("2", SECOND_OUTPUT_WORKSPACE_ID)]
+    {
+        let observed =
+            fresh_two_output_snapshot(two_output_desktop(focused_id), focused_name, focused_id);
+        let focused = verify_empty_two_output_compositor(&observed, &two_output_outputs()).unwrap();
+        assert_eq!(focused.id, focused_id);
+
+        for workspace_id in [OTHER_WORKSPACE_ID, SECOND_OUTPUT_WORKSPACE_ID] {
+            for child_key in ["nodes", "floating_nodes"] {
+                let mut tree = two_output_desktop(focused_id);
+                node_mut(&mut tree, workspace_id)[child_key] =
+                    json!([group(40, "splith", rect(0, 0, 10, 10), Vec::new())]);
+                let occupied = fresh_two_output_snapshot(tree, focused_name, focused_id);
+                assert_contains(
+                    &verify_empty_two_output_compositor(&occupied, &two_output_outputs())
+                        .unwrap_err(),
+                    "occupied",
+                );
+            }
+        }
+
+        let mut hidden_window = two_output_desktop(focused_id);
+        node_mut(&mut hidden_window, SCRATCHPAD_WORKSPACE_ID)["floating_nodes"] =
+            json!([wayland_window(40, "hidden", rect(0, 0, 100, 100))]);
+        let hidden_window = fresh_two_output_snapshot(hidden_window, focused_name, focused_id);
+        assert_contains(
+            &verify_empty_two_output_compositor(&hidden_window, &two_output_outputs()).unwrap_err(),
+            "found container 40",
+        );
+
+        let mut other_shown = two_output_outputs();
+        other_shown[1].current_workspace = Some("3".into());
+        assert_contains(
+            &verify_empty_two_output_compositor(&observed, &other_shown).unwrap_err(),
+            r#"shows workspace "2" on HEADLESS-2"#,
+        );
+
+        let mut inactive_output = two_output_outputs();
+        inactive_output[1].active = false;
+        assert_contains(
+            &verify_empty_two_output_compositor(&observed, &inactive_output).unwrap_err(),
+            "HEADLESS-2 is not active",
+        );
+    }
+}
+
+#[test]
 fn a_fresh_two_output_compositor_shows_empty_initial_workspaces_on_both_outputs() {
     let fresh = || {
         fresh_two_output_snapshot(

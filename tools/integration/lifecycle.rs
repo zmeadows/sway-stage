@@ -56,8 +56,9 @@ const WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How often the harness looks for a held launch's progress while sway-stage loads.
 const HELD_LAUNCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// A fresh compositor's only workspace. The foreign fixture loads here without a switch and
-/// stays for the whole run, so it is also the occupied target of the profile refusal.
+/// The fixture workspace: the one-output compositor starts here; the two-output runner
+/// selects it during startup. The fixture stays here for the whole run, so it is also the
+/// occupied target of the profile refusal.
 const FIXTURE_WORKSPACE: &str = "1";
 /// The target of every standard scenario and the first target of every profile.
 const PRIMARY_WORKSPACE: &str = "2";
@@ -570,14 +571,47 @@ impl Harness {
         let initial = snapshot(&self.sway, &mut self.events, None)?;
         require_quiet(&initial.window_events, None)?;
         let initial_workspace =
-            verify_fresh_two_output_compositor(&initial, &self.sway.get_outputs()?)?;
+            verify_empty_two_output_compositor(&initial, &self.sway.get_outputs()?)?;
         // From here on, every fence rejects a workspace focus change we did not request.
         self.events.set_current_workspace(initial_workspace);
         // Every scenario requires this exact workspace, never a replacement with its name.
-        let second_output_workspace =
+        let second_output_target =
             profile::Target::record(&initial, SECOND_OUTPUT_INITIAL_WORKSPACE)?
-                .ok_or("the second output's initial workspace is missing")?
-                .workspace;
+                .ok_or("the second output's initial workspace is missing")?;
+
+        // Output startup may leave either empty workspace focused. Establish the fixture's
+        // focus explicitly before any launch, retaining both workspace/output identities and
+        // accepting only the one requested focus event.
+        self.stage = "two-output fixture workspace selection".into();
+        let prepared = if initial_workspace.name == FIXTURE_WORKSPACE {
+            initial
+        } else {
+            let fixture_target = profile::Target::record(&initial, FIXTURE_WORKSPACE)?
+                .ok_or("the fixture's initial workspace is missing")?;
+            let origin = WorkspaceIdentity {
+                id: initial_workspace.id,
+                name: initial_workspace.name.clone(),
+            };
+            let selected_desktop = select_workspace(
+                &self.sway,
+                &mut self.events,
+                &origin,
+                FIXTURE_WORKSPACE,
+                &AcceptedWindows::new(),
+            )?;
+            profile::verify_workspace_events(
+                &selected_desktop.workspace_events,
+                &[profile::ExpectedWorkspaceEvent::Focus {
+                    from_id: origin.id,
+                    to: &fixture_target.workspace,
+                }],
+            )?;
+            fixture_target.verify(&selected_desktop)?;
+            second_output_target.verify(&selected_desktop)?;
+            selected_desktop
+        };
+        verify_fresh_two_output_compositor(&prepared, &self.sway.get_outputs()?)?;
+        let second_output_workspace = second_output_target.workspace;
 
         self.stage = "configuration preparation".into();
         let directory = TemporaryConfigurations::new(&env::temp_dir(), &self.run_id)?;
@@ -7143,13 +7177,31 @@ fn verify_fresh_compositor(observed: &Snapshot) -> Result<&Workspace, String> {
     Ok(workspace)
 }
 
-/// A two-output compositor nothing has used yet: workspace "1" focused on the first output
-/// and the second output's initial workspace, each shown and empty, and no window anywhere.
+/// The two-output scenario starting state: workspace "1" focused on the first output and
+/// the second output's initial workspace, each shown and empty, and no window anywhere.
 fn verify_fresh_two_output_compositor<'a>(
     observed: &'a Snapshot,
     outputs: &[Output],
 ) -> Result<&'a Workspace, String> {
+    let focused = verify_empty_two_output_compositor(observed, outputs)?;
+    if focused.name != FIXTURE_WORKSPACE {
+        return Err(format!(
+            "a fresh two-output compositor starts on workspace {FIXTURE_WORKSPACE:?}, found {:?}",
+            focused.name
+        ));
+    }
+    Ok(focused)
+}
+
+/// The read-only startup precondition, before the runner selects the fixture workspace.
+/// Both configured workspaces must already be shown and empty, with no windows anywhere;
+/// which of the two Sway initially focused does not establish the scenario starting focus.
+fn verify_empty_two_output_compositor<'a>(
+    observed: &'a Snapshot,
+    outputs: &[Output],
+) -> Result<&'a Workspace, String> {
     observed.validate()?;
+    verify_virtual_outputs(outputs, OutputSetup::TwoOutputs)?;
 
     let mut names: Vec<&str> = observed
         .workspaces
@@ -7199,12 +7251,6 @@ fn verify_fresh_two_output_compositor<'a>(
         .iter()
         .find(|workspace| workspace.focused)
         .expect("snapshot validation found one focused workspace");
-    if focused.name != FIXTURE_WORKSPACE {
-        return Err(format!(
-            "a fresh two-output compositor starts on workspace {FIXTURE_WORKSPACE:?}, found {:?}",
-            focused.name
-        ));
-    }
     if let Some(window) = walk(&observed.tree)
         .into_iter()
         .find(|placed| is_window(placed.node))

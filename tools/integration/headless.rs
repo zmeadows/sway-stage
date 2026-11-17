@@ -407,15 +407,12 @@ focus_follows_mouse no
 
     // Sway's own workspace rules, as a user would configure placement: each output starts
     // with its own workspace, and Sway creates each assigned one on its output.
+    // The runner selects the fixture workspace after both outputs are ready: a config-time
+    // selection does not reliably survive output startup on Sway 1.10.
     if setup == OutputSetup::TwoOutputs {
         for (workspace, output) in TWO_OUTPUT_WORKSPACE_RULES {
             configuration.push_str(&format!("workspace {workspace} output {output}\n"));
         }
-        // The backend decides which output Sway enables, and so focuses, first. Sway defers
-        // this selection until both are enabled; it hides neither initial workspace.
-        configuration.push_str(&format!(
-            "workspace --no-auto-back-and-forth {FIRST_OUTPUT_INITIAL_WORKSPACE}\n"
-        ));
     }
     configuration
 }
