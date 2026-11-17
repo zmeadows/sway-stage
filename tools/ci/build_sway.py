@@ -70,6 +70,8 @@ DEPENDENCIES = {
     "wayland-protocols": "1.47", "libdrm": "2.4.129", "pixman-1": "0.46.0",
     "xkbcommon": "1.8.0", "json-c": "0.13", "libpcre2-8": "",
     "cairo": "", "pango": "", "pangocairo": "", "libevdev": "",
+    # Sway includes libinput.h even when wlroots' libinput backend is disabled.
+    "libinput": "1.26.0",
 }
 SYSTEM_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
 
@@ -215,6 +217,20 @@ def verify_private_wlroots(inputs, env):
     return abi
 
 
+def verify_sway_version(name, version, inputs):
+    sway_tag, _, commit = inputs["sources"]["sway"]
+    # Tagged Git checkouts include a revision, compile date, and detached branch name.
+    version_match = re.fullmatch(
+        rf"{re.escape(name)} version {re.escape(sway_tag)}-([0-9a-f]{{7,40}}) "
+        r"\([A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4}, branch 'HEAD'\)",
+        version,
+    )
+    if version_match is None or not commit.startswith(version_match[1]):
+        raise RuntimeError(
+            f"expected {name} from Sway {sway_tag} commit {commit}, found: {version}"
+        )
+
+
 def validate(inputs):
     prefix = Path(inputs["prefix"])
     if (prefix / "build-inputs.json").read_text() != serialized(inputs):
@@ -234,8 +250,7 @@ def validate(inputs):
         print(f"{name}: {executable} -> {Path(executable).resolve()}", flush=True)
         version = run([name, "--version"], env=runtime_env)
         print(version, flush=True)
-        if version != f"{name} version {inputs['sway_tag']}":
-            raise RuntimeError(f"unexpected {name} version: {version}")
+        verify_sway_version(name, version, inputs)
 
         dynamic = run(["readelf", "-d", executable], env=runtime_env)
         print(dynamic, flush=True)

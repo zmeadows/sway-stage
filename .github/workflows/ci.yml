@@ -57,7 +57,6 @@ jobs:
       - name: Verify selected compositor
         env:
           SWAY_PREFIX: ${{ steps.compositor.outputs.prefix }}
-          SWAY_TAG: ${{ matrix.sway-tag }}
         run: |
           for executable in sway swaymsg; do
             selected_path=$(command -v "$executable")
@@ -68,12 +67,8 @@ jobs:
               exit 1
             fi
 
-            version=$("$selected_path" --version)
-            printf '%s\n' "$version"
-            if [[ "$version" != "$executable version $SWAY_TAG" ]]; then
-              echo "Expected $executable version $SWAY_TAG" >&2
-              exit 1
-            fi
+            # The build action already checked the release and pinned Git revision.
+            "$selected_path" --version
           done
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies

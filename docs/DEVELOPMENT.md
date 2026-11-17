@@ -89,7 +89,12 @@ The development-only `.github/actions/build-sway` action prepares pinned upstrea
 Sway/wlroots builds for Ubuntu 26.04 amd64. It records the installed dependency
 environment, restores only the exact build cache, and checks executable versions,
 paths, and private library loading with a cleared runtime environment on both cache
-hits and misses. `tools/ci/build_sway.py` implements its prepare/build/validate phases;
+hits and misses. Git builds report the release tag with a revision/date/branch suffix;
+validation requires the selected release and a revision matching its pinned commit.
+The CI prerequisites include libinput headers because Sway includes them even with
+wlroots' libinput backend disabled.
+
+`tools/ci/build_sway.py` implements its prepare/build/validate phases;
 it never starts a compositor. Each integration entry uses this action, then verifies
 that both `sway` and `swaymsg` on PATH resolve to the selected prefix and release
 before invoking the supported launcher. Its offline boundary checks require only

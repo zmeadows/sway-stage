@@ -23,7 +23,7 @@ runs:
         sudo apt-get install --yes --no-install-recommends \
           build-essential gcc-13 git ca-certificates meson ninja-build pkg-config binutils \
           libwayland-dev wayland-protocols libdrm-dev libxkbcommon-dev libpixman-1-dev \
-          libjson-c-dev libpcre2-dev libcairo2-dev libpango1.0-dev libevdev-dev \
+          libjson-c-dev libpcre2-dev libcairo2-dev libpango1.0-dev libevdev-dev libinput-dev \
           foot=1.25.0-1 fonts-dejavu-core xkb-data util-linux coreutils
     - name: Record build inputs and exact cache identity
       id: prepare

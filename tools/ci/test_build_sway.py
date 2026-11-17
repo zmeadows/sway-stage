@@ -71,6 +71,31 @@ class BuildSwayTests(unittest.TestCase):
                 build_sway.validate({"prefix": temporary})
             run.assert_not_called()
 
+    def test_git_build_versions_require_the_release_and_pinned_revision(self):
+        for sway_tag, sources in build_sway.SOURCES.items():
+            inputs = {"sources": sources}
+            commit = sources["sway"][2]
+            for name in ("sway", "swaymsg"):
+                for revision in (commit[:7], commit[:12], commit):
+                    for date in ("Nov 17 2026", "Jan  3 2027"):
+                        version = f"{name} version {sway_tag}-{revision} ({date}, branch 'HEAD')"
+                        with self.subTest(version=version):
+                            build_sway.verify_sway_version(name, version, inputs)
+
+                invalid_versions = (
+                    f"{name} version {sway_tag}",
+                    f"{name} version {sway_tag}.1-{commit[:7]} (Nov 17 2026, branch 'HEAD')",
+                    f"{name} version {sway_tag}-0000000 (Nov 17 2026, branch 'HEAD')",
+                    f"{name} version {sway_tag}-{commit[:6]} (Nov 17 2026, branch 'HEAD')",
+                    f"{name} version {sway_tag}-{commit[:7]} (Nov 17 2026, branch 'main')",
+                    f"{name} version {sway_tag}-{commit[:7]} (Nov 17 2026, branch 'HEAD') extra",
+                    f"other version {sway_tag}-{commit[:7]} (Nov 17 2026, branch 'HEAD')",
+                )
+                for version in invalid_versions:
+                    with self.subTest(version=version):
+                        with self.assertRaisesRegex(RuntimeError, "expected .* commit"):
+                            build_sway.verify_sway_version(name, version, inputs)
+
     def test_runtime_validation_rejects_wrong_versions_and_library_resolution(self):
         # Exercise the same validator used on a cold build and an exact cache hit.
         cases = ("valid", "wrong-version", "wrong-wlroots-version", "system-pkgconfig",
@@ -93,7 +118,8 @@ class BuildSwayTests(unittest.TestCase):
                     self.assertEqual(env, {"PATH": f"{prefix}/bin:/usr/bin:/bin"})
                     if arguments[-1] == "--version":
                         version = "1.10.1" if case == "wrong-version" else "1.10"
-                        return f"{arguments[0]} version {version}"
+                        return (f"{arguments[0]} version {version}-c93ff73 "
+                                "(Nov 17 2026, branch 'HEAD')")
                     if arguments[0] == "readelf":
                         if case == "missing-runpath":
                             return ""
