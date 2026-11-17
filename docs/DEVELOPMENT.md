@@ -77,31 +77,40 @@ failure to start headless Sway as permission to use the live desktop.
 
 ## CI
 
-`.github/workflows/ci.yml` configures two independent jobs on pushes to `main` and
-pull requests: offline formatting/Clippy/check/tests/release/MSRV checks, and the
-full headless suite on an Ubuntu 26.04 runner with Sway and Foot. Ubuntu 24.04's
-Sway 1.9 lacks tree fields the harness requires; the current integration job
-therefore uses 26.04. The CI configuration is not itself evidence of a successful
-run; inspect the actual run status before making release claims.
+`.github/workflows/ci.yml` configures one offline job and three independent
+integration entries on pushes to `main` and pull requests. Formatting, Clippy,
+checks, offline Rust/Python tests, the release build, and MSRV checks run once.
+Each integration entry runs the full headless suite against an exact upstream Sway
+tag (`1.10`, `1.11`, or `1.12`) on Ubuntu 26.04 amd64. All entries must pass; one
+failure does not cancel the others. The CI configuration is not itself evidence of
+a successful run; inspect the actual run status before making release claims.
 
 The development-only `.github/actions/build-sway` action prepares pinned upstream
 Sway/wlroots builds for Ubuntu 26.04 amd64. It records the installed dependency
 environment, restores only the exact build cache, and checks executable versions,
 paths, and private library loading with a cleared runtime environment on both cache
 hits and misses. `tools/ci/build_sway.py` implements its prepare/build/validate phases;
-it never starts a compositor. The action is not yet connected to the integration
-workflow. Its offline boundary checks require only Python's standard library:
+it never starts a compositor. Each integration entry uses this action, then verifies
+that both `sway` and `swaymsg` on PATH resolve to the selected prefix and release
+before invoking the supported launcher. Its offline boundary checks require only
+Python's standard library:
 
 ```sh
 python3 -B -m unittest discover -s tools/ci -v
 ```
 
-On integration failure or timeout, the CI workflow uploads an
-`integration-diagnostics-attempt-N` artifact (14-day retention) containing the
-preserved session's relevant diagnostics. For example:
+Integration jobs cache Rust dependencies separately for each Sway entry, keyed by
+the toolchain and Cargo inputs. The cache includes the launcher's explicit `target`
+directory; every run still invokes its locked release build for the host target.
+The offline/MSRV checks are not multiplied across Sway versions.
+
+The integration job retains its 30-minute limit and the suite's 20-minute step
+limit. On integration failure or timeout, the workflow uploads an
+`integration-diagnostics-sway-VERSION-attempt-N` artifact (14-day retention)
+containing the preserved session's relevant diagnostics. For example:
 
 ```sh
-gh run download RUN_ID --name integration-diagnostics-attempt-1
+gh run download RUN_ID --name integration-diagnostics-sway-1.10-attempt-1
 ```
 
 Read the run output first, then the preserved `sway.log`, tree, launch log, and

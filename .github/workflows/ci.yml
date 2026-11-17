@@ -28,6 +28,8 @@ jobs:
         run: cargo check --locked --all-targets
       - name: Test
         run: cargo test --locked
+      - name: Test compositor build helper offline
+        run: python3 -B -m unittest discover -s tools/ci -v
       - name: Build release
         run: cargo build --release --locked
       - name: Install Rust 1.89
@@ -36,22 +38,50 @@ jobs:
         run: cargo +1.89.0 check --locked --all-targets
 
   integration:
-    # Not ubuntu-24.04: its Sway 1.9 omits the `floating` and `scratchpad_state` tree fields
-    # that the harness requires as evidence for every foreign window. Sway 1.10 added them.
+    name: Integration (Sway ${{ matrix.sway-tag }})
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sway-tag: ['1.10', '1.11', '1.12']
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # setpriv (util-linux), sleep, and /bin/sh are already part of the base system.
-      - name: Install Sway and Foot
+      - name: Provision pinned Sway and Foot
+        id: compositor
+        uses: ./.github/actions/build-sway
+        with:
+          sway-tag: ${{ matrix.sway-tag }}
+      - name: Verify selected compositor
+        env:
+          SWAY_PREFIX: ${{ steps.compositor.outputs.prefix }}
+          SWAY_TAG: ${{ matrix.sway-tag }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends sway foot
-          sway --version
-          foot --version
+          for executable in sway swaymsg; do
+            selected_path=$(command -v "$executable")
+            resolved_path=$(readlink -f "$selected_path")
+            printf '%s: %s -> %s\n' "$executable" "$selected_path" "$resolved_path"
+            if [[ "$resolved_path" != "$SWAY_PREFIX/bin/$executable" ]]; then
+              echo "Expected $executable from $SWAY_PREFIX/bin" >&2
+              exit 1
+            fi
+
+            version=$("$selected_path" --version)
+            printf '%s\n' "$version"
+            if [[ "$version" != "$executable version $SWAY_TAG" ]]; then
+              echo "Expected $executable version $SWAY_TAG" >&2
+              exit 1
+            fi
+          done
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sway-${{ matrix.sway-tag }}
+          # run.sh explicitly builds into target/<host>/release; cache that target root.
+          workspaces: . -> target
       - name: Run headless integration suite
         # Shorter than the job, so that a hang still fails this step and uploads diagnostics.
         timeout-minutes: 20
@@ -63,7 +93,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: integration-diagnostics-attempt-${{ github.run_attempt }}
+          name: integration-diagnostics-sway-${{ matrix.sway-tag }}-attempt-${{ github.run_attempt }}
           # Only the files the harness names in its failure report, never the sockets or the
           # rest of the private home directory. `.local` makes the launch log a hidden path.
           path: |
