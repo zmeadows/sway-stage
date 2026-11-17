@@ -2,7 +2,8 @@ use super::*;
 use crate::command_inference::{infer_host_command, infer_process_command};
 use crate::config::{self, Config, GroupLayout, LayoutNode, Matcher, NodeKind};
 use crate::observation::fixtures::{
-    empty_workspace_tree, ipc_frame, node, read_request, send_message, socket_pair,
+    empty_workspace_tree, ipc_frame, node, read_request, send_message, serve_supported_version,
+    socket_pair,
 };
 use serde_json::{Value, json};
 use std::io::Read;
@@ -87,10 +88,11 @@ fn right_window() -> Value {
     wayland_window(21, Some("right"), 960, 1080)
 }
 
-/// The server accepts exactly one GET_TREE, then verifies that capture disconnects.
+/// The server answers GET_VERSION and one GET_TREE, then verifies disconnection.
 fn read_recorded_snapshot(tree: Value) -> Result<Snapshot, String> {
     let (client, mut server) = socket_pair();
     let worker = thread::spawn(move || {
+        serve_supported_version(&mut server);
         assert!(read_request(&mut server, 4).is_empty());
         send_message(&mut server, 4, tree);
         assert_eq!(server.read(&mut [0]).unwrap(), 0);
@@ -107,6 +109,29 @@ fn capture_recorded_tree(tree: Value) -> Result<String, String> {
         .render_with(false, &mut |_| panic!("default reads no processes"))
         .map(|draft| draft.yaml)
         .map_err(|error| error.to_string())
+}
+
+#[test]
+fn unsupported_sway_stops_capture_before_the_tree_query() {
+    let (client, mut server) = socket_pair();
+    let worker = thread::spawn(move || {
+        read_request(&mut server, 7);
+        send_message(
+            &mut server,
+            7,
+            json!({
+                "major": 1, "minor": 9, "patch": 99,
+                "human_readable": "1.9.99", "loaded_config_file_name": "/fixture/config"
+            }),
+        );
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    });
+    let failure = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT)
+        .err()
+        .unwrap();
+
+    assert_eq!(failure.cause, Some(Cause::UnsupportedSwayVersion));
+    worker.join().unwrap();
 }
 
 #[test]
@@ -1211,6 +1236,7 @@ fn tree_query_deadline_cancels_stalled_and_fragmented_replies() {
     for partial in [false, true] {
         let (client, mut server) = socket_pair();
         let worker = thread::spawn(move || {
+            serve_supported_version(&mut server);
             read_request(&mut server, 4);
             if partial {
                 let response = ipc_frame(4, b"{}");
@@ -1234,6 +1260,7 @@ fn tree_query_deadline_cancels_stalled_and_fragmented_replies() {
 fn failed_tree_read_produces_no_draft() {
     let (client, mut server) = socket_pair();
     let worker = thread::spawn(move || {
+        serve_supported_version(&mut server);
         read_request(&mut server, 4);
     });
     let failure = snapshot_from_socket(client, Instant::now() + IPC_TIMEOUT)

@@ -85,6 +85,14 @@ tag (`1.10`, `1.11`, or `1.12`) on Ubuntu 26.04 amd64. All entries must pass; on
 failure does not cancel the others. The CI configuration is not itself evidence of
 a successful run; inspect the actual run status before making release claims.
 
+These releases exercise the [minimum-version policy](REFERENCE.md#platform-compatibility)
+from its exact 1.10.0 boundary. Production commands check the connected compositor
+through native `GET_VERSION` IPC, so keep the offline version-response fixtures
+current when changing IPC setup. Offline tests cover numeric boundaries, malformed
+and failed responses, deadlines, and rejection before launches or workspace commands.
+The matrix covers native Wayland and virtual outputs; Xwayland, physical outputs,
+and visual rendering still require separate acceptance.
+
 The development-only `.github/actions/build-sway` action prepares pinned upstream
 Sway/wlroots builds for Ubuntu 26.04 amd64. It records the installed dependency
 environment, restores only the exact build cache, and checks executable versions,

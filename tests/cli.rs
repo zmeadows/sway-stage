@@ -734,7 +734,131 @@ fn sway_node(id: i64, kind: &str, width: i32, nodes: Vec<Value>) -> Value {
     })
 }
 
-/// Answers exactly one GET_TREE, refusing all other IPC requests and connections.
+fn serve_supported_version(stream: &mut UnixStream) {
+    assert_eq!(read_ipc_message(stream), (7, vec![]));
+    write_ipc_message(
+        stream,
+        7,
+        &json!({
+            "major": 1, "minor": 10, "patch": 0,
+            "human_readable": "1.10", "loaded_config_file_name": "/fixture/config"
+        }),
+    );
+}
+
+#[test]
+fn compositor_commands_reject_unsupported_or_unverifiable_versions_before_side_effects() {
+    use std::net::Shutdown;
+    use std::os::unix::fs::PermissionsExt;
+
+    let old_version = json!({
+        "major": 1, "minor": 9, "patch": 99,
+        "human_readable": "1.9.99", "loaded_config_file_name": "/fixture/config"
+    });
+    for response in [Some(old_version), Some(json!({})), None] {
+        for arguments in [
+            vec!["load", "layout"],
+            vec!["profile", "load", "work"],
+            vec!["capture", "--no-infer-commands"],
+            vec!["profile", "capture", "draft", "1", "--no-infer-commands"],
+            vec!["menu"],
+        ] {
+            let fixture = CliFixture::new();
+            fixture.file(
+                "layout.yaml",
+                &SINGLE_WINDOW_YAML.replace(
+                    "does-not-need-to-exist",
+                    fixture.path.join("app").to_str().unwrap(),
+                ),
+            );
+            fixture.file(
+                "work.yaml",
+                "version: 1\nworkspaces: [{workspace: 3, layout: layout}]\n",
+            );
+            for executable in ["app", "fuzzel"] {
+                fixture.file(
+                    executable,
+                    "#!/bin/sh\nprintf 'unexpected\\n' >> side-effects\n",
+                );
+            }
+            fixture.file(
+                "notify-send",
+                "#!/bin/sh\nprintf 'notification\\n' >> notification\nprintf '%s\\n' \"$@\" >> notification\n",
+            );
+            for executable in ["app", "fuzzel", "notify-send"] {
+                fs::set_permissions(
+                    fixture.path.join(executable),
+                    fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+            }
+            fs::create_dir_all(fixture.path.join("state/sway-stage")).unwrap();
+            fixture.file("state/sway-stage/last-run.log", "previous launch\n");
+
+            let socket_path = fixture.path.join("version.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let reply = response.clone();
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                assert_eq!(read_ipc_message(&mut socket), (7, vec![]));
+                if let Some(reply) = reply {
+                    write_ipc_message(&mut socket, 7, &reply);
+                } else {
+                    socket.shutdown(Shutdown::Write).unwrap();
+                }
+                // No subscription, tree query, workspace selection, or layout command.
+                assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+                listener
+            });
+            let output = fixture
+                .command()
+                .env("SWAYSOCK", socket_path)
+                .env("XDG_STATE_HOME", fixture.path.join("state"))
+                .env("PATH", &fixture.path)
+                .args(["--layouts-dir", ".", "--profiles-dir", "."])
+                .args(&arguments)
+                .output()
+                .unwrap();
+            let listener = server.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+
+            assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("requires Sway 1.10 or newer"), "{stderr}");
+            assert!(!stderr.contains(PARTIAL_RUN_ADVICE), "{stderr}");
+            assert!(!fixture.path.join("side-effects").exists());
+            assert!(!fixture.path.join("draft.yaml").exists());
+            let notification = fs::read_to_string(fixture.path.join("notification")).unwrap();
+            assert_eq!(
+                notification
+                    .lines()
+                    .filter(|line| *line == "notification")
+                    .count(),
+                1
+            );
+            let log =
+                fs::read_to_string(fixture.path.join("state/sway-stage/last-run.log")).unwrap();
+            if arguments.contains(&"load") {
+                assert!(log.contains("Sway version"), "{log}");
+                if arguments[0] == "profile" {
+                    assert!(log.contains("completed 0"), "{log}");
+                }
+            } else {
+                assert_eq!(log, "previous launch\n");
+            }
+        }
+    }
+}
+
+/// Answers GET_VERSION and one GET_TREE, refusing all other requests and connections.
 fn serve_capture(
     listener: UnixListener,
     tree: Value,
@@ -749,6 +873,7 @@ fn serve_capture(
             stream
         };
         let mut query = accept();
+        serve_supported_version(&mut query);
         if let Some(directory) = &menu_directory {
             assert!(
                 !directory.join("action-pid").exists(),

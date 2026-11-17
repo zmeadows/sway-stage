@@ -1,4 +1,4 @@
-use super::{CliFixture, read_ipc_message, sway_node, write_ipc_message};
+use super::{CliFixture, read_ipc_message, serve_supported_version, sway_node, write_ipc_message};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
@@ -242,6 +242,7 @@ fn run_transcript(
             query
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            serve_supported_version(&mut query);
             assert_eq!(read_ipc_message(&mut query).0, 4);
             fs::write(layouts_path.join("snapshot-ready"), "").unwrap();
             write_ipc_message(&mut query, 4, &tree);
@@ -272,7 +273,17 @@ fn run_transcript(
                     break socket;
                 }
                 let (kind, payload) = read_ipc_message(&mut socket);
-                if kind == 2 {
+                if kind == 7 {
+                    write_ipc_message(
+                        &mut socket,
+                        7,
+                        &json!({
+                            "major": 1, "minor": 10, "patch": 0,
+                            "human_readable": "1.10", "loaded_config_file_name": "/fixture/config"
+                        }),
+                    );
+                    let (kind, payload) = read_ipc_message(&mut socket);
+                    assert_eq!(kind, 2, "version check precedes subscription");
                     assert_eq!(
                         serde_json::from_slice::<Value>(&payload).unwrap(),
                         json!(["workspace", "window", "tick"])

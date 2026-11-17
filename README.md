@@ -13,8 +13,10 @@ unexpected condition it stops without closing any launched windows. See the
 
 ## Install
 
-> Sway Stage requires Sway 1.10 or newer.
-> Sway 1.9 and earlier are unsupported because they lack IPC state information used by Sway Stage's layout validation and safety checks.
+Requires **Sway 1.10 or newer**. Commands that contact Sway check the running
+compositor's version before proceeding; older versions lack IPC state information
+used by validation and safety checks. See [compatibility](docs/REFERENCE.md#platform-compatibility)
+for the tested versions and support policy.
 
 Requires Linux with glibc 2.34+, a running Sway session (`SWAYSOCK`), and Rust 1.89+
 to build. Install the applications your layouts will launch. [Fuzzel](https://codeberg.org/dnkl/fuzzel)

@@ -41,6 +41,69 @@ pub fn connect(socket: &Path) -> Result<UnixStream, Failure> {
         .map_err(|error| Failure::new(Cause::SwayIpc, format!("connect to SWAYSOCK: {error}")))
 }
 
+/// Check the connected compositor before observation or capture. The socket remains
+/// usable on success; a failed or incomplete exchange is cancelled and never reused.
+pub fn require_supported_version(socket: &UnixStream, deadline: Instant) -> Result<(), Failure> {
+    let version_failure = |detail| Failure::new(Cause::SwayVersionUnavailable, detail);
+    let query_socket = socket
+        .try_clone()
+        .map_err(|error| version_failure(format!("clone version query socket: {error}")))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::Builder::new()
+        .name("sway-version".into())
+        .spawn(move || {
+            let result = Connection::from(query_socket)
+                .get_version()
+                .map_err(|error| {
+                    Failure::new(
+                        Cause::SwayVersionUnavailable,
+                        format!("query Sway version (requires Sway 1.10 or newer): {error}"),
+                    )
+                })
+                .and_then(|version| validate_version(&version));
+            let _ = sender.send(result);
+        })
+        .map_err(|error| version_failure(format!("start version reader: {error}")))?;
+
+    let result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    if !matches!(result, Ok(Ok(()))) {
+        // Wake even a partial-frame read before joining. Shutting down a clone also
+        // cancels the original socket, so only do this when it cannot be reused.
+        let _ = socket.shutdown(Shutdown::Both);
+    }
+    reader
+        .join()
+        .map_err(|_| version_failure("Sway version reader panicked".into()))?;
+
+    result.map_err(|error| {
+        version_failure(format!(
+            "Sway version check deadline/channel failure: {error}"
+        ))
+    })?
+}
+
+fn validate_version(version: &swayipc::Version) -> Result<(), Failure> {
+    let components = (version.major, version.minor, version.patch);
+    if version.major < 0 || version.minor < 0 || version.patch < 0 {
+        return Err(Failure::new(
+            Cause::SwayVersionUnavailable,
+            format!("invalid Sway version components: {components:?}; requires Sway 1.10 or newer"),
+        ));
+    }
+
+    if components < (1, 10, 0) {
+        return Err(Failure::new(
+            Cause::UnsupportedSwayVersion,
+            format!(
+                "connected Sway version {}.{}.{} is unsupported; requires Sway 1.10 or newer; upgrade the running compositor",
+                version.major, version.minor, version.patch
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 enum Message {
     Subscribed,
     Event(Event),
@@ -83,6 +146,8 @@ impl Observer {
     /// Returns only after Sway acknowledges all subscriptions. Connections are supplied
     /// explicitly so neither socket discovery nor a live compositor is needed in tests.
     pub fn subscribe(socket: UnixStream, deadline: Instant) -> Result<Self, Failure> {
+        require_supported_version(&socket, deadline)?;
+
         let shutdown_socket = socket.try_clone().map_err(|error| {
             Failure::new(Cause::SwayIpc, format!("clone event socket: {error}"))
         })?;

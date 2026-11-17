@@ -9,6 +9,37 @@ use std::sync::{
 };
 use std::thread;
 
+#[test]
+fn unsupported_sway_stops_before_observation_or_application_launch() {
+    let fixture = LaunchFixture::new();
+    let config = fixture.config();
+    let (client, mut server) = socket_pair();
+    let worker = thread::spawn(move || {
+        read_request(&mut server, 7);
+        send_message(
+            &mut server,
+            7,
+            json!({
+                "major": 1, "minor": 9, "patch": 99,
+                "human_readable": "1.9.99", "loaded_config_file_name": "/fixture/config"
+            }),
+        );
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    });
+    let mut first_socket = Some(client);
+    let mut connect = || {
+        Ok(first_socket
+            .take()
+            .expect("only the version query may connect"))
+    };
+    let mut diagnostics = Diagnostics::for_test(fixture.path.join("last-run.log"));
+    let failure = load_with(&config, None, &mut connect, &mut diagnostics).unwrap_err();
+
+    assert_eq!(failure.cause, Some(Cause::UnsupportedSwayVersion));
+    assert!(!fixture.path.join("launches").exists());
+    worker.join().unwrap();
+}
+
 struct LaunchFixture {
     path: PathBuf,
 }
@@ -101,6 +132,7 @@ impl LaunchFixture {
         let expected_step_count = steps.len();
         let server = thread::spawn(move || {
             let mut consumed_steps = 0;
+            serve_supported_version(&mut events);
             let subscription: Value =
                 serde_json::from_slice(&read_request(&mut events, 2)).unwrap();
             assert_eq!(subscription, json!(["workspace", "window", "tick"]));

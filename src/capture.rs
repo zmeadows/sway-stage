@@ -355,6 +355,8 @@ pub fn snapshot() -> Result<Snapshot, Failure> {
 }
 
 fn snapshot_from_socket(socket: UnixStream, deadline: Instant) -> Result<Snapshot, Failure> {
+    observation::require_supported_version(&socket, deadline)?;
+
     let shutdown_socket = socket
         .try_clone()
         .map_err(|error| Failure::new(Cause::SwayIpc, format!("clone query socket: {error}")))?;

@@ -52,6 +52,8 @@ pub enum Cause {
     InconsistentWorkspaces,
     ApplicationStart,
     CommandRejected,
+    UnsupportedSwayVersion,
+    SwayVersionUnavailable,
     SwayIpc,
 }
 
@@ -136,6 +138,12 @@ impl Cause {
             }
             Self::CommandRejected => {
                 "Sway rejected a command or returned an unexpected reply. Check Sway's configuration and compatibility."
+            }
+            Self::UnsupportedSwayVersion => {
+                "Sway 1.10 or newer is required. Upgrade the running compositor."
+            }
+            Self::SwayVersionUnavailable => {
+                "Could not verify Sway's version. Check its IPC connection; Sway 1.10 or newer is required."
             }
             Self::SwayIpc => {
                 "Unable to communicate with Sway. Check that Sway is running and its IPC connection is available."

@@ -5,6 +5,110 @@ use std::io::{Read, Write};
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+fn version_reply(major: i32, minor: i32, patch: i32) -> Value {
+    json!({
+        "major": major, "minor": minor, "patch": patch,
+        // Policy uses numeric fields even when a Git or distribution suffix is present.
+        "human_readable": "1.10-revision (build date, branch 'HEAD')",
+        "loaded_config_file_name": "/fixture/config"
+    })
+}
+
+#[test]
+fn version_policy_compares_numeric_components_without_an_upper_limit() {
+    for (major, minor, patch, supported) in [
+        (0, 99, 99, false),
+        (1, 9, 999, false),
+        (1, 10, 0, true),
+        (1, 10, 1, true),
+        (1, 11, 0, true),
+        (1, 12, 0, true),
+        (1, 100, 0, true),
+        (2, 0, 0, true),
+    ] {
+        let (client, mut server) = socket_pair();
+        let worker = thread::spawn(move || {
+            assert!(read_request(&mut server, 7).is_empty());
+            send_message(&mut server, 7, version_reply(major, minor, patch));
+            assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        });
+        let result = require_supported_version(&client, ipc_deadline());
+        assert_eq!(
+            result.is_ok(),
+            supported,
+            "{major}.{minor}.{patch}: {result:?}"
+        );
+        if let Err(failure) = result {
+            assert_eq!(failure.cause, Some(Cause::UnsupportedSwayVersion));
+            assert!(failure.detail.contains("requires Sway 1.10 or newer"));
+            assert!(failure.detail.contains(&format!("{major}.{minor}.{patch}")));
+        }
+        drop(client);
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn invalid_or_failed_version_responses_refuse_observation() {
+    let mut missing_minor = version_reply(1, 10, 0);
+    missing_minor.as_object_mut().unwrap().remove("minor");
+    let mut invalid_minor = version_reply(1, 10, 0);
+    invalid_minor["minor"] = json!("10");
+    let mut overflowing_major = version_reply(1, 10, 0);
+    overflowing_major["major"] = json!(u64::MAX);
+    let mut responses = vec![
+        ipc_frame(7, b"not JSON"),
+        ipc_frame(4, b"{}"),
+        Vec::new(), // The compositor closes without replying.
+    ];
+    for invalid in [
+        json!({"success": false}),
+        missing_minor,
+        invalid_minor,
+        overflowing_major,
+        version_reply(-1, 10, 0),
+        version_reply(1, -10, 0),
+        version_reply(1, 10, -1),
+    ] {
+        responses.push(ipc_frame(7, &serde_json::to_vec(&invalid).unwrap()));
+    }
+
+    for response in responses {
+        let (client, mut server) = socket_pair();
+        let worker = thread::spawn(move || {
+            read_request(&mut server, 7);
+            server.write_all(&response).unwrap();
+            server.shutdown(Shutdown::Write).unwrap();
+            // No subscription or tree request follows an invalid version response.
+            assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        });
+        let failure = Observer::subscribe(client, ipc_deadline()).err().unwrap();
+        assert_eq!(failure.cause, Some(Cause::SwayVersionUnavailable));
+        assert!(failure.detail.contains("Sway version"), "{failure}");
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn version_deadline_cancels_stalled_and_fragmented_replies() {
+    for partial_length in [0, 8, 15] {
+        let (client, mut server) = socket_pair();
+        let worker = thread::spawn(move || {
+            read_request(&mut server, 7);
+            let frame = ipc_frame(7, &serde_json::to_vec(&version_reply(1, 10, 0)).unwrap());
+            server.write_all(&frame[..partial_length]).unwrap();
+            assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        });
+        let started = Instant::now();
+        let failure =
+            require_supported_version(&client, started + Duration::from_millis(100)).unwrap_err();
+        assert_eq!(failure.cause, Some(Cause::SwayVersionUnavailable));
+        assert!(failure.detail.contains("deadline"), "{failure}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+}
+
 #[test]
 fn subscription_precedes_snapshot_and_queued_events_keep_wire_order() {
     let (mut observer, mut events) = subscribed_observer();
@@ -307,6 +411,7 @@ fn failed_malformed_closed_and_stalled_subscriptions_fail() {
     ] {
         let (client, mut server) = socket_pair();
         let worker = thread::spawn(move || {
+            serve_supported_version(&mut server);
             read_request(&mut server, 2);
             server.write_all(&event_bytes).unwrap();
         });
@@ -316,13 +421,19 @@ fn failed_malformed_closed_and_stalled_subscriptions_fail() {
     // Keep the peer open with an incomplete acknowledgement. Cancellation must wake
     // both subscription reads and normal event reads without waiting for peer closure.
     let (client, mut server) = socket_pair();
-    server
-        .write_all(&ipc_frame(2, br#"{"success":true}"#)[..17])
-        .unwrap();
+    let worker = thread::spawn(move || {
+        serve_supported_version(&mut server);
+        read_request(&mut server, 2);
+        server
+            .write_all(&ipc_frame(2, br#"{"success":true}"#)[..17])
+            .unwrap();
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    });
     let start = Instant::now();
 
     assert!(Observer::subscribe(client, start + Duration::from_millis(20)).is_err());
     assert!(start.elapsed() < Duration::from_secs(1));
+    worker.join().unwrap();
 }
 
 #[test]

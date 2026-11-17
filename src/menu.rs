@@ -66,6 +66,18 @@ pub fn select_action(
     layouts_dir: Option<PathBuf>,
     profiles_dir: Option<PathBuf>,
 ) -> Result<Option<MenuAction>, Error> {
+    if let Err(error) = snapshot
+        && matches!(
+            error.cause,
+            Some(Cause::UnsupportedSwayVersion | Cause::SwayVersionUnavailable)
+        )
+    {
+        return Err(Error::new(
+            FailureKind::Snapshot(error.cause.map(Cause::summary)),
+            format!("pre-menu Sway version check: {error}"),
+        ));
+    }
+
     let mut choices = Vec::new();
     let mut unavailable = Vec::new();
     match snapshot {

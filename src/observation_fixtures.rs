@@ -56,9 +56,22 @@ pub(crate) fn read_request(socket: &mut UnixStream, expected_message_kind: u32) 
     payload
 }
 
+pub(crate) fn serve_supported_version(socket: &mut UnixStream) {
+    assert!(read_request(socket, 7).is_empty());
+    send_message(
+        socket,
+        7,
+        json!({
+            "major": 1, "minor": 10, "patch": 0,
+            "human_readable": "1.10", "loaded_config_file_name": "/fixture/config"
+        }),
+    );
+}
+
 pub(crate) fn subscribed_observer() -> (Observer, UnixStream) {
     let (client, mut server) = socket_pair();
     let worker = thread::spawn(move || {
+        serve_supported_version(&mut server);
         let subscription: Value = serde_json::from_slice(&read_request(&mut server, 2)).unwrap();
         assert_eq!(subscription, json!(["workspace", "window", "tick"]));
         send_message(&mut server, 2, json!({"success": true}));

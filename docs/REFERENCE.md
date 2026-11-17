@@ -347,6 +347,17 @@ leave the existing load log untouched.
 
 ## Platform compatibility
 
+**Sway 1.10 or newer is required** for `load`, `profile load`, `capture`,
+`profile capture`, and `menu`. These commands query the connected compositor's
+version through read-only native IPC. They refuse older versions, malformed version
+responses, or a failed version query before launching applications, selecting
+workspaces, or mutating layouts. The menu also refuses before opening Fuzzel.
+Offline list/check/show commands remain usable without Sway. Sway 1.9 and earlier
+lack IPC state information used by validation and safety checks.
+
+There is no maximum version gate. Newer versions are accepted by the minimum check,
+but acceptance does not establish compatibility with untested releases.
+
 This Linux/glibc build uses glibc `_Fork` and `close_range` (glibc 2.34+).
 Complete process-exit reporting also uses Linux `pidfd_open` (5.3+) and
 `close_range` (5.9+); if unavailable, launch can continue but early process-exit
@@ -355,7 +366,9 @@ require newer glibc symbols than the source-level minimum.
 
 The original documentation records local offline/headless verification on
 x86_64 Debian 13 (glibc 2.41, Linux 6.12, Sway 1.10.1, Foot 1.21.0).
-The repository's CI also **configures** a headless job on Ubuntu 26.04; that
-configuration alone is not proof of a completed CI run. There is no established
-minimum supported Sway version or general compatibility guarantee for other
-systems. See [release readiness](DEVELOPMENT.md#release-readiness).
+The full headless CI suite has also passed against upstream Sway releases 1.10.0,
+1.11.0, and 1.12.0 on Ubuntu 26.04 amd64. This covers native Wayland applications
+and virtual one-/two-output scenarios; it does not verify Xwayland, physical
+outputs, or visual rendering. Other systems and future releases remain unverified.
+See [CI verification](DEVELOPMENT.md#ci) and
+[release readiness](DEVELOPMENT.md#release-readiness).

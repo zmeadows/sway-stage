@@ -191,6 +191,7 @@ fn run_on_empty_workspace(fixture: &CliFixture, menu_command: &mut Command) -> O
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         assert!(!directory.join("action-pid").exists());
+        serve_supported_version(&mut query);
         assert_eq!(read_ipc_message(&mut query).0, 4);
         fs::write(directory.join("snapshot-ready"), "").unwrap();
         write_ipc_message(&mut query, 4, &empty_tree());
@@ -997,6 +998,7 @@ fn failed_snapshot_without_profiles_prevents_selection_and_is_never_retried() {
             query
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            serve_supported_version(&mut query);
             assert_eq!(read_ipc_message(&mut query).0, 4);
             // Valid JSON, invalid tree: report the decode error before opening Fuzzel.
             write_ipc_message(&mut query, 4, &json!({}));
@@ -1066,6 +1068,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
             };
             let mut query = accept();
             assert!(!directory.join("action-pid").exists());
+            serve_supported_version(&mut query);
             assert_eq!(read_ipc_message(&mut query).0, 4);
             fs::write(directory.join("snapshot-ready"), "").unwrap();
             write_ipc_message(&mut query, 4, &initial);
@@ -1076,6 +1079,7 @@ fn menu_load_constrains_fresh_observation_to_original_workspace_identity() {
             let mut events = accept();
             let pid = fs::read_to_string(directory.join("action-pid")).unwrap();
             assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+            serve_supported_version(&mut events);
             assert_eq!(read_ipc_message(&mut events).0, 2);
             write_ipc_message(&mut events, 2, &json!({"success": true}));
             let mut query = accept();
@@ -1409,10 +1413,12 @@ layout: {{id: t, command: ['{}'], {window_cwd} match: {{app_id: t}}, env: {{RESU
                 stream
             };
             let mut query = accept();
+            serve_supported_version(&mut query);
             assert_eq!(read_ipc_message(&mut query).0, 4);
             write_ipc_message(&mut query, 4, &empty);
             assert_eq!(query.read(&mut [0]).unwrap(), 0);
             let mut events = accept();
+            serve_supported_version(&mut events);
             assert_eq!(read_ipc_message(&mut events).0, 2);
             write_ipc_message(&mut events, 2, &json!({"success": true}));
             let mut populated = capture_tree();
@@ -2091,7 +2097,7 @@ fn profile_capture_reuses_snapshot_orders_targets_and_respects_inference_and_dir
         if !infer_commands {
             process.arg("--no-infer-commands");
         }
-        // serve_capture accepts exactly one GET_TREE and closes its listener. Any
+        // serve_capture answers GET_VERSION and one GET_TREE, then closes its listener. Any
         // post-menu snapshot query therefore fails instead of supplying another tree.
         let output =
             run_with_recorded_snapshot(&fixture, &mut process, profile_capture_tree(false));
