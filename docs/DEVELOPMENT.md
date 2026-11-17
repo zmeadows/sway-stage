@@ -84,6 +84,18 @@ Sway 1.9 lacks tree fields the harness requires; the current integration job
 therefore uses 26.04. The CI configuration is not itself evidence of a successful
 run; inspect the actual run status before making release claims.
 
+The development-only `.github/actions/build-sway` action prepares pinned upstream
+Sway/wlroots builds for Ubuntu 26.04 amd64. It records the installed dependency
+environment, restores only the exact build cache, and checks executable versions,
+paths, and private library loading with a cleared runtime environment on both cache
+hits and misses. `tools/ci/build_sway.py` implements its prepare/build/validate phases;
+it never starts a compositor. The action is not yet connected to the integration
+workflow. Its offline boundary checks require only Python's standard library:
+
+```sh
+python3 -B -m unittest discover -s tools/ci -v
+```
+
 On integration failure or timeout, the CI workflow uploads an
 `integration-diagnostics-attempt-N` artifact (14-day retention) containing the
 preserved session's relevant diagnostics. For example:

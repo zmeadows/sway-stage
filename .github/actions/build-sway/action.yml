@@ -1,0 +1,68 @@
+name: Build pinned Sway
+description: Provision and cache a headless-only upstream Sway build on Ubuntu 26.04 amd64
+inputs:
+  sway-tag:
+    description: Exact upstream Sway tag (1.10, 1.11, or 1.12)
+    required: true
+outputs:
+  prefix:
+    description: Validated installation prefix (bin is added to PATH)
+    value: ${{ steps.prepare.outputs.prefix }}
+runs:
+  using: composite
+  steps:
+    - name: Install build and harness prerequisites
+      shell: bash
+      run: |
+        source /etc/os-release
+        if [[ "$ID" != ubuntu || "$VERSION_ID" != 26.04 || "$(dpkg --print-architecture)" != amd64 ]]; then
+          echo 'build-sway requires Ubuntu 26.04 amd64' >&2
+          exit 1
+        fi
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends \
+          build-essential gcc-13 git ca-certificates meson ninja-build pkg-config binutils \
+          libwayland-dev wayland-protocols libdrm-dev libxkbcommon-dev libpixman-1-dev \
+          libjson-c-dev libpcre2-dev libcairo2-dev libpango1.0-dev libevdev-dev \
+          foot=1.25.0-1 fonts-dejavu-core xkb-data util-linux coreutils
+    - name: Record build inputs and exact cache identity
+      id: prepare
+      shell: bash
+      env:
+        SWAY_TAG: ${{ inputs.sway-tag }}
+      run: >-
+        /usr/bin/python3 tools/ci/build_sway.py prepare "$SWAY_TAG"
+        "$RUNNER_TEMP/sway-ci-$SWAY_TAG-inputs.json"
+    - name: Restore installed compositor
+      id: cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.prepare.outputs.prefix }}
+        key: ${{ steps.prepare.outputs.cache-key }}
+        # No fallback keys: a different input environment must build from source.
+    - name: Build and install pinned sources
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SWAY_TAG: ${{ inputs.sway-tag }}
+      run: >-
+        /usr/bin/python3 tools/ci/build_sway.py build "$SWAY_TAG"
+        "$RUNNER_TEMP/sway-ci-$SWAY_TAG-inputs.json"
+    - name: Validate installed build under a cleared environment
+      shell: bash
+      env:
+        SWAY_TAG: ${{ inputs.sway-tag }}
+      run: >-
+        /usr/bin/python3 tools/ci/build_sway.py validate "$SWAY_TAG"
+        "$RUNNER_TEMP/sway-ci-$SWAY_TAG-inputs.json"
+    - name: Cache validated installation
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.prepare.outputs.prefix }}
+        key: ${{ steps.prepare.outputs.cache-key }}
+    - name: Select this compositor for the supported launcher
+      shell: bash
+      env:
+        SWAY_PREFIX: ${{ steps.prepare.outputs.prefix }}
+      run: echo "$SWAY_PREFIX/bin" >> "$GITHUB_PATH"
